@@ -4,7 +4,6 @@ from google.oauth2.service_account import Credentials
 import json
 import os
 
-# Clave de API corregida
 LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
@@ -19,7 +18,7 @@ def clasificar_codigo(code):
     return "Licitación Pública"
 
 def main():
-    print("Iniciando sincronización desde GitHub Actions...")
+    print("Iniciando sincronización con LicitaLAB BI API...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -39,55 +38,48 @@ def main():
         sheet = client.open_by_key(SPREADSHEET_ID).sheet1
         print("¡Conexión exitosa con Google Sheets!")
     except Exception as e:
-        print(f"Error al abrir la planilla: {e}")
+        print(f"Error al abrir la planilla de Google Sheets: {e}")
         return
 
+    # Especificación oficial LicitaLAB BI API
+    url = "https://biapi.licitalab.cl/bi/v2/opportunities"
     headers = {
-        "Authorization": f"Bearer {LICITALAB_API_KEY}",
+        "x-api-key": LICITALAB_API_KEY,
         "Accept": "application/json"
     }
 
-    rutas_a_probar = [
-        "https://api.licitalab.cl/v1/tenders",
-        "https://api.licitalab.cl/v1/licitaciones",
-        "https://api.licitalab.cl/v1/opportunities",
-        "https://app.licitalab.cl/api/v1/licitaciones"
-    ]
+    print(f"Consultando endpoint oficial: {url}")
+    try:
+        res = requests.get(url, headers=headers)
+        print(f"Respuesta HTTP {res.status_code}")
+        
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("data", data) if isinstance(data, dict) else data
+            
+            if isinstance(items, list) and len(items) > 0:
+                filas_nuevas = []
+                for item in items:
+                    codigo = item.get("code") or item.get("codigo") or item.get("id") or ""
+                    tipo = clasificar_codigo(codigo)
+                    fecha = item.get("published_at") or item.get("created_at") or item.get("fecha_publicacion") or ""
+                    comprador = item.get("buyer") or item.get("comprador") or item.get("organization_name") or ""
+                    nombre = item.get("title") or item.get("name") or item.get("nombre") or ""
+                    prestacion = item.get("category") or item.get("category_name") or item.get("prestacion") or ""
 
-    items = []
-    for url in rutas_a_probar:
-        print(f"Procesando: {url}")
-        try:
-            res = requests.get(url, headers=headers)
-            print(f"Código HTTP {res.status_code}")
-            if res.status_code == 200:
-                data = res.json()
-                items = data.get("data", data) if isinstance(data, dict) else data
-                if isinstance(items, list) and len(items) > 0:
-                    print(f"¡Datos válidos encontrados en {url}!")
-                    break
-        except Exception as err:
-            print(f"Respuesta no-JSON en {url}: {err}")
+                    filas_nuevas.append([
+                        str(fecha), str(codigo), str(tipo),
+                        str(comprador), str(nombre), str(prestacion)
+                    ])
 
-    if isinstance(items, list) and len(items) > 0:
-        filas_nuevas = []
-        for item in items:
-            codigo = item.get("code") or item.get("codigo") or item.get("id") or ""
-            tipo = clasificar_codigo(codigo)
-            fecha = item.get("published_at") or item.get("fecha_publicacion") or ""
-            comprador = item.get("buyer") or item.get("comprador") or item.get("institucion") or ""
-            nombre = item.get("title") or item.get("nombre") or ""
-            prestacion = item.get("category") or item.get("prestacion") or ""
-
-            filas_nuevas.append([
-                str(fecha), str(codigo), str(tipo),
-                str(comprador), str(nombre), str(prestacion)
-            ])
-
-        sheet.append_rows(filas_nuevas)
-        print(f"¡Sincronización completada! Se agregaron {len(filas_nuevas)} filas.")
-    else:
-        print("Sincronización finalizada: No se encontraron nuevos registros en LicitaLAB en esta ejecución.")
+                sheet.append_rows(filas_nuevas)
+                print(f"¡ÉXITO TOTAL! Se agregaron {len(filas_nuevas)} oportunidades a Google Sheets.")
+            else:
+                print("Conexión exitosa: No hay nuevas oportunidades registradas actualmente en LicitaLAB.")
+        else:
+            print(f"Error devuelto por LicitaLAB API: {res.status_code} - {res.text}")
+    except Exception as err:
+        print(f"Excepción al conectar con la API: {err}")
 
 if __name__ == "__main__":
     main()
