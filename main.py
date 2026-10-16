@@ -17,32 +17,37 @@ def clasificar_tipo(tipo_raw, code_raw):
         return "Licitación Privada"
     return "Licitación Pública"
 
-def parsear_monto(val):
+def formatear_moneda(val):
+    """Convierte un número a formato CLP $ X.XXX.XXX"""
     if val is None or val == "" or str(val).upper() == "NONE":
-        return ""
+        return "$ 0"
     try:
-        num = float(val)
-        return int(num) if num.is_integer() else num
+        monto = int(float(val))
+        return f"$ {monto:,}".replace(",", ".")
     except:
         return str(val)
 
-def parsear_lista_o_texto(val):
+def limpiar_texto_o_lista(val):
+    """Limpia listas, corchetes y comillas innecesarias de las respuestas de la API."""
     if val is None or val == "" or str(val).upper() == "NONE":
         return ""
     if isinstance(val, list):
-        return ", ".join([str(x) for x in val if x])
+        items_limpios = [str(x).strip(" []'\"") for x in val if x]
+        return ", ".join(items_limpios)
+    
     val_str = str(val).strip()
-    if val_str.startswith("["):
+    if val_str.startswith("[") and val_str.endswith("]"):
         try:
             parsed = json.loads(val_str)
             if isinstance(parsed, list):
-                return ", ".join([str(x) for x in parsed if x])
+                items_limpios = [str(x).strip(" []'\"") for x in parsed if x]
+                return ", ".join(items_limpios)
         except:
             pass
-    return val_str
+    return val_str.strip(" []'\"")
 
 def main():
-    print("Iniciando sincronización completa de 11 columnas con LicitaLAB BI API...")
+    print("Iniciando sincronización formateada con LicitaLAB BI API...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -71,7 +76,6 @@ def main():
         "Accept": "application/json"
     }
 
-    print(f"Consultando endpoint oficial: {url}")
     try:
         res = requests.get(url, headers=headers)
         if res.status_code == 200:
@@ -81,66 +85,58 @@ def main():
             if isinstance(items, list) and len(items) > 0:
                 filas_nuevas = []
                 for item in items:
-                    # Columna A: Fecha Publicación
+                    # A: Fecha Publicación
                     fecha_raw = str(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or "").strip()
                     fecha = fecha_raw.split("T")[0] if "T" in fecha_raw else fecha_raw
 
-                    # Columna B: Código Proceso
+                    # B: Código Proceso
                     codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
 
-                    # Columna C: Tipo Proceso
+                    # C: Tipo Proceso
                     tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
                     tipo = clasificar_tipo(tipo_orig, codigo)
 
-                    # Columna D: Institución Compradora
+                    # D: Institución Compradora
                     comprador = str(item.get("ORGANISM") or item.get("organism") or "").strip()
 
-                    # Columna E: Nombre Proceso
+                    # E: Nombre Proceso
                     nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
 
-                    # Columna F: Prestación (Categoría RedSalud)
-                    prestacion = parsear_lista_o_texto(item.get("B_LINE_TITLE") or item.get("ORGANISM_CATEGORY"))
+                    # F: Prestación (Categoría RedSalud)
+                    prestacion = limpiar_texto_o_lista(item.get("B_LINE_TITLE") or item.get("ORGANISM_CATEGORY"))
 
-                    # Columna G: Monto Ofertado / Estimado (CLP)
-                    monto_ofertado = parsear_monto(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
+                    # G: Monto Ofertado / Estimado (CLP)
+                    monto_ofertado = formatear_moneda(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
 
-                    # Columna H: Monto Total / Estimado (CLP)
-                    monto_total = parsear_monto(item.get("TOTAL_AWARDED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
+                    # H: Monto Total / Estimado (CLP)
+                    monto_total = formatear_moneda(item.get("TOTAL_AWARDED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
 
-                    # Columna I: Estado de la Oferta
+                    # I: Estado de la Oferta
                     estado_oferta = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
 
-                    # Columna J: Adjudicatario (Proveedor Ganador)
-                    adjudicatario = parsear_lista_o_texto(item.get("AWARDED_PROVIDERS"))
+                    # J: Adjudicatario (Proveedor Ganador)
+                    adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS"))
 
-                    # Columna K: Motivo de No Adjudicación (RedSalud)
-                    motivo_no_adj = parsear_lista_o_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"))
+                    # K: Motivo de No Adjudicación (RedSalud)
+                    motivo_no_adj = limpiar_texto_o_lista(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"))
 
                     filas_nuevas.append([
-                        fecha,            # A
-                        codigo,           # B
-                        tipo,             # C
-                        comprador,        # D
-                        nombre,           # E
-                        prestacion,       # F
-                        monto_ofertado,   # G
-                        monto_total,      # H
-                        estado_oferta,    # I
-                        adjudicatario,    # J
-                        motivo_no_adj     # K
+                        fecha, codigo, tipo, comprador, nombre,
+                        prestacion, monto_ofertado, monto_total,
+                        estado_oferta, adjudicatario, motivo_no_adj
                     ])
 
-                # Limpiar la hoja y reemplazar con las 11 columnas completas
+                # Limpieza y actualización limpia
                 sheet.resize(rows=1)
-                sheet.resize(rows=1000)
+                sheet.resize(rows=len(filas_nuevas) + 1)
                 sheet.append_rows(filas_nuevas)
-                print(f"¡ÉXITO TOTAL! Se sincronizaron {len(filas_nuevas)} oportunidades con las 11 columnas (A-K) pobladas.")
+                print(f"¡Sincronización completada! {len(filas_nuevas)} filas actualizadas con formato profesional.")
             else:
-                print("Conexión exitosa: No hay oportunidades en LicitaLAB actualmente.")
+                print("No hay nuevas oportunidades disponibles.")
         else:
-            print(f"Error devuelto por LicitaLAB API: {res.status_code} - {res.text}")
+            print(f"Error HTTP {res.status_code}: {res.text}")
     except Exception as err:
-        print(f"Excepción al procesar datos: {err}")
+        print(f"Excepción: {err}")
 
 if __name__ == "__main__":
     main()
