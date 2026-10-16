@@ -37,28 +37,26 @@ def main():
         "Accept": "application/json"
     }
 
-    # Probar endpoints comunes de la API de LicitaLAB
-    endpoints = [
+    # Probar diferentes variaciones de URL de la API de LicitaLAB
+    rutas_a_probar = [
+        "https://api.licitalab.cl/v1/tenders",
+        "https://api.licitalab.cl/v1/search",
         "https://api.licitalab.cl/v1/licitaciones",
-        "https://api.licitalab.cl/v1/oportunidades",
-        "https://api.licitalab.cl/v1/procesos"
+        "https://app.licitalab.cl/api/v1/licitaciones",
+        "https://api.licitalab.cl/"
     ]
 
-    response = None
-    for url in endpoints:
+    respuesta_exitosa = None
+    for url in rutas_a_probar:
+        print(f"Probando ruta: {url}")
         res = requests.get(url, headers=headers)
+        print(f"Status {res.status_code}: {res.text[:150]}")
         if res.status_code == 200:
-            response = res
-            print(f"¡Conexión exitosa con LicitaLAB en: {url}!")
+            respuesta_exitosa = res
             break
 
-    if not response or response.status_code != 200:
-        url_fallba = "https://api.licitalab.cl/v1/licitaciones"
-        response = requests.get(url_fallba, headers=headers)
-        print(f"Respuesta API LicitaLAB: {response.status_code} - {response.text}")
-
-    if response.status_code == 200:
-        data = response.json()
+    if respuesta_exitosa:
+        data = respuesta_exitosa.json()
         items = data.get("data", data) if isinstance(data, dict) else data
         
         if isinstance(items, list) and len(items) > 0:
@@ -72,19 +70,12 @@ def main():
                 prestacion = item.get("category") or item.get("prestacion") or ""
 
                 filas_nuevas.append([
-                    str(fecha),
-                    str(codigo),
-                    str(tipo),
-                    str(comprador),
-                    str(nombre),
-                    str(prestacion)
+                    str(fecha), str(codigo), str(tipo),
+                    str(comprador), str(nombre), str(prestacion)
                 ])
 
-            if filas_nuevas:
-                sheet.append_rows(filas_nuevas)
-                print(f"¡Éxito! Se agregaron {len(filas_nuevas)} filas a Google Sheets.")
-        else:
-            print("No se encontraron registros nuevos en LicitaLAB en esta ejecución.")
+            sheet.append_rows(filas_nuevas)
+            print(f"¡Éxito! Se agregaron {len(filas_nuevas)} filas a Google Sheets.")
 
 if __name__ == "__main__":
     main()
