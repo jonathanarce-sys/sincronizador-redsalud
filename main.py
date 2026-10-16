@@ -5,7 +5,7 @@ import json
 import os
 
 LICITALAB_API_KEY = "llab_live_kxaJvD381M1h8Qj11SVe6P18cZ-nEp21MsECS5_THoE"
-SPREADSHEET_ID = "1p56mrZYhZpRrqnXCVumdW1VGYdIia53uZP8HOXYr-hg"
+SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
 def clasificar_codigo(code):
     code_upper = str(code).upper()
