@@ -4,7 +4,8 @@ from google.oauth2.service_account import Credentials
 import json
 import os
 
-LICITALAB_API_KEY = "llab_live_kxaJvD381M1h8Qj11SVe6P18cZ-nEp21MsECS5_THoE"
+# Clave de API corregida
+LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
 def clasificar_codigo(code):
