@@ -19,7 +19,7 @@ def clasificar_codigo(code):
 
 def main():
     print("Iniciando sincronización desde GitHub Actions...")
-    
+
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
         creds_dict = json.loads(creds_json)
@@ -31,50 +31,60 @@ def main():
         return
 
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-    
+
     headers = {
         "Authorization": f"Bearer {LICITALAB_API_KEY}",
         "Accept": "application/json"
     }
-    url = "https://api.licitalab.cl/v1/opportunities"
-    
-    try:
-        res = requests.get(url, headers=headers)
-        if res.status_code != 200:
-            print(f"Respuesta API LicitaLAB: {res.status_code} - {res.text}")
-            return
 
-        data = res.json()
+    # Probar endpoints comunes de la API de LicitaLAB
+    endpoints = [
+        "https://api.licitalab.cl/v1/licitaciones",
+        "https://api.licitalab.cl/v1/oportunidades",
+        "https://api.licitalab.cl/v1/procesos"
+    ]
+
+    response = None
+    for url in endpoints:
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            response = res
+            print(f"¡Conexión exitosa con LicitaLAB en: {url}!")
+            break
+
+    if not response or response.status_code != 200:
+        url_fallba = "https://api.licitalab.cl/v1/licitaciones"
+        response = requests.get(url_fallba, headers=headers)
+        print(f"Respuesta API LicitaLAB: {response.status_code} - {response.text}")
+
+    if response.status_code == 200:
+        data = response.json()
         items = data.get("data", data) if isinstance(data, dict) else data
         
-        filas_nuevas = []
-        for item in items:
-            code = item.get("code") or item.get("opportunity_code") or ""
-            tipo_proceso = clasificar_codigo(code)
-            fecha_pub = (item.get("published_at") or item.get("created_at") or "")[:10]
-            monto = float(item.get("estimated_amount") or item.get("amount") or 0)
-            
-            filas_nuevas.append([
-                fecha_pub,
-                code,
-                tipo_proceso,
-                item.get("organism_name") or item.get("organism") or "",
-                item.get("name") or item.get("title") or "",
-                item.get("category_name") or item.get("category") or "Salud",
-                monto,
-                monto,
-                "Publicada / En Proceso",
-                "Pendiente de Adjudicación",
-                "En proceso de postulación y evaluación de ofertas"
-            ])
+        if isinstance(items, list) and len(items) > 0:
+            filas_nuevas = []
+            for item in items:
+                codigo = item.get("code") or item.get("codigo") or item.get("id") or ""
+                tipo = clasificar_codigo(codigo)
+                fecha = item.get("published_at") or item.get("fecha_publicacion") or ""
+                comprador = item.get("buyer") or item.get("comprador") or item.get("institucion") or ""
+                nombre = item.get("title") or item.get("nombre") or ""
+                prestacion = item.get("category") or item.get("prestacion") or ""
 
-        if filas_nuevas:
-            sheet.append_rows(filas_nuevas)
-            print(f"¡Éxito! Se insertaron {len(filas_nuevas)} filas en Google Sheets.")
+                filas_nuevas.append([
+                    str(fecha),
+                    str(codigo),
+                    str(tipo),
+                    str(comprador),
+                    str(nombre),
+                    str(prestacion)
+                ])
+
+            if filas_nuevas:
+                sheet.append_rows(filas_nuevas)
+                print(f"¡Éxito! Se agregaron {len(filas_nuevas)} filas a Google Sheets.")
         else:
-            print("No hay nuevas oportunidades en esta ejecución.")
-    except Exception as e:
-        print(f"Error durante la ejecución: {e}")
+            print("No se encontraron registros nuevos en LicitaLAB en esta ejecución.")
 
 if __name__ == "__main__":
     main()
