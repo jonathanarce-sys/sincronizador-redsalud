@@ -7,38 +7,18 @@ import os
 LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
-def clasificar_codigo(code):
-    code_upper = str(code).upper()
-    if "COT" in code_upper or "CO" in code_upper:
-        if "COT" in code_upper:
-            return "Compra Ágil"
+def clasificar_tipo(tipo_raw, code_raw):
+    code_upper = str(code_raw).upper()
+    tipo_upper = str(tipo_raw).upper()
+
+    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper:
+        return "Compra Ágil"
+    elif "CO" in code_upper or "PRIVATE" in tipo_upper:
         return "Licitación Privada"
-    elif any(suf in code_upper for suf in ["LE", "LP", "LR", "L1", "E2"]):
-        return "Licitación Pública"
     return "Licitación Pública"
 
-def extraer_valor(item, claves):
-    """Busca en el diccionario la primera clave existente o subclave anidada."""
-    for clave in claves:
-        if "." in clave:
-            partes = clave.split(".")
-            val = item
-            for p in partes:
-                if isinstance(val, dict):
-                    val = val.get(p)
-                else:
-                    val = None
-                    break
-            if val is not None and str(val).strip() != "":
-                return str(val).strip()
-        else:
-            val = item.get(clave)
-            if val is not None and str(val).strip() != "":
-                return str(val).strip()
-    return ""
-
 def main():
-    print("Iniciando sincronización con LicitaLAB BI API...")
+    print("Iniciando sincronización exacta con LicitaLAB BI API...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -75,33 +55,47 @@ def main():
             items = data.get("data", data) if isinstance(data, dict) else data
             
             if isinstance(items, list) and len(items) > 0:
-                print(f"Estructura recibida. Primer elemento JSON: {items[0]}")
                 filas_nuevas = []
                 for item in items:
-                    # Búsqueda exhaustiva de claves
-                    codigo = extraer_valor(item, ["external_code", "code", "codigo", "id", "market_code", "opportunity_code"])
-                    tipo = clasificar_codigo(codigo)
+                    # Mapeo exacto basado en la respuesta real del servidor
+                    codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
+                    tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
+                    tipo = clasificar_tipo(tipo_orig, codigo)
                     
                     # Fecha
-                    fecha_raw = extraer_valor(item, ["published_at", "publication_date", "created_at", "fecha_publicacion", "updated_at"])
+                    fecha_raw = str(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or "").strip()
                     fecha = fecha_raw.split("T")[0] if "T" in fecha_raw else fecha_raw
                     
                     # Comprador
-                    comprador = extraer_valor(item, ["buyer_name", "buyer.name", "organization_name", "buyer_organization", "comprador", "buyer", "institucion"])
+                    comprador = str(item.get("ORGANISM") or item.get("organism") or "").strip()
                     
-                    # Nombre / Título
-                    nombre = extraer_valor(item, ["title", "name", "nombre", "description", "opportunity_title"])
+                    # Nombre Proceso
+                    nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
                     
                     # Prestación / Categoría
-                    prestacion = extraer_valor(item, ["category_name", "category.name", "category", "prestacion", "sector", "rubro"])
+                    b_line = item.get("B_LINE_TITLE") or item.get("b_line_title") or ""
+                    if isinstance(b_line, list) and len(b_line) > 0:
+                        prestacion = ", ".join([str(x) for x in b_line])
+                    elif isinstance(b_line, str) and b_line.startswith("["):
+                        try:
+                            parsed = json.loads(b_line)
+                            prestacion = ", ".join(parsed)
+                        except:
+                            prestacion = b_line
+                    else:
+                        prestacion = str(item.get("ORGANISM_CATEGORY") or b_line or "").strip()
 
                     filas_nuevas.append([
                         fecha, codigo, tipo, comprador, nombre, prestacion
                     ])
 
-                # Limpiar datos previos si es necesario o añadir nuevas filas
+                # Limpiar datos antiguos de la tabla (manteniendo encabezados en fila 1)
+                sheet.resize(rows=1)
+                sheet.resize(rows=1000)
+                
+                # Escribir todas las filas completas
                 sheet.append_rows(filas_nuevas)
-                print(f"¡ÉXITO TOTAL! Se agregaron {len(filas_nuevas)} oportunidades completas a Google Sheets.")
+                print(f"¡ÉXITO TOTAL Y ABSOLUTO! Se actualizaron {len(filas_nuevas)} oportunidades con todas sus columnas pobladas.")
             else:
                 print("Conexión exitosa: No hay oportunidades en LicitaLAB actualmente.")
         else:
