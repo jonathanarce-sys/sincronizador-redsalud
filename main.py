@@ -3,6 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
+import time
 
 LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
@@ -45,7 +46,6 @@ def limpiar_texto_o_lista(val):
     return val_str.strip(" []'\"")
 
 def procesar_item(item):
-    """Extrae y formatea las 11 columnas a partir de un item de LicitaLAB."""
     fecha_raw = str(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or "").strip()
     fecha = fecha_raw.split("T")[0] if "T" in fecha_raw else fecha_raw
 
@@ -70,7 +70,7 @@ def procesar_item(item):
     ]
 
 def main():
-    print("Iniciando Sincronización Incremental (Historización sin Duplicados)...")
+    print("Iniciando Descarga Multipágina de LicitaLAB BI (Carga Completa e Incremental)...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -93,17 +93,8 @@ def main():
         print(f"Error al abrir la planilla de Google Sheets: {e}")
         return
 
-    # 1. Leer datos existentes en Google Sheets
+    # 1. Obtenemos lo que ya existe en la planilla
     todas_las_filas = sheet.get_all_values()
-    
-    headers = [
-        "Fecha Publicación", "Código Proceso", "Tipo Proceso", 
-        "Institución Compradora", "Nombre Proceso", "Prestación (Categoría RedSalud)",
-        "Monto Ofertado / Estimado (CLP)", "Monto Total / Estimado (CLP)",
-        "Estado de la Oferta", "Adjudicatario (Proveedor Ganador)", "Motivo de No Adjudicación (RedSalud)"
-    ]
-
-    # Mapeo de filas por Código Proceso (Columna B / Índice 1)
     mapa_filas = {}
     if len(todas_las_filas) > 1:
         for idx, fila in enumerate(todas_las_filas[1:], start=2):
@@ -114,64 +105,78 @@ def main():
                     "datos": fila
                 }
 
-    print(f"Registros existentes en Google Sheets: {len(mapa_filas)}")
+    print(f"Registros previos en Google Sheets: {len(mapa_filas)}")
 
-    # 2. Consultar LicitaLAB BI API
-    url = "https://biapi.licitalab.cl/bi/v2/opportunities"
+    # 2. Bucle para recorrer TODAS las páginas de la API de LicitaLAB
     headers_api = {
         "x-api-key": LICITALAB_API_KEY,
         "Accept": "application/json"
     }
 
-    try:
-        res = requests.get(url, headers=headers_api)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", data) if isinstance(data, dict) else data
-            
-            if isinstance(items, list) and len(items) > 0:
-                nuevas_filas = []
-                actualizadas_cnt = 0
+    page = 1
+    max_pages = 20  # Permite traer hasta 20,000 registros históricos
+    nuevas_filas = []
+    actualizadas_cnt = 0
 
+    while page <= max_pages:
+        url = f"https://biapi.licitalab.cl/bi/v2/opportunities?page={page}"
+        print(f"Consultando página {page}: {url}")
+        try:
+            res = requests.get(url, headers=headers_api)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("data", data) if isinstance(data, dict) else data
+                
+                if not isinstance(items, list) or len(items) == 0:
+                    print(f"Página {page} vacía. Se alcanzó el final de los datos.")
+                    break
+                
+                print(f"Página {page} recibida con {len(items)} registros.")
+                
                 for item in items:
-                    fila_procesada = procesar_item(item)
-                    codigo_item = fila_procesada[1]
+                    fila_proc = procesar_item(item)
+                    codigo_item = fila_proc[1]
 
                     if not codigo_item:
                         continue
 
-                    # Si el código ya existe en la hoja, verificamos si cambió de estado o monto
                     if codigo_item in mapa_filas:
+                        # Si existe, verificamos si requiere actualizar estado
                         num_fila = mapa_filas[codigo_item]["num_fila"]
                         datos_viejos = mapa_filas[codigo_item]["datos"]
-
-                        # Si hay cambios en los datos, actualizamos esa fila específica
-                        if datos_viejos != fila_procesada:
-                            sheet.update(f"A{num_fila}:K{num_fila}", [fila_procesada])
-                            mapa_filas[codigo_item]["datos"] = fila_procesada
+                        if datos_viejos != fila_proc:
+                            sheet.update(f"A{num_fila}:K{num_fila}", [fila_proc])
+                            mapa_filas[codigo_item]["datos"] = fila_proc
                             actualizadas_cnt += 1
                     else:
-                        # Si es una licitación/compra ágil totalmente nueva, la guardamos para agregarla al final
-                        nuevas_filas.append(fila_procesada)
-                        mapa_filas[codigo_item] = {"datos": fila_procesada}
+                        nuevas_filas.append(fila_proc)
+                        mapa_filas[codigo_item] = {"datos": fila_proc}
 
-                # Agregar únicamente las filas nuevas al final de la planilla
-                if nuevas_filas:
-                    sheet.append_rows(nuevas_filas)
-                    print(f"¡Éxito! Se agregaron {len(nuevas_filas)} nuevos registros a la base de datos.")
-                
-                if actualizadas_cnt > 0:
-                    print(f"¡Éxito! Se actualizaron los estados de {actualizadas_cnt} registros existentes.")
-
-                if not nuevas_filas and actualizadas_cnt == 0:
-                    print("Sincronización finalizada: No hubo cambios de estado ni registros nuevos en este ciclo.")
-
+                page += 1
+                time.sleep(0.5) # Pausa amigable para no saturar la API
             else:
-                print("No se encontraron elementos en LicitaLAB.")
-        else:
-            print(f"Error HTTP {res.status_code}: {res.text}")
-    except Exception as err:
-        print(f"Excepción durante la sincronización incremental: {err}")
+                print(f"Fin de paginación o error HTTP {res.status_code} en página {page}")
+                break
+        except Exception as err:
+            print(f"Excepción en página {page}: {err}")
+            break
+
+    # 3. Guardar todos los nuevos registros acumulados
+    if nuevas_filas:
+        print(f"Guardando {len(nuevas_filas)} registros históricos nuevos en Google Sheets...")
+        # Insertar en bloques para evitar exceder límites de Google API
+        chunk_size = 500
+        for i in range(0, len(nuevas_filas), chunk_size):
+            chunk = nuevas_filas[i:i + chunk_size]
+            sheet.append_rows(chunk)
+            time.sleep(1)
+        print(f"¡ÉXITO TOTAL! Se agregaron {len(nuevas_filas)} nuevos registros a tu historial.")
+    
+    if actualizadas_cnt > 0:
+        print(f"¡ÉXITO! Se actualizaron {actualizadas_cnt} registros existentes.")
+
+    if not nuevas_filas and actualizadas_cnt == 0:
+        print("Sincronización finalizada: Toda la base de datos está al día.")
 
 if __name__ == "__main__":
     main()
