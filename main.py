@@ -3,6 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
+import re
 import time
 
 LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
@@ -45,6 +46,22 @@ def limpiar_texto_o_lista(val):
             pass
     return val_str.strip(" []'\"")
 
+def extraer_motivo_no_adjudicacion(item):
+    """Extrae el motivo tipificado oficial de RedSalud limpiando notas de usuario."""
+    # 1. Priorizar estado tipificado de gestión
+    motivo_oficial = item.get("MANAGED_STATUS_NAME") or item.get("DISCARD_REASON") or item.get("managed_status_name")
+    if motivo_oficial and str(motivo_oficial).strip() not in ["", "None", "null"]:
+        return str(motivo_oficial).strip()
+
+    # 2. Si se recurre a COMMENTS, limpiar fechas y nombres
+    comentario = limpiar_texto_o_lista(item.get("COMMENTS"))
+    if comentario:
+        # Remover prefijos tipo "2026-10-16 María Josefina Segura]"
+        comentario_limpio = re.sub(r"^\[?\d{4}-\d{2}-\d{2}[^\]]*\]?\s*", "", comentario)
+        return comentario_limpio.strip()
+
+    return ""
+
 def procesar_item(item):
     fecha_raw = str(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or "").strip()
     fecha = fecha_raw.split("T")[0] if "T" in fecha_raw else fecha_raw
@@ -59,9 +76,11 @@ def procesar_item(item):
 
     monto_ofertado = formatear_moneda(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
     monto_total = formatear_moneda(item.get("TOTAL_AWARDED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
-    estado_oferta = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
+    estado_oferta = str(item.get("OPPORTUNITY_STATUS") or "").strip()
     adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS"))
-    motivo_no_adj = limpiar_texto_o_lista(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"))
+    
+    # Extraer el motivo correcto tipificado
+    motivo_no_adj = extraer_motivo_no_adjudicacion(item)
 
     return [
         fecha, codigo, tipo, comprador, nombre,
@@ -70,7 +89,7 @@ def procesar_item(item):
     ]
 
 def main():
-    print("Iniciando Descarga Multipágina de LicitaLAB BI (Carga Completa e Incremental)...")
+    print("Iniciando Descarga y Calibración de Datos de LicitaLAB BI...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -93,30 +112,14 @@ def main():
         print(f"Error al abrir la planilla de Google Sheets: {e}")
         return
 
-    # 1. Obtenemos lo que ya existe en la planilla
-    todas_las_filas = sheet.get_all_values()
-    mapa_filas = {}
-    if len(todas_las_filas) > 1:
-        for idx, fila in enumerate(todas_las_filas[1:], start=2):
-            if len(fila) > 1 and fila[1].strip():
-                codigo_existente = fila[1].strip()
-                mapa_filas[codigo_existente] = {
-                    "num_fila": idx,
-                    "datos": fila
-                }
-
-    print(f"Registros previos en Google Sheets: {len(mapa_filas)}")
-
-    # 2. Bucle para recorrer TODAS las páginas de la API de LicitaLAB
     headers_api = {
         "x-api-key": LICITALAB_API_KEY,
         "Accept": "application/json"
     }
 
     page = 1
-    max_pages = 20  # Permite traer hasta 20,000 registros históricos
-    nuevas_filas = []
-    actualizadas_cnt = 0
+    max_pages = 20
+    todas_las_filas = []
 
     while page <= max_pages:
         url = f"https://biapi.licitalab.cl/bi/v2/opportunities?page={page}"
@@ -131,29 +134,13 @@ def main():
                     print(f"Página {page} vacía. Se alcanzó el final de los datos.")
                     break
                 
-                print(f"Página {page} recibida con {len(items)} registros.")
-                
                 for item in items:
                     fila_proc = procesar_item(item)
-                    codigo_item = fila_proc[1]
-
-                    if not codigo_item:
-                        continue
-
-                    if codigo_item in mapa_filas:
-                        # Si existe, verificamos si requiere actualizar estado
-                        num_fila = mapa_filas[codigo_item]["num_fila"]
-                        datos_viejos = mapa_filas[codigo_item]["datos"]
-                        if datos_viejos != fila_proc:
-                            sheet.update(f"A{num_fila}:K{num_fila}", [fila_proc])
-                            mapa_filas[codigo_item]["datos"] = fila_proc
-                            actualizadas_cnt += 1
-                    else:
-                        nuevas_filas.append(fila_proc)
-                        mapa_filas[codigo_item] = {"datos": fila_proc}
+                    if fila_proc[1]: # si tiene código de proceso
+                        todas_las_filas.append(fila_proc)
 
                 page += 1
-                time.sleep(0.5) # Pausa amigable para no saturar la API
+                time.sleep(0.5)
             else:
                 print(f"Fin de paginación o error HTTP {res.status_code} en página {page}")
                 break
@@ -161,22 +148,20 @@ def main():
             print(f"Excepción en página {page}: {err}")
             break
 
-    # 3. Guardar todos los nuevos registros acumulados
-    if nuevas_filas:
-        print(f"Guardando {len(nuevas_filas)} registros históricos nuevos en Google Sheets...")
-        # Insertar en bloques para evitar exceder límites de Google API
+    if todas_las_filas:
+        print(f"Actualizando {len(todas_las_filas)} filas calibradas en Google Sheets...")
+        
+        # Reescribir la tabla limpia manteniendo los encabezados
+        sheet.resize(rows=1)
+        sheet.resize(rows=len(todas_las_filas) + 1)
+        
         chunk_size = 500
-        for i in range(0, len(nuevas_filas), chunk_size):
-            chunk = nuevas_filas[i:i + chunk_size]
+        for i in range(0, len(todas_las_filas), chunk_size):
+            chunk = todas_las_filas[i:i + chunk_size]
             sheet.append_rows(chunk)
             time.sleep(1)
-        print(f"¡ÉXITO TOTAL! Se agregaron {len(nuevas_filas)} nuevos registros a tu historial.")
-    
-    if actualizadas_cnt > 0:
-        print(f"¡ÉXITO! Se actualizaron {actualizadas_cnt} registros existentes.")
-
-    if not nuevas_filas and actualizadas_cnt == 0:
-        print("Sincronización finalizada: Toda la base de datos está al día.")
+            
+        print(f"¡ÉXITO TOTAL! Se calibraron las 11 columnas con los motivos tipificados oficiales.")
 
 if __name__ == "__main__":
     main()
