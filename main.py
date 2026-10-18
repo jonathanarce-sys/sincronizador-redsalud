@@ -47,19 +47,27 @@ def limpiar_texto_o_lista(val):
     return val_str.strip(" []'\"")
 
 def extraer_motivo_no_adjudicacion(item):
-    """Extrae el motivo tipificado oficial de RedSalud limpiando notas de usuario."""
-    # 1. Priorizar estado tipificado de gestión
     motivo_oficial = item.get("MANAGED_STATUS_NAME") or item.get("DISCARD_REASON") or item.get("managed_status_name")
     if motivo_oficial and str(motivo_oficial).strip() not in ["", "None", "null"]:
         return str(motivo_oficial).strip()
 
-    # 2. Si se recurre a COMMENTS, limpiar fechas y nombres
     comentario = limpiar_texto_o_lista(item.get("COMMENTS"))
     if comentario:
-        # Remover prefijos tipo "2026-10-16 María Josefina Segura]"
         comentario_limpio = re.sub(r"^\[?\d{4}-\d{2}-\d{2}[^\]]*\]?\s*", "", comentario)
         return comentario_limpio.strip()
 
+    return ""
+
+def extraer_criterios_evaluacion(item):
+    """Extrae los criterios de evaluación, ponderaciones o puntaje asignado."""
+    criterios = item.get("EVALUATION_CRITERIA") or item.get("CRITERIA") or item.get("EVALUATION_SUMMARY") or item.get("evaluation_criteria")
+    if criterios:
+        return limpiar_texto_o_lista(criterios)
+    
+    score = item.get("SCORE") or item.get("score")
+    if score is not None and str(score).strip() not in ["", "None", "null"]:
+        return f"Puntaje Asignado: {score}"
+        
     return ""
 
 def procesar_item(item):
@@ -79,17 +87,20 @@ def procesar_item(item):
     estado_oferta = str(item.get("OPPORTUNITY_STATUS") or "").strip()
     adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS"))
     
-    # Extraer el motivo correcto tipificado
     motivo_no_adj = extraer_motivo_no_adjudicacion(item)
+    
+    # Nueva Columna L: Criterios de Evaluación
+    criterios_eval = extraer_criterios_evaluacion(item)
 
     return [
         fecha, codigo, tipo, comprador, nombre,
         prestacion, monto_ofertado, monto_total,
-        estado_oferta, adjudicatario, motivo_no_adj
+        estado_oferta, adjudicatario, motivo_no_adj,
+        criterios_eval
     ]
 
 def main():
-    print("Iniciando Descarga y Calibración de Datos de LicitaLAB BI...")
+    print("Iniciando Sincronización con 12 Columnas (incluye Criterios de Evaluación)...")
 
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
@@ -136,7 +147,7 @@ def main():
                 
                 for item in items:
                     fila_proc = procesar_item(item)
-                    if fila_proc[1]: # si tiene código de proceso
+                    if fila_proc[1]:
                         todas_las_filas.append(fila_proc)
 
                 page += 1
@@ -149,9 +160,8 @@ def main():
             break
 
     if todas_las_filas:
-        print(f"Actualizando {len(todas_las_filas)} filas calibradas en Google Sheets...")
+        print(f"Actualizando {len(todas_las_filas)} filas con las 12 columnas en Google Sheets...")
         
-        # Reescribir la tabla limpia manteniendo los encabezados
         sheet.resize(rows=1)
         sheet.resize(rows=len(todas_las_filas) + 1)
         
@@ -161,7 +171,7 @@ def main():
             sheet.append_rows(chunk)
             time.sleep(1)
             
-        print(f"¡ÉXITO TOTAL! Se calibraron las 11 columnas con los motivos tipificados oficiales.")
+        print(f"¡ÉXITO TOTAL! Las 12 columnas (A-L) quedaron sincronizadas correctamente.")
 
 if __name__ == "__main__":
     main()
