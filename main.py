@@ -3,10 +3,12 @@ import json
 import base64
 import sys
 import pandas as pd
+import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+LICITALAB_API_URL = os.getenv("LICITALAB_API_URL", "https://api.licitalab.cl/v1/procesos") # Ajustar endpoint según documentación
 
 def log(msg):
     print(msg, flush=True)
@@ -20,7 +22,6 @@ def obtener_credenciales_google():
 
     try:
         creds_dict = json.loads(gcp_secret, strict=False)
-        log("✅ Credenciales leídas como JSON directo.")
     except Exception:
         try:
             missing_padding = len(gcp_secret) % 4
@@ -28,7 +29,6 @@ def obtener_credenciales_google():
                 gcp_secret += '=' * (4 - missing_padding)
             json_bytes = base64.b64decode(gcp_secret)
             creds_dict = json.loads(json_bytes.decode("utf-8"))
-            log("✅ Credenciales leídas como Base64.")
         except Exception as e:
             raise ValueError(f"❌ Error al decodificar credenciales: {e}")
 
@@ -41,49 +41,87 @@ def obtener_credenciales_google():
     ]
     return Credentials.from_service_account_info(creds_dict, scopes=scopes)
 
-def procesar_y_reestructurar_columnas(df: pd.DataFrame) -> pd.DataFrame:
-    """Asegura la presencia y orden de Fecha de Cierre, Comentarios y Workspace."""
+
+def obtener_datos_licitalab():
+    """Consulta la API de LicitaLAB para obtener la lista real de procesos con Workspace, Cierre, etc."""
+    api_key = os.getenv("LICITALAB_API_KEY", "").strip()
+    if not api_key:
+        log("⚠️ LICITALAB_API_KEY no configurada. Se procesará reestructuración sobre datos locales.")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
     
-    # 1. Eliminar Criterios de Evaluación y Puntajes
-    cols_eliminar = [c for c in df.columns if "criterio" in c.lower() or "evaluaci" in c.lower() or "puntaje" in c.lower()]
-    if cols_eliminar:
-        log(f"🗑️ Eliminando columnas obsoletas: {cols_eliminar}")
-        df = df.drop(columns=cols_eliminar, errors="ignore")
+    params = {
+        "fecha_desde": "2025-01-01"
+    }
 
-    # 2. Filtrar fechas 2025+
-    col_inicio = next((c for c in df.columns if "publica" in c.lower() or "inicio" in c.lower() or "creaci" in c.lower()), None)
-    if col_inicio:
-        df[col_inicio] = pd.to_datetime(df[col_inicio], errors="coerce", dayfirst=True)
-        df = df[df[col_inicio].dt.year >= 2025]
-        df[col_inicio] = df[col_inicio].dt.strftime("%Y-%m-%d")
-        log(f"📅 Registros conservados (Año 2025+): {len(df)}")
+    try:
+        log("🌐 Consultando la API de LicitaLAB para obtener procesos 2025+...")
+        response = requests.get(LICITALAB_API_URL, headers=headers, params=params, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get("data", data) if isinstance(data, dict) else data
+            log(f"✅ Se obtuvieron {len(items)} registros en vivo desde LicitaLAB.")
+            return pd.DataFrame(items)
+        else:
+            log(f"⚠️ Error al consultar LicitaLAB API (Status {response.status_code}): {response.text}")
+            return None
+    except Exception as e:
+        log(f"⚠️ Excepción durante la llamada a la API de LicitaLAB: {e}")
+        return None
 
-    # 3. Crear 'Fecha de Cierre' si no existe o mapearla desde LicitaLAB
-    col_cierre = next((c for c in df.columns if "cierre" in c.lower() or "termino" in c.lower() or "limite" in c.lower() or "postulaci" in c.lower()), None)
-    if not col_cierre or col_cierre not in df.columns:
-        df["Fecha de Cierre"] = "Pendiente / Sin fecha"
-        log("➕ Creando encabezado: Fecha de Cierre")
+
+def reestructurar_base_maestra(df: pd.DataFrame) -> pd.DataFrame:
+    """Estructura y limpia las columnas garantizando los datos exactos requeridos."""
+    if df.empty:
+        return df
+
+    # Normalizar nombres de columnas a minúsculas para mapeo flexible
+    cols_map = {c: c.strip() for c in df.columns}
+    df.rename(columns=cols_map, inplace=True)
+
+    # Mapeos dinámicos desde API o Sheet
+    col_workspace = next((c for c in df.columns if "workspace" in c.lower()), None)
+    col_id = next((c for c in df.columns if "codigo" in c.lower() or c.lower() in ["id", "code"]), None)
+    col_estado = next((c for c in df.columns if "estado" in c.lower() or "state" in c.lower()), None)
+    col_tipo = next((c for c in df.columns if "tipo" in c.lower() or "type" in c.lower()), None)
+    col_publicacion = next((c for c in df.columns if "publica" in c.lower() or "inicio" in c.lower()), None)
+    col_cierre = next((c for c in df.columns if "cierre" in c.lower() or "limite" in c.lower()), None)
+
+    # Formatear fechas
+    if col_publicacion:
+        df["Fecha Publicación"] = pd.to_datetime(df[col_publicacion], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
     else:
-        df.rename(columns={col_cierre: "Fecha de Cierre"}, inplace=True)
+        df["Fecha Publicación"] = "2025-01-01"
 
-    # 4. Crear 'Comentarios' si no existe
-    col_comentarios = next((c for c in df.columns if "comentario" in c.lower() or "observaci" in c.lower() or "nota" in c.lower()), None)
-    if not col_comentarios or col_comentarios not in df.columns:
+    if col_cierre:
+        df["Fecha de Cierre"] = pd.to_datetime(df[col_cierre], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
+    else:
+        df["Fecha de Cierre"] = "N/A"
+
+    # Filtrar solo 2025+
+    df["_year"] = pd.to_datetime(df["Fecha Publicación"], errors="coerce").dt.year
+    df = df[df["_year"] >= 2025].drop(columns=["_year"], errors="ignore")
+
+    # Mapear Workspace
+    if col_workspace:
+        df["Workspace"] = df[col_workspace]
+    else:
+        df["Workspace"] = "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA"
+
+    # Normalizar Tipo de proceso (tender -> Licitación, agile -> Compra Ágil)
+    if col_tipo:
+        df["Tipo Proceso"] = df[col_tipo].replace({"tender": "Licitación Pública", "agile": "Compra Ágil"})
+
+    # Asegurar columnas de comentarios y montos
+    if "Comentarios" not in df.columns:
         df["Comentarios"] = ""
-        log("➕ Creando encabezado: Comentarios")
-    else:
-        df.rename(columns={col_comentarios: "Comentarios"}, inplace=True)
 
-    # 5. Crear 'Workspace' si no existe
-    col_ws = next((c for c in df.columns if "workspace" in c.lower() or "equipo" in c.lower() or "espacio" in c.lower()), None)
-    if not col_ws or col_ws not in df.columns:
-        df["Workspace"] = "General RedSalud"
-        log("➕ Creando encabezado: Workspace")
-    else:
-        df.rename(columns={col_ws: "Workspace"}, inplace=True)
-
-    # 6. Calcular 'Monto Total + IVA (Adjudicado / Estimado)'
-    col_monto = next((c for c in df.columns if "monto" in c.lower() or "estimado" in c.lower() or "total" in c.lower()), None)
+    col_monto = next((c for c in df.columns if "monto" in c.lower() or "total" in c.lower() or "estimado" in c.lower()), None)
     def calc_iva(val):
         try:
             v = float(str(val).replace("$", "").replace(".", "").replace(",", ".").strip())
@@ -93,58 +131,59 @@ def procesar_y_reestructurar_columnas(df: pd.DataFrame) -> pd.DataFrame:
 
     if col_monto:
         df["Monto Total + IVA (Adjudicado / Estimado)"] = df[col_monto].apply(calc_iva)
+    else:
+        df["Monto Total + IVA (Adjudicado / Estimado)"] = "$ 0"
 
-    # 7. Definir orden oficial de la Base Maestra
-    columnas_ordenadas = [
-        "Fecha Publicación",
-        "Fecha de Cierre",
+    # Eliminar columnas obsoletas de evaluación
+    cols_eliminar = [c for c in df.columns if "criterio" in c.lower() or "evaluaci" in c.lower() or "puntaje" in c.lower()]
+    df.drop(columns=cols_eliminar, inplace=True, errors="ignore")
+
+    # Orden final de las columnas en Google Sheets
+    orden_oficial = [
+        "Workspace",
         "Código Proceso",
         "Tipo Proceso",
-        "Institución Compradora",
-        "Nombre Proceso",
-        "Prestación (Categoría RedSalud)",
-        "Monto Ofertado / Estimado (CLP)",
+        "Estado",
+        "Fecha Publicación",
+        "Fecha de Cierre",
         "Monto Total + IVA (Adjudicado / Estimado)",
-        "Estado de la Oferta",
-        "Workspace",
-        "Adjudicatario (Proveedor Ganador)",
-        "Motivo de No Adjudicación (RedSalud)",
         "Comentarios"
     ]
 
-    # Mantener columnas adicionales que pudiesen existir
-    cols_finales = [c for c in columnas_ordenadas if c in df.columns] + \
-                   [c for c in df.columns if c not in columnas_ordenadas]
+    cols_finales = [c for c in orden_oficial if c in df.columns] + \
+                   [c for c in df.columns if c not in orden_oficial and c not in [col_workspace, col_cierre, col_publicacion]]
 
     return df[cols_finales]
 
+
 def sincronizar():
-    log("🔄 Iniciando sincronización de Base Maestra...")
+    log("🔄 Iniciando sincronización de la Base Maestra desde LicitaLAB...")
     creds = obtener_credenciales_google()
     client = gspread.authorize(creds)
-
-    log(f"📄 Conectando a la planilla ID: {SPREADSHEET_ID}")
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-    raw_records = sheet.get_all_records()
-    df_existente = pd.DataFrame(raw_records)
+    # 1. Intentar obtener datos actualizados desde la API de LicitaLAB
+    df_licitalab = obtener_datos_licitalab()
 
-    if df_existente.empty:
-        log("⚠️ La planilla está vacía actualmente.")
-        return
+    if df_licitalab is not None and not df_licitalab.empty:
+        df_final = reestructurar_base_maestra(df_licitalab)
+    else:
+        log("📋 Leyendo datos actuales de la planilla Google Sheets para reestructuración...")
+        raw_records = sheet.get_all_records()
+        df_sheet = pd.DataFrame(raw_records)
+        df_final = reestructurar_base_maestra(df_sheet)
 
-    log(f"📊 Total de registros leídos: {len(df_existente)}")
+    log(f"📊 Total de registros procesados del año 2025+: {len(df_final)}")
 
-    df_actualizado = procesar_y_reestructurar_columnas(df_existente)
-
-    log("🧹 Limpiando contenido antiguo de la hoja...")
+    log("🧹 Limpiando la hoja de Google Sheets...")
     sheet.clear()
 
-    log("📝 Escribiendo los datos con los nuevos encabezados (Fecha de Cierre, Workspace, Comentarios)...")
-    valores = [df_actualizado.columns.tolist()] + df_actualizado.fillna("").astype(str).values.tolist()
+    log("📝 Escribiendo datos reales de Workspace, Publicación y Cierre...")
+    valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
     sheet.update(range_name="A1", values=valores)
 
-    log("🚀 ¡Base Maestra reestructurada y actualizada exitosamente!")
+    log("🚀 ¡Base Maestra sincronizada con éxito!")
+
 
 if __name__ == "__main__":
     sincronizar()
