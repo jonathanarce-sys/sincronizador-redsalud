@@ -14,28 +14,28 @@ def log(msg):
 def obtener_credenciales_google():
     log("🔑 Cargando credenciales de Google...")
     creds_dict = None
-    gcp_b64 = os.getenv("GCP_JSON_BASE64", "").strip()
     
-    if gcp_b64:
-        missing_padding = len(gcp_b64) % 4
-        if missing_padding != 0:
-            gcp_b64 += '=' * (4 - missing_padding)
-            
+    # 1. Intentar leer desde GCP_JSON_BASE64 o GOOGLE_CREDENTIALS_JSON
+    gcp_secret = os.getenv("GCP_JSON_BASE64", "").strip() or os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+
+    if not gcp_secret:
+        raise ValueError("❌ La variable de entorno GCP_JSON_BASE64 está vacía en GitHub Secrets.")
+
+    # Intentar interpretar como JSON directo primero
+    try:
+        creds_dict = json.loads(gcp_secret, strict=False)
+        log("✅ Credenciales leídas exitosamente como JSON directo.")
+    except Exception:
+        # Si falla, intentar decodificar como Base64
         try:
-            json_bytes = base64.b64decode(gcp_b64)
+            missing_padding = len(gcp_secret) % 4
+            if missing_padding != 0:
+                gcp_secret += '=' * (4 - missing_padding)
+            json_bytes = base64.b64decode(gcp_secret)
             creds_dict = json.loads(json_bytes.decode("utf-8"))
-        except Exception:
-            try:
-                creds_dict = json.loads(gcp_b64, strict=False)
-            except Exception as e:
-                raise ValueError(f"No se pudo interpretar GCP_JSON_BASE64: {e}")
-
-    if not creds_dict and os.getenv("GOOGLE_CREDENTIALS_JSON"):
-        raw_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-        creds_dict = json.loads(raw_json, strict=False)
-
-    if not creds_dict:
-        raise ValueError("❌ No se encontraron credenciales en las variables de entorno.")
+            log("✅ Credenciales leídas exitosamente como Base64.")
+        except Exception as e:
+            raise ValueError(f"❌ No se pudo interpretar la clave secreta ni como JSON ni como Base64. Detalle: {e}")
 
     if "private_key" in creds_dict:
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
@@ -102,6 +102,5 @@ def sincronizar():
 
     log("🚀 ¡Sincronización completada con éxito en Google Sheets!")
 
-# Llamada explícita de ejecución
 if __name__ == "__main__":
     sincronizar()
