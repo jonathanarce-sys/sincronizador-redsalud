@@ -1,177 +1,143 @@
-import requests
+import os
+import json
+import base64
+import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import json
-import os
-import re
-import time
+from datetime import datetime
 
-LICITALAB_API_KEY = "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE"
+# ID de la planilla Google Sheets: Base Maestra Licitaciones y Compras Agiles
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
-def clasificar_tipo(tipo_raw, code_raw):
-    code_upper = str(code_raw).upper()
-    tipo_upper = str(tipo_raw).upper()
-
-    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper:
-        return "Compra Ágil"
-    elif "CO" in code_upper or "PRIVATE" in tipo_upper:
-        return "Licitación Privada"
-    return "Licitación Pública"
-
-def formatear_moneda(val):
-    if val is None or val == "" or str(val).upper() == "NONE":
-        return "$ 0"
-    try:
-        monto = int(float(val))
-        return f"$ {monto:,}".replace(",", ".")
-    except:
-        return str(val)
-
-def limpiar_texto_o_lista(val):
-    if val is None or val == "" or str(val).upper() == "NONE":
-        return ""
-    if isinstance(val, list):
-        items_limpios = [str(x).strip(" []'\"") for x in val if x]
-        return ", ".join(items_limpios)
+def obtener_credenciales_google():
+    """Obtiene las credenciales desde variables de entorno (GitHub Actions / .env / Streamlit)."""
+    creds_dict = None
     
-    val_str = str(val).strip()
-    if val_str.startswith("[") and val_str.endswith("]"):
-        try:
-            parsed = json.loads(val_str)
-            if isinstance(parsed, list):
-                items_limpios = [str(x).strip(" []'\"") for x in parsed if x]
-                return ", ".join(items_limpios)
-        except:
-            pass
-    return val_str.strip(" []'\"")
-
-def extraer_motivo_no_adjudicacion(item):
-    motivo_oficial = item.get("MANAGED_STATUS_NAME") or item.get("DISCARD_REASON") or item.get("managed_status_name")
-    if motivo_oficial and str(motivo_oficial).strip() not in ["", "None", "null"]:
-        return str(motivo_oficial).strip()
-
-    comentario = limpiar_texto_o_lista(item.get("COMMENTS"))
-    if comentario:
-        comentario_limpio = re.sub(r"^\[?\d{4}-\d{2}-\d{2}[^\]]*\]?\s*", "", comentario)
-        return comentario_limpio.strip()
-
-    return ""
-
-def extraer_criterios_evaluacion(item):
-    """Extrae los criterios de evaluación, ponderaciones o puntaje asignado."""
-    criterios = item.get("EVALUATION_CRITERIA") or item.get("CRITERIA") or item.get("EVALUATION_SUMMARY") or item.get("evaluation_criteria")
-    if criterios:
-        return limpiar_texto_o_lista(criterios)
+    # Intento 1: Cadena Base64
+    gcp_b64 = os.getenv("GCP_JSON_BASE64")
+    if gcp_b64:
+        json_bytes = base64.b64decode(gcp_b64)
+        creds_dict = json.loads(json_bytes.decode("utf-8"))
     
-    score = item.get("SCORE") or item.get("score")
-    if score is not None and str(score).strip() not in ["", "None", "null"]:
-        return f"Puntaje Asignado: {score}"
+    # Intento 2: JSON en bruto
+    elif os.getenv("GOOGLE_CREDENTIALS_JSON"):
+        raw_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+        creds_dict = json.loads(raw_json, strict=False)
         
-    return ""
+    # Intento 3: Archivo local (para ejecución local)
+    elif os.path.exists("credentials.json"):
+        with open("credentials.json", "r", encoding="utf-8") as f:
+            creds_dict = json.load(f)
 
-def procesar_item(item):
-    fecha_raw = str(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or "").strip()
-    fecha = fecha_raw.split("T")[0] if "T" in fecha_raw else fecha_raw
+    if not creds_dict:
+        raise ValueError("No se encontraron credenciales de Google válidas.")
 
-    codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
-    tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
-    tipo = clasificar_tipo(tipo_orig, codigo)
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-    comprador = str(item.get("ORGANISM") or item.get("organism") or "").strip()
-    nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
-    prestacion = limpiar_texto_o_lista(item.get("B_LINE_TITLE") or item.get("ORGANISM_CATEGORY"))
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    return Credentials.from_service_account_info(creds_dict, scopes=scopes)
 
-    monto_ofertado = formatear_moneda(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
-    monto_total = formatear_moneda(item.get("TOTAL_AWARDED_AMOUNT") or item.get("AVAILABLE_AMOUNT"))
-    estado_oferta = str(item.get("OPPORTUNITY_STATUS") or "").strip()
-    adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS"))
+
+def procesar_y_limpiar_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Procesa el DataFrame aplicando las reglas de negocio solicitadas."""
+    if df.empty:
+        return df
+
+    # 1. Eliminar columna Criterios de Evaluación si existe
+    cols_eliminar = [c for c in df.columns if "criterio" in c.lower() or "evaluaci" in c.lower()]
+    df = df.drop(columns=cols_eliminar, errors="ignore")
+
+    # 2. Identificar y formatear Fechas
+    col_inicio = next((c for c in df.columns if "inicio" in c.lower() or "publica" in c.lower() or "creaci" in c.lower()), None)
     
-    motivo_no_adj = extraer_motivo_no_adjudicacion(item)
-    
-    # Nueva Columna L: Criterios de Evaluación
-    criterios_eval = extraer_criterios_evaluacion(item)
+    if col_inicio:
+        df[col_inicio] = pd.to_datetime(df[col_inicio], errors="coerce", dayfirst=True)
+        # Filtrar solo registros del 2025 en adelante (eliminar 2024)
+        df = df[df[col_inicio].dt.year >= 2025]
+        # Formatear a texto legible AAAA-MM-DD
+        df[col_inicio] = df[col_inicio].dt.strftime("%Y-%m-%d")
 
-    return [
-        fecha, codigo, tipo, comprador, nombre,
-        prestacion, monto_ofertado, monto_total,
-        estado_oferta, adjudicatario, motivo_no_adj,
-        criterios_eval
+    # 3. Asegurar columna 'Fecha de Cierre' para ambos procesos
+    col_cierre = next((c for c in df.columns if "cierre" in c.lower() or "termino" in c.lower() or "limite" in c.lower()), "Fecha de Cierre")
+    if col_cierre not in df.columns:
+        df["Fecha de Cierre"] = "N/A"
+
+    # 4. Asegurar columna 'Comentarios'
+    if "Comentarios" not in df.columns:
+        df["Comentarios"] = ""
+
+    # 5. Calcular 'Monto Total + IVA (Adjudicado / Estimado)'
+    col_monto = next((c for c in df.columns if "monto" in c.lower() or "estimado" in c.lower() or "adjudic" in c.lower()), None)
+    
+    def calcular_monto_iva(val):
+        try:
+            val_clean = float(str(val).replace("$", "").replace(".", "").replace(",", ".").strip())
+            monto_iva = val_clean * 1.19
+            return f"$ {int(monto_iva):,}".replace(",", ".")
+        except Exception:
+            return "$ 0"
+
+    if col_monto:
+        df["Monto Total + IVA (Adjudicado / Estimado)"] = df[col_monto].apply(calcular_monto_iva)
+    else:
+        df["Monto Total + IVA (Adjudicado / Estimado)"] = "$ 0"
+
+    # 6. Reordenar encabezados estándar
+    encabezados_deseados = [
+        "Código Proceso",
+        "Tipo Proceso",
+        "Nombre Proceso",
+        "Estado",
+        "Fecha de Inicio",
+        "Fecha de Cierre",
+        "Monto Estimado / Neto",
+        "Monto Total + IVA (Adjudicado / Estimado)",
+        "Comentarios"
     ]
 
-def main():
-    print("Iniciando Sincronización con 12 Columnas (incluye Criterios de Evaluación)...")
+    # Conservar columnas existentes y reordenar manteniendo coherencia
+    columnas_finales = [c for c in encabezados_deseados if c in df.columns] + \
+                       [c for c in df.columns if c not in encabezados_deseados]
 
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        try:
-            creds_dict = json.loads(creds_json)
-            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            client = gspread.authorize(creds)
-        except Exception as e:
-            print(f"Error al autenticar credenciales de Google: {e}")
-            return
-    else:
-        print("Error: No se encontraron credenciales en GOOGLE_CREDENTIALS_JSON")
+    return df[columnas_finales]
+
+
+def actualizar_google_sheets():
+    """Conecta a Google Sheets y actualiza la Base Maestra."""
+    print("🔄 Iniciando proceso de sincronización con Google Sheets...")
+
+    creds = obtener_credenciales_google()
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+
+    # 1. Leer datos existentes en la hoja
+    raw_records = sheet.get_all_records()
+    df_existente = pd.DataFrame(raw_records)
+
+    if df_existente.empty:
+        print("⚠️ La planilla actual está vacía o no tiene datos.")
         return
 
-    try:
-        sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-        print("¡Conexión exitosa con Google Sheets!")
-    except Exception as e:
-        print(f"Error al abrir la planilla de Google Sheets: {e}")
-        return
+    print(f"📊 Registros leídos de la planilla: {len(df_existente)}")
 
-    headers_api = {
-        "x-api-key": LICITALAB_API_KEY,
-        "Accept": "application/json"
-    }
+    # 2. Aplicar la limpieza y filtrado de reglas de negocio
+    df_procesado = procesar_y_limpiar_data(df_existente)
 
-    page = 1
-    max_pages = 20
-    todas_las_filas = []
+    print(f"✅ Registros conservados (Año 2025+): {len(df_procesado)}")
 
-    while page <= max_pages:
-        url = f"https://biapi.licitalab.cl/bi/v2/opportunities?page={page}"
-        print(f"Consultando página {page}: {url}")
-        try:
-            res = requests.get(url, headers=headers_api)
-            if res.status_code == 200:
-                data = res.json()
-                items = data.get("data", data) if isinstance(data, dict) else data
-                
-                if not isinstance(items, list) or len(items) == 0:
-                    print(f"Página {page} vacía. Se alcanzó el final de los datos.")
-                    break
-                
-                for item in items:
-                    fila_proc = procesar_item(item)
-                    if fila_proc[1]:
-                        todas_las_filas.append(fila_proc)
+    # 3. Limpiar la hoja e insertar los nuevos datos con los nuevos encabezados
+    sheet.clear()
+    
+    # Preparar matriz de datos (encabezados + valores)
+    valores_actualizar = [df_procesado.columns.tolist()] + df_procesado.fillna("").astype(str).values.tolist()
+    
+    sheet.update(range_name="A1", values=valores_actualizar)
+    print("🚀 ¡Planilla 'Base Maestra Licitaciones y Compras Agiles' actualizada con éxito!")
 
-                page += 1
-                time.sleep(0.5)
-            else:
-                print(f"Fin de paginación o error HTTP {res.status_code} en página {page}")
-                break
-        except Exception as err:
-            print(f"Excepción en página {page}: {err}")
-            break
-
-    if todas_las_filas:
-        print(f"Actualizando {len(todas_las_filas)} filas con las 12 columnas en Google Sheets...")
-        
-        sheet.resize(rows=1)
-        sheet.resize(rows=len(todas_las_filas) + 1)
-        
-        chunk_size = 500
-        for i in range(0, len(todas_las_filas), chunk_size):
-            chunk = todas_las_filas[i:i + chunk_size]
-            sheet.append_rows(chunk)
-            time.sleep(1)
-            
-        print(f"¡ÉXITO TOTAL! Las 12 columnas (A-L) quedaron sincronizadas correctamente.")
 
 if __name__ == "__main__":
-    main()
+    actualizar_google_sheets()
