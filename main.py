@@ -85,11 +85,37 @@ def limpiar_texto_o_lista(val):
             pass
     return val_str.strip(" []'\"")
 
+def determinar_workspace(item):
+    """Busca exhaustivamente la Clínica o Centro Médico asignado en LicitaLAB."""
+    candidatos = [
+        item.get("WORKSPACE_TITLE"),
+        item.get("workspace_title"),
+        item.get("WORKSPACE_NAME"),
+        item.get("workspace_name"),
+        item.get("WORKSPACE"),
+        item.get("workspace"),
+        item.get("MEMBER_NAME"),
+        item.get("member_name")
+    ]
+    
+    for cand in candidatos:
+        if cand and str(cand).strip() not in ["", "None", "null", "NaN"]:
+            val = str(cand).strip()
+            # Limpiar comillas si vienen en formato lista
+            val_limp = val.strip(" []'\"")
+            if val_limp:
+                return val_limp
+                
+    # Búsqueda por ID de Workspace si existe mapeo
+    ws_id = item.get("WORKSPACE_ID") or item.get("workspace_id")
+    if ws_id:
+        return f"Workspace ID: {ws_id}"
+        
+    return "Sin Asignar / Casa Matriz"
+
 def determinar_prestacion(item, nombre_proceso):
-    """Prioriza B_LINE_TITLE (Línea RedSalud) y realiza clasificación por palabras clave de salud."""
     b_line = limpiar_texto_o_lista(item.get("B_LINE_TITLE") or item.get("b_line_title"))
     
-    # Si B_LINE trae categorías de salud válidas, las utiliza
     if b_line and b_line.upper() not in ["MUNICIPALIDADES", "SALUD", "GOBIERNO", "MUNICIPALIDAD"]:
         return b_line
 
@@ -154,14 +180,8 @@ def procesar_items_api(items):
     filas = []
     
     for item in items:
-        # 1. Workspace real asignado
-        workspace = str(
-            item.get("WORKSPACE_TITLE") or 
-            item.get("workspace_title") or 
-            item.get("WORKSPACE_NAME") or 
-            item.get("workspace_name") or 
-            "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA"
-        ).strip()
+        # 1. Workspace real asignado (Búsqueda multicampo)
+        workspace = determinar_workspace(item)
         
         # 2. Código Proceso
         codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
@@ -182,7 +202,7 @@ def procesar_items_api(items):
         # 7. Nombre Proceso
         nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
         
-        # 8. Prestación (Categoría RedSalud corregida)
+        # 8. Prestación
         prestacion = determinar_prestacion(item, nombre)
         
         # 9. Monto Total + IVA
@@ -250,11 +270,11 @@ def sincronizar():
         log("🧹 Limpiando la planilla Google Sheets...")
         sheet.clear()
 
-        log("📝 Escribiendo los datos calibrados con Adjudicatario y Prestaciones corregidas...")
+        log("📝 Escribiendo los datos calibrados con Workspaces reales por centro/clínica...")
         valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
         sheet.update(range_name="A1", values=valores)
 
-        log("🚀 ¡Base Maestra sincronizada exitosamente con las 12 columnas!")
+        log("🚀 ¡Base Maestra sincronizada exitosamente!")
     else:
         log("⚠️ No se pudieron obtener datos desde la API. Revisa la conectividad.")
 
