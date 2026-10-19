@@ -2,7 +2,6 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
-import json
 
 st.set_page_config(page_title="Calculadora de Ofertas RedSalud", layout="wide", page_icon="🧮")
 
@@ -13,23 +12,13 @@ SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
 @st.cache_data(ttl=300)
 def cargar_datos():
-    if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("❌ No se encontró la clave GOOGLE_CREDENTIALS_JSON en Settings > Secrets de Streamlit.")
+    if "gcp_service_account" not in st.secrets:
+        st.error("❌ No se encontraron las credenciales [gcp_service_account] en Settings > Secrets.")
         return pd.DataFrame()
 
-    raw_secret = st.secrets["GOOGLE_CREDENTIALS_JSON"]
+    creds_dict = dict(st.secrets["gcp_service_account"])
     
-    # 1. Parsear el JSON
-    if isinstance(raw_secret, str):
-        try:
-            creds_dict = json.loads(raw_secret, strict=False)
-        except Exception:
-            cleaned_secret = raw_secret.replace('\r\n', '\n').replace('\r', '\n')
-            creds_dict = json.loads(cleaned_secret, strict=False)
-    else:
-        creds_dict = dict(raw_secret)
-
-    # 2. Corregir formato PEM de la Clave Privada (Solución para PEM error)
+    # Formateo correcto de la clave privada PEM
     if "private_key" in creds_dict:
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
