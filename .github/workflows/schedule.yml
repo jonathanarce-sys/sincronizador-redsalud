@@ -2,14 +2,15 @@ name: Sincronizador LicitaLAB RedSalud
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Se ejecuta automáticamente cada 30 minutos
-  workflow_dispatch:        # Permite ejecutarlo manualmente con un clic
+    - cron: '0 8 * * *'  # Se ejecuta automáticamente todos los días
+  workflow_dispatch:      # Permite la ejecución manual desde la pestaña Actions
 
 jobs:
   sincronizar:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Descargar código
+      - name: Checkout del código
         uses: actions/checkout@v3
 
       - name: Configurar Python
@@ -17,12 +18,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar librerías
+      - name: Instalar librerías requeridas
         run: |
-          pip install requests gspread google-auth
+          python -m pip install --upgrade pip
+          pip install pandas gspread google-auth requests
 
       - name: Ejecutar Sincronización
         env:
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: |
-          python main.py
+          GCP_JSON_BASE64: ${{ secrets.GCP_JSON_BASE64 }}
+        run: python main.py
