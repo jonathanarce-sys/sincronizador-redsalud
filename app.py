@@ -9,44 +9,93 @@ st.set_page_config(page_title="Calculadora de Ofertas RedSalud", layout="wide", 
 st.title("🧮 Calculadora de Licite / Ofertas - RedSalud")
 st.markdown("Herramienta interactiva para la estimación de costos y márgenes de licitaciones.")
 
-# Conexión a Google Sheets
-@st.cache_data(ttl=600)
+SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+
+@st.cache_data(ttl=300)
 def cargar_datos():
-    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
+        st.error("❌ No se encontró la clave GOOGLE_CREDENTIALS_JSON en Advanced Settings > Secrets de Streamlit.")
+        return pd.DataFrame()
+
+    raw_secret = st.secrets["GOOGLE_CREDENTIALS_JSON"]
+    
+    # Procesamiento flexible del JSON
+    if isinstance(raw_secret, str):
+        try:
+            # Soporta saltos de línea literales en la private_key
+            creds_dict = json.loads(raw_secret, strict=False)
+        except Exception:
+            cleaned_secret = raw_secret.replace('\r\n', '\n').replace('\r', '\n')
+            creds_dict = json.loads(cleaned_secret, strict=False)
+    else:
+        creds_dict = dict(raw_secret)
+
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key("1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek").sheet1
+
+    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
     data = sheet.get_all_records()
     return pd.DataFrame(data)
 
-try:
-    df = cargar_datos()
-    st.success(f" Base de datos cargada: {len(df)} oportunidades registradas.")
-    
-    # Buscador de Licitación
-    busqueda = st.selectbox("Selecciona una Licitación o Compra Ágil:", df["Nombre Proceso"].unique() if "Nombre Proceso" in df.columns else [])
-    
-    if busqueda:
-        item = df[df["Nombre Proceso"] == busqueda].iloc[0]
-        st.subheader("📋 Detalles del Proceso")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Código Proceso", item.get("Código Proceso", "N/A"))
-        col2.metric("Tipo Proceso", item.get("Tipo Proceso", "N/A"))
-        col3.metric("Monto Estimado", item.get("Monto Total / Estimado (CLP)", "$ 0"))
+# Carga de Datos
+with st.spinner("Cargando oportunidades desde Google Sheets..."):
+    try:
+        df = cargar_datos()
+    except Exception as e:
+        st.error(f"❌ Error al conectar con Google Sheets: {e}")
+        df = pd.DataFrame()
 
-    st.markdown("---")
-    st.subheader("📐 Simulador de Costos y Margen")
-    
-    c1, c2 = st.columns(2)
-    costo_base = c1.number_input("Costo Base Directo (CLP)", min_value=0, value=1000000, step=50000)
-    margen_deseado = c2.slider("Margen de Utilidad Deseado (%)", min_value=5, max_value=50, value=20)
-    
-    precio_oferta = costo_base / (1 - (margen_deseado / 100))
-    utilidad = precio_oferta - costo_base
-    
-    st.metric("Precio de Oferta Sugerido (Neto CLP)", f"$ {int(precio_oferta):,}".replace(",", "."))
-    st.metric("Utilidad Estimada (CLP)", f"$ {int(utilidad):,}".replace(",", "."))
+if not df.empty:
+    st.success(f" Base de datos conectada correctamente: **{len(df)}** registros cargados.")
 
-except Exception as e:
-    st.error(f"Error al conectar con Google Sheets: {e}")
+    # Filtros superiores
+    col_f1, col_f2 = st.columns(2)
+    
+    col_tipo = "Tipo Proceso" if "Tipo Proceso" in df.columns else df.columns[2]
+    col_nombre = "Nombre Proceso" if "Nombre Proceso" in df.columns else df.columns[4]
+
+    tipos_disponibles = ["Todos"] + list(df[col_tipo].unique())
+    tipo_sel = col_f1.selectbox("Filtrar por Tipo de Proceso:", tipos_disponibles)
+
+    df_filtrado = df if tipo_sel == "Todos" else df[df[col_tipo] == tipo_sel]
+
+    opciones_proceso = df_filtrado[col_nombre].unique()
+    proceso_sel = col_f2.selectbox("Selecciona una Licitación o Compra Ágil:", opciones_proceso)
+
+    if proceso_sel:
+        item = df_filtrado[df_filtrado[col_nombre] == proceso_sel].iloc[0]
+        
+        st.markdown("---")
+        st.subheader("📋 Detalles de la Oportunidad Seleccionada")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Código Proceso", item.get("Código Proceso", "N/A"))
+        c2.metric("Tipo Proceso", item.get("Tipo Proceso", "N/A"))
+        c3.metric("Monto Estimado", item.get("Monto Total / Estimado (CLP)", "$ 0"))
+        c4.metric("Estado", item.get("Estado de la Oferta", "N/A"))
+
+        # Calculadora
+        st.markdown("---")
+        st.subheader("📐 Simulador y Calculadora de Margen de Oferta")
+
+        col_calc1, col_calc2 = st.columns(2)
+        
+        costo_directo = col_calc1.number_input("Costo Directo Estimado (CLP)", min_value=0, value=500000, step=10000)
+        costo_operativo = col_calc1.number_input("Gastos Operativos / Logística (CLP)", min_value=0, value=50000, step=5000)
+        
+        margen_pct = col_calc2.slider("Margen de Utilidad Deseado (%)", min_value=1, max_value=60, value=20)
+        
+        costo_total_base = costo_directo + costo_operativo
+        
+        if costo_total_base > 0:
+            precio_sugerido_neto = costo_total_base / (1 - (margen_pct / 100))
+            iva = precio_sugerido_neto * 0.19
+            precio_sugerido_bruto = precio_sugerido_neto + iva
+            utilidad_neta = precio_sugerido_neto - costo_total_base
+
+            st.markdown("### 📊 Resultado de la Propuesta")
+            res1, res2, res3 = st.columns(3)
+            res1.metric("Precio Oferta Sugerido (Neto)", f"$ {int(precio_sugerido_neto):,}".replace(",", "."))
+            res2.metric("Precio Oferta Final (Con IVA 19%)", f"$ {int(precio_sugerido_bruto):,}".replace(",", "."))
+            res3.metric("Ganancia Neta Estimada", f"$ {int(utilidad_neta):,}".replace(",", "."))
