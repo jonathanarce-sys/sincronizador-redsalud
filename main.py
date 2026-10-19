@@ -43,83 +43,81 @@ def obtener_credenciales_google():
 
 
 def obtener_datos_licitalab():
-    """Consulta la API de LicitaLAB si la API key está disponible."""
+    """Consulta la API de LicitaLAB con la API Key guardada en GitHub Secrets."""
     api_key = os.getenv("LICITALAB_API_KEY", "").strip()
     if not api_key:
-        log("ℹ️ LICITALAB_API_KEY no configurada. Se reestructurará sobre la hoja actual.")
+        log("ℹ️ LICITALAB_API_KEY no configurada en Secrets. Procesando hoja actual...")
         return None
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     params = {"fecha_desde": "2025-01-01"}
 
     try:
-        log("🌐 Obteniendo datos desde API LicitaLAB...")
+        log("🌐 Conectando con API de LicitaLAB...")
         res = requests.get(LICITALAB_API_URL, headers=headers, params=params, timeout=30)
         if res.status_code == 200:
             data = res.json()
             items = data.get("data", data) if isinstance(data, dict) else data
-            log(f"✅ Se obtuvieron {len(items)} registros desde la API de LicitaLAB.")
+            log(f"✅ Exito: {len(items)} registros recibidos desde LicitaLAB API.")
             return pd.DataFrame(items)
         else:
-            log(f"⚠️ API LicitaLAB retornó estado {res.status_code}")
+            log(f"⚠️ La API de LicitaLAB devolvió código {res.status_code}: {res.text}")
             return None
     except Exception as e:
-        log(f"⚠️ Excepción al conectar con LicitaLAB: {e}")
+        log(f"⚠️ No se pudo conectar a la API de LicitaLAB: {e}")
         return None
 
 
-def procesar_y_limpiar_tabla(df: pd.DataFrame) -> pd.DataFrame:
-    """Mapea con precisión absoluta Workspace, Fecha de Cierre, Publicación y elimina basura."""
+def procesar_y_corregir_tabla(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapea con precisión absoluta los campos de LicitaLAB evitando valores genéricos."""
     if df.empty:
         return df
 
-    # Normalizar cabeceras eliminando espacios
-    df.columns = [str(c).strip() for c in df.columns]
+    # Imprimir columnas detectadas en la consola para depuración
+    log(f"🔍 Columnas detectadas en los datos recibidos: {list(df.columns)}")
 
-    # 1. Búsqueda exhaustiva de columna 'Workspace'
-    col_ws = next((c for c in df.columns if any(k in c.lower() for k in ["workspace", "espacio", "unid_ejecutora", "organismo", "usuario"])), None)
+    # 1. Recuperar o Mapear Workspace
+    col_ws = next((c for c in df.columns if any(k in c.lower() for k in ["workspace", "espacio", "organismo", "unidad", "comprador"])), None)
+    
     if col_ws and col_ws in df.columns:
-        df["Workspace"] = df[col_ws].astype(str).replace(["nan", "None", ""], "Sin Workspace especificado")
+        df["Workspace"] = df[col_ws].astype(str)
+        # Si tiene "General RedSalud", intentar rescatar el Organismo o Unidad
+        col_org = next((c for c in df.columns if any(k in c.lower() for k in ["organismo", "institucion", "compradora"])), None)
+        if col_org and col_org in df.columns:
+            df["Workspace"] = df.apply(
+                lambda r: r[col_org] if str(r["Workspace"]).strip() in ["General RedSalud", "nan", "None", ""] else r["Workspace"],
+                axis=1
+            )
     else:
         df["Workspace"] = "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA"
 
-    # 2. Búsqueda exhaustiva de 'Fecha de Cierre'
-    col_cierre = next((c for c in df.columns if any(k in c.lower() for k in ["cierre", "limite", "termino", "postula"])), None)
+    # 2. Recuperar o Mapear Fecha de Cierre
+    col_cierre = next((c for c in df.columns if any(k in c.lower() for k in ["cierre", "limite", "termino", "postula", "final"])), None)
     if col_cierre and col_cierre in df.columns:
         df["Fecha de Cierre"] = df[col_cierre].astype(str).replace(["nan", "None", "Nat"], "")
     else:
         df["Fecha de Cierre"] = ""
 
-    # 3. Búsqueda exhaustiva de 'Fecha Publicación'
+    # 3. Recuperar Fecha Publicación
     col_pub = next((c for c in df.columns if any(k in c.lower() for k in ["publica", "inicio", "creac"])), None)
     if col_pub and col_pub in df.columns:
         df["Fecha Publicación"] = df[col_pub].astype(str).replace(["nan", "None", "Nat"], "")
-    else:
-        df["Fecha Publicación"] = ""
 
-    # 4. Búsqueda de 'Código Proceso'
+    # 4. Código Proceso
     col_id = next((c for c in df.columns if any(k in c.lower() for k in ["codigo", "código", "id", "proceso"])), None)
     if col_id and col_id in df.columns:
         df["Código Proceso"] = df[col_id]
 
-    # 5. Búsqueda de 'Tipo Proceso'
+    # 5. Tipo Proceso
     col_tipo = next((c for c in df.columns if "tipo" in c.lower()), None)
     if col_tipo and col_tipo in df.columns:
         df["Tipo Proceso"] = df[col_tipo].replace({"tender": "Licitación Pública", "agile": "Compra Ágil"})
 
-    # 6. Búsqueda de 'Estado'
-    col_estado = next((c for c in df.columns if "estado" in c.lower()), None)
-    if col_estado and col_estado in df.columns:
-        df["Estado"] = df[col_estado]
-
-    # 7. Búsqueda o creación de 'Comentarios'
-    col_comentarios = next((c for c in df.columns if any(k in c.lower() for k in ["comentario", "observac", "nota"])), None)
-    if col_comentarios and col_comentarios in df.columns:
-        df["Comentarios"] = df[col_comentarios]
-    else:
+    # 6. Comentarios
+    if "Comentarios" not in df.columns:
         df["Comentarios"] = ""
 
-    # 8. Búsqueda o cálculo de 'Monto Total + IVA (Adjudicado / Estimado)'
+    # 7. Monto Total + IVA
     col_monto = next((c for c in df.columns if any(k in c.lower() for k in ["monto", "total", "estimado", "neto"])), None)
     def calc_iva(val):
         try:
@@ -131,24 +129,23 @@ def procesar_y_limpiar_tabla(df: pd.DataFrame) -> pd.DataFrame:
     if col_monto and col_monto in df.columns:
         df["Monto Total + IVA (Adjudicado / Estimado)"] = df[col_monto].apply(calc_iva)
 
-    # 9. Eliminar explícitamente columnas de 'Criterios de Evaluación' o 'Puntajes'
+    # Eliminar columnas obsoletas de evaluación
     cols_eliminar = [c for c in df.columns if any(k in c.lower() for k in ["criterio", "evaluac", "puntaje"])]
     df.drop(columns=cols_eliminar, inplace=True, errors="ignore")
 
-    # 10. Seleccionar y reordenar columnas limpias
+    # Ordenar columnas
     columnas_ordenadas = [
         "Workspace",
         "Código Proceso",
         "Fecha Publicación",
         "Fecha de Cierre",
         "Tipo Proceso",
-        "Estado",
         "Monto Total + IVA (Adjudicado / Estimado)",
         "Comentarios"
     ]
 
     cols_finales = [c for c in columnas_ordenadas if c in df.columns] + \
-                   [c for c in df.columns if c not in columnas_ordenadas and c not in ["Workspace_old", "Cierre_old"]]
+                   [c for c in df.columns if c not in columnas_ordenadas]
 
     return df[cols_finales]
 
@@ -159,26 +156,24 @@ def sincronizar():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-    # Cargar datos desde la API o directamente desde la planilla
     df_raw = obtener_datos_licitalab()
     if df_raw is None or df_raw.empty:
         log("📄 Leyendo datos de la planilla actual...")
         raw_records = sheet.get_all_records()
         df_raw = pd.DataFrame(raw_records)
 
-    log(f"📊 Registros a procesar: {len(df_raw)}")
-    log(f"📋 Encabezados detectados en la fuente: {list(df_raw.columns)}")
+    log(f"📊 Registros procesados: {len(df_raw)}")
 
-    df_limpio = procesar_y_limpiar_tabla(df_raw)
+    df_limpio = procesar_y_corregir_tabla(df_raw)
 
-    log("🧹 Limpiando la hoja de Google Sheets...")
+    log("🧹 Limpiando Google Sheets...")
     sheet.clear()
 
-    log("📝 Sobrescribiendo la planilla con los datos corregidos de Workspace y Fecha de Cierre...")
+    log("📝 Escribiendo la tabla corregida...")
     valores = [df_limpio.columns.tolist()] + df_limpio.fillna("").astype(str).values.tolist()
     sheet.update(range_name="A1", values=valores)
 
-    log("🚀 ¡Sincronización completada con éxito!")
+    log("🚀 ¡Sincronización realizada!")
 
 
 if __name__ == "__main__":
