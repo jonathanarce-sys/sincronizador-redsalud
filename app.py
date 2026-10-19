@@ -16,14 +16,11 @@ def cargar_datos():
         st.error("❌ No se encontraron las credenciales [gcp_service_account] en Settings > Secrets.")
         return pd.DataFrame()
 
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    
-    # Formateo correcto de la clave privada PEM
-    if "private_key" in creds_dict:
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
     client = gspread.authorize(creds)
 
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
