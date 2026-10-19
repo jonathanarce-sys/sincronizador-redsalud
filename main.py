@@ -2,13 +2,14 @@ import os
 import json
 import base64
 import sys
-import pandas as pd
+import time
 import requests
+import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-LICITALAB_API_URL = os.getenv("LICITALAB_API_URL", "https://api.licitalab.cl/v1/procesos")
+LICITALAB_API_KEY = os.getenv("LICITALAB_API_KEY", "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE").strip()
 
 def log(msg):
     print(msg, flush=True)
@@ -18,7 +19,7 @@ def obtener_credenciales_google():
     gcp_secret = os.getenv("GCP_JSON_BASE64", "").strip() or os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 
     if not gcp_secret:
-        raise ValueError("❌ No se encontraron credenciales en GCP_JSON_BASE64 ni en GOOGLE_CREDENTIALS_JSON.")
+        raise ValueError("❌ No se encontraron credenciales en las variables de entorno.")
 
     try:
         creds_dict = json.loads(gcp_secret, strict=False)
@@ -41,140 +42,161 @@ def obtener_credenciales_google():
     ]
     return Credentials.from_service_account_info(creds_dict, scopes=scopes)
 
+def clasificar_tipo(tipo_raw, code_raw):
+    code_upper = str(code_raw).upper()
+    tipo_upper = str(tipo_raw).upper()
 
-def obtener_datos_licitalab():
-    """Consulta la API de LicitaLAB con la API Key guardada en GitHub Secrets."""
-    api_key = os.getenv("LICITALAB_API_KEY", "").strip()
-    if not api_key:
-        log("ℹ️ LICITALAB_API_KEY no configurada en Secrets. Procesando hoja actual...")
-        return None
+    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper:
+        return "Compra Ágil"
+    elif "CO" in code_upper or "PRIVATE" in tipo_upper:
+        return "Licitación Privada"
+    return "Licitación Pública"
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    params = {"fecha_desde": "2025-01-01"}
+def formatear_fecha(val_fecha):
+    if not val_fecha or str(val_fecha).upper() in ["NONE", "NULL", "NAN", ""]:
+        return ""
+    val_str = str(val_fecha).strip()
+    return val_str.split("T")[0] if "T" in val_str else val_str
 
+def formatear_moneda(val):
+    if val is None or val == "" or str(val).upper() == "NONE":
+        return "$ 0"
     try:
-        log("🌐 Conectando con API de LicitaLAB...")
-        res = requests.get(LICITALAB_API_URL, headers=headers, params=params, timeout=30)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", data) if isinstance(data, dict) else data
-            log(f"✅ Exito: {len(items)} registros recibidos desde LicitaLAB API.")
-            return pd.DataFrame(items)
-        else:
-            log(f"⚠️ La API de LicitaLAB devolvió código {res.status_code}: {res.text}")
-            return None
-    except Exception as e:
-        log(f"⚠️ No se pudo conectar a la API de LicitaLAB: {e}")
-        return None
+        monto = int(float(val))
+        return f"$ {monto:,}".replace(",", ".")
+    except:
+        return str(val)
 
+def descargar_oportunidades_licitalab():
+    """Descarga los registros en vivo desde LicitaLAB BI API usando las claves mapeadas de la API."""
+    url_base = "https://biapi.licitalab.cl/bi/v2/opportunities"
+    headers = {
+        "x-api-key": LICITALAB_API_KEY,
+        "Accept": "application/json"
+    }
 
-def procesar_y_corregir_tabla(df: pd.DataFrame) -> pd.DataFrame:
-    """Mapea con precisión absoluta los campos de LicitaLAB evitando valores genéricos."""
-    if df.empty:
-        return df
-
-    # Imprimir columnas detectadas en la consola para depuración
-    log(f"🔍 Columnas detectadas en los datos recibidos: {list(df.columns)}")
-
-    # 1. Recuperar o Mapear Workspace
-    col_ws = next((c for c in df.columns if any(k in c.lower() for k in ["workspace", "espacio", "organismo", "unidad", "comprador"])), None)
+    log(f"🌐 Consultando API de LicitaLAB BI ({url_base})...")
     
-    if col_ws and col_ws in df.columns:
-        df["Workspace"] = df[col_ws].astype(str)
-        # Si tiene "General RedSalud", intentar rescatar el Organismo o Unidad
-        col_org = next((c for c in df.columns if any(k in c.lower() for k in ["organismo", "institucion", "compradora"])), None)
-        if col_org and col_org in df.columns:
-            df["Workspace"] = df.apply(
-                lambda r: r[col_org] if str(r["Workspace"]).strip() in ["General RedSalud", "nan", "None", ""] else r["Workspace"],
-                axis=1
-            )
-    else:
-        df["Workspace"] = "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA"
+    page = 1
+    max_pages = 20
+    todos_los_items = []
 
-    # 2. Recuperar o Mapear Fecha de Cierre
-    col_cierre = next((c for c in df.columns if any(k in c.lower() for k in ["cierre", "limite", "termino", "postula", "final"])), None)
-    if col_cierre and col_cierre in df.columns:
-        df["Fecha de Cierre"] = df[col_cierre].astype(str).replace(["nan", "None", "Nat"], "")
-    else:
-        df["Fecha de Cierre"] = ""
-
-    # 3. Recuperar Fecha Publicación
-    col_pub = next((c for c in df.columns if any(k in c.lower() for k in ["publica", "inicio", "creac"])), None)
-    if col_pub and col_pub in df.columns:
-        df["Fecha Publicación"] = df[col_pub].astype(str).replace(["nan", "None", "Nat"], "")
-
-    # 4. Código Proceso
-    col_id = next((c for c in df.columns if any(k in c.lower() for k in ["codigo", "código", "id", "proceso"])), None)
-    if col_id and col_id in df.columns:
-        df["Código Proceso"] = df[col_id]
-
-    # 5. Tipo Proceso
-    col_tipo = next((c for c in df.columns if "tipo" in c.lower()), None)
-    if col_tipo and col_tipo in df.columns:
-        df["Tipo Proceso"] = df[col_tipo].replace({"tender": "Licitación Pública", "agile": "Compra Ágil"})
-
-    # 6. Comentarios
-    if "Comentarios" not in df.columns:
-        df["Comentarios"] = ""
-
-    # 7. Monto Total + IVA
-    col_monto = next((c for c in df.columns if any(k in c.lower() for k in ["monto", "total", "estimado", "neto"])), None)
-    def calc_iva(val):
+    while page <= max_pages:
+        url = f"{url_base}?page={page}"
         try:
-            v = float(str(val).replace("$", "").replace(".", "").replace(",", ".").strip())
-            return f"$ {int(v * 1.19):,}".replace(",", ".")
-        except Exception:
-            return "$ 0"
+            res = requests.get(url, headers=headers, timeout=30)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("data", data) if isinstance(data, dict) else data
+                
+                if not isinstance(items, list) or len(items) == 0:
+                    log(f"Página {page} vacía. Fin de la descarga de datos.")
+                    break
+                
+                todos_los_items.extend(items)
+                page += 1
+                time.sleep(0.3)
+            else:
+                log(f"⚠️ API retorno HTTP {res.status_code} en página {page}")
+                break
+        except Exception as e:
+            log(f"⚠️ Error al conectar con LicitaLAB en página {page}: {e}")
+            break
 
-    if col_monto and col_monto in df.columns:
-        df["Monto Total + IVA (Adjudicado / Estimado)"] = df[col_monto].apply(calc_iva)
+    log(f"✅ Se obtuvieron {len(todos_los_items)} oportunidades en vivo desde LicitaLAB.")
+    return todos_los_items
 
-    # Eliminar columnas obsoletas de evaluación
-    cols_eliminar = [c for c in df.columns if any(k in c.lower() for k in ["criterio", "evaluac", "puntaje"])]
-    df.drop(columns=cols_eliminar, inplace=True, errors="ignore")
+def procesar_items_api(items):
+    """Procesa los ítems JSON extrayendo WORKSPACE_TITLE, CLOSING_DATE, ORGANISM, etc."""
+    filas = []
+    
+    for item in items:
+        # 1. Workspace real
+        workspace = str(item.get("WORKSPACE_TITLE") or item.get("workspace_title") or item.get("WORKSPACE") or "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA").strip()
+        
+        # 2. Código Proceso
+        codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
+        
+        # 3. Fecha Publicación
+        fecha_pub = formatear_fecha(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("created_at"))
+        
+        # 4. Fecha de Cierre real
+        fecha_cierre = formatear_fecha(item.get("CLOSING_DATE") or item.get("closing_date") or item.get("EXPIRATION_DATE"))
+        
+        # 5. Tipo Proceso
+        tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
+        tipo = clasificar_tipo(tipo_orig, codigo)
+        
+        # 6. Institución Compradora real
+        comprador = str(item.get("ORGANISM") or item.get("organism") or item.get("BUYER_NAME") or "").strip()
+        
+        # 7. Nombre Proceso
+        nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
+        
+        # 8. Prestación
+        prestacion = str(item.get("ORGANISM_CATEGORY") or item.get("B_LINE_TITLE") or "").strip(" []'\"")
+        
+        # 9. Montos
+        monto_neto = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT")
+        monto_total_iva = formatear_moneda(monto_neto)
+        
+        # 10. Estado
+        estado = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
+        
+        # 11. Comentarios
+        comentarios = str(item.get("COMMENTS") or item.get("comments") or "").strip(" []'\"")
 
-    # Ordenar columnas
-    columnas_ordenadas = [
-        "Workspace",
-        "Código Proceso",
-        "Fecha Publicación",
-        "Fecha de Cierre",
-        "Tipo Proceso",
-        "Monto Total + IVA (Adjudicado / Estimado)",
-        "Comentarios"
-    ]
+        filas.append([
+            workspace,          # Columna A: Workspace
+            codigo,             # Columna B: Código Proceso
+            fecha_pub,          # Columna C: Fecha Publicación
+            fecha_cierre,       # Columna D: Fecha de Cierre
+            tipo,               # Columna E: Tipo Proceso
+            comprador,          # Columna F: Institución Compradora
+            nombre,             # Columna G: Nombre Proceso
+            prestacion,         # Columna H: Prestación (Categoría RedSalud)
+            monto_total_iva,    # Columna I: Monto Total + IVA
+            estado,             # Columna J: Estado de la Oferta
+            comentarios         # Columna K: Comentarios
+        ])
 
-    cols_finales = [c for c in columnas_ordenadas if c in df.columns] + \
-                   [c for c in df.columns if c not in columnas_ordenadas]
+    df = pd.DataFrame(filas, columns=[
+        "Workspace", "Código Proceso", "Fecha Publicación", "Fecha de Cierre",
+        "Tipo Proceso", "Institución Compradora", "Nombre Proceso",
+        "Prestación (Categoría RedSalud)", "Monto Total + IVA (Adjudicado / Estimado)",
+        "Estado de la Oferta", "Comentarios"
+    ])
 
-    return df[cols_finales]
+    # Filtrar solo del año 2025 en adelante
+    if "Fecha Publicación" in df.columns:
+        df["_year"] = pd.to_datetime(df["Fecha Publicación"], errors="coerce").dt.year
+        df = df[df["_year"] >= 2025].drop(columns=["_year"], errors="ignore")
 
+    return df
 
 def sincronizar():
-    log("🔄 Iniciando sincronización...")
+    log("🔄 Iniciando sincronización de Base Maestra desde LicitaLAB BI API...")
     creds = obtener_credenciales_google()
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-    df_raw = obtener_datos_licitalab()
-    if df_raw is None or df_raw.empty:
-        log("📄 Leyendo datos de la planilla actual...")
-        raw_records = sheet.get_all_records()
-        df_raw = pd.DataFrame(raw_records)
+    # 1. Obtener los ítems en vivo desde la API de LicitaLAB BI
+    items_api = descargar_oportunidades_licitalab()
 
-    log(f"📊 Registros procesados: {len(df_raw)}")
+    if items_api:
+        df_final = procesar_items_api(items_api)
+        log(f"📊 Registros procesados (Año 2025+): {len(df_final)}")
 
-    df_limpio = procesar_y_corregir_tabla(df_raw)
+        log("🧹 Limpiando la planilla Google Sheets...")
+        sheet.clear()
 
-    log("🧹 Limpiando Google Sheets...")
-    sheet.clear()
+        log("📝 Escribiendo datos reales de Workspace, Fecha de Cierre e Institución Compradora...")
+        valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
+        sheet.update(range_name="A1", values=valores)
 
-    log("📝 Escribiendo la tabla corregida...")
-    valores = [df_limpio.columns.tolist()] + df_limpio.fillna("").astype(str).values.tolist()
-    sheet.update(range_name="A1", values=valores)
-
-    log("🚀 ¡Sincronización realizada!")
-
+        log("🚀 ¡Sincronización completada con éxito en Google Sheets!")
+    else:
+        log("⚠️ No se pudieron obtener datos desde la API. Revisa la conectividad.")
 
 if __name__ == "__main__":
     sincronizar()
