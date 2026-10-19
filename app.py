@@ -2,6 +2,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
+import base64
 import json
 
 st.set_page_config(page_title="Calculadora de Ofertas RedSalud", layout="wide", page_icon="🧮")
@@ -11,36 +12,15 @@ st.markdown("Herramienta interactiva para la estimación de costos y márgenes d
 
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
-def sanitizar_private_key(key: str) -> str:
-    """Limpia la clave privada quitando comillas curvas y corrigiendo saltos de línea."""
-    # Reemplazar comillas curvas o guiones especiales
-    key = key.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'").replace("—", "--")
-    # Limpiar saltos de línea escapados
-    key = key.replace("\\n", "\n")
-    return key.strip()
-
 @st.cache_data(ttl=300)
 def cargar_datos():
-    creds_dict = None
-
-    # Intento 1: Buscar en gcp_service_account (TOML)
-    if "gcp_service_account" in st.secrets:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-    # Intento 2: Buscar en GOOGLE_CREDENTIALS_JSON (String/JSON)
-    elif "GOOGLE_CREDENTIALS_JSON" in st.secrets:
-        raw_secret = st.secrets["GOOGLE_CREDENTIALS_JSON"]
-        if isinstance(raw_secret, str):
-            creds_dict = json.loads(raw_secret, strict=False)
-        else:
-            creds_dict = dict(raw_secret)
-
-    if not creds_dict:
-        st.error("❌ No se encontraron credenciales válidas en Settings > Secrets de Streamlit.")
+    if "GCP_JSON_BASE64" not in st.secrets:
+        st.error("❌ No se encontró la clave GCP_JSON_BASE64 en Settings > Secrets.")
         return pd.DataFrame()
 
-    # Sanitizar la clave privada
-    if "private_key" in creds_dict:
-        creds_dict["private_key"] = sanitizar_private_key(creds_dict["private_key"])
+    b64_str = st.secrets["GCP_JSON_BASE64"]
+    json_bytes = base64.b64decode(b64_str)
+    creds_dict = json.loads(json_bytes.decode("utf-8"))
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
