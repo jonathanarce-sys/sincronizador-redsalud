@@ -67,8 +67,52 @@ def formatear_moneda(val):
     except:
         return str(val)
 
+def limpiar_texto_o_lista(val):
+    if val is None or val == "" or str(val).upper() == "NONE":
+        return ""
+    if isinstance(val, list):
+        items_limpios = [str(x).strip(" []'\"") for x in val if x]
+        return ", ".join(items_limpios)
+    
+    val_str = str(val).strip()
+    if val_str.startswith("[") and val_str.endswith("]"):
+        try:
+            parsed = json.loads(val_str)
+            if isinstance(parsed, list):
+                items_limpios = [str(x).strip(" []'\"") for x in parsed if x]
+                return ", ".join(items_limpios)
+        except:
+            pass
+    return val_str.strip(" []'\"")
+
+def determinar_prestacion(item, nombre_proceso):
+    """Prioriza B_LINE_TITLE (Línea RedSalud) y realiza clasificación por palabras clave de salud."""
+    b_line = limpiar_texto_o_lista(item.get("B_LINE_TITLE") or item.get("b_line_title"))
+    
+    # Si B_LINE trae categorías de salud válidas, las utiliza
+    if b_line and b_line.upper() not in ["MUNICIPALIDADES", "SALUD", "GOBIERNO", "MUNICIPALIDAD"]:
+        return b_line
+
+    nombre_upper = str(nombre_proceso).upper()
+    
+    if any(k in nombre_upper for k in ["ECOGRAF", "ECOGRAFÍA", "ECOGRAFIAS"]):
+        return "Ecografías / Imágenes"
+    elif any(k in nombre_upper for k in ["MAMOGRAF", "MAMOGRAFÍA", "MAMOGRAFIAS"]):
+        return "Mamografías / Imágenes"
+    elif any(k in nombre_upper for k in ["LABORATORIO", "MUESTRAS", "INSUMOS LABORATORIO", "TEST"]):
+        return "Laboratorio"
+    elif any(k in nombre_upper for k in ["RADIOGRAF", "RAYOS", "TOMOGRAF"]):
+        return "Imágenes / Radiología"
+    elif any(k in nombre_upper for k in ["MEDICAMENTO", "FARMACO", "CENABAST", "COMPRIMIDOS"]):
+        return "Farmacia / Medicamentos"
+    elif any(k in nombre_upper for k in ["DENTAL", "ENDODONCIA", "LIMAS"]):
+        return "Dental"
+    elif any(k in nombre_upper for k in ["CONSULTA", "MEDICAS", "ESPECIALISTAS"]):
+        return "Consultas Médicas"
+        
+    return b_line if b_line else "Salud General"
+
 def descargar_oportunidades_licitalab():
-    """Descarga los registros en vivo desde LicitaLAB BI API usando las claves mapeadas de la API."""
     url_base = "https://biapi.licitalab.cl/bi/v2/opportunities"
     headers = {
         "x-api-key": LICITALAB_API_KEY,
@@ -90,35 +134,40 @@ def descargar_oportunidades_licitalab():
                 items = data.get("data", data) if isinstance(data, dict) else data
                 
                 if not isinstance(items, list) or len(items) == 0:
-                    log(f"Página {page} vacía. Fin de la descarga de datos.")
+                    log(f"Página {page} vacía. Fin de la descarga.")
                     break
                 
                 todos_los_items.extend(items)
                 page += 1
                 time.sleep(0.3)
             else:
-                log(f"⚠️ API retorno HTTP {res.status_code} en página {page}")
+                log(f"⚠️ API retornó HTTP {res.status_code} en página {page}")
                 break
         except Exception as e:
             log(f"⚠️ Error al conectar con LicitaLAB en página {page}: {e}")
             break
 
-    log(f"✅ Se obtuvieron {len(todos_los_items)} oportunidades en vivo desde LicitaLAB.")
+    log(f"✅ Se obtuvieron {len(todos_los_items)} oportunidades desde LicitaLAB BI.")
     return todos_los_items
 
 def procesar_items_api(items):
-    """Procesa los ítems JSON extrayendo WORKSPACE_TITLE, CLOSING_DATE, ORGANISM, etc."""
     filas = []
     
     for item in items:
-        # 1. Workspace real
-        workspace = str(item.get("WORKSPACE_TITLE") or item.get("workspace_title") or item.get("WORKSPACE") or "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA").strip()
+        # 1. Workspace real asignado
+        workspace = str(
+            item.get("WORKSPACE_TITLE") or 
+            item.get("workspace_title") or 
+            item.get("WORKSPACE_NAME") or 
+            item.get("workspace_name") or 
+            "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA"
+        ).strip()
         
         # 2. Código Proceso
         codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
         
         # 3. Fecha Publicación
-        fecha_pub = formatear_fecha(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("created_at"))
+        fecha_pub = formatear_fecha(item.get("PUBLISH_DATE") or item.get("CREATED_AT"))
         
         # 4. Fecha de Cierre real
         fecha_cierre = formatear_fecha(item.get("CLOSING_DATE") or item.get("closing_date") or item.get("EXPIRATION_DATE"))
@@ -127,47 +176,59 @@ def procesar_items_api(items):
         tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
         tipo = clasificar_tipo(tipo_orig, codigo)
         
-        # 6. Institución Compradora real
+        # 6. Institución Compradora
         comprador = str(item.get("ORGANISM") or item.get("organism") or item.get("BUYER_NAME") or "").strip()
         
         # 7. Nombre Proceso
         nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
         
-        # 8. Prestación
-        prestacion = str(item.get("ORGANISM_CATEGORY") or item.get("B_LINE_TITLE") or "").strip(" []'\"")
+        # 8. Prestación (Categoría RedSalud corregida)
+        prestacion = determinar_prestacion(item, nombre)
         
-        # 9. Montos
-        monto_neto = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT")
+        # 9. Monto Total + IVA
+        monto_neto = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT")
         monto_total_iva = formatear_moneda(monto_neto)
         
         # 10. Estado
         estado = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
         
-        # 11. Comentarios
-        comentarios = str(item.get("COMMENTS") or item.get("comments") or "").strip(" []'\"")
+        # 11. Adjudicatario (Proveedor Ganador)
+        adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS") or item.get("awarded_providers"))
+        
+        # 12. Comentarios / Motivo
+        comentarios = limpiar_texto_o_lista(item.get("COMMENTS") or item.get("comments") or item.get("MANAGED_STATUS_NAME"))
 
         filas.append([
-            workspace,          # Columna A: Workspace
-            codigo,             # Columna B: Código Proceso
-            fecha_pub,          # Columna C: Fecha Publicación
-            fecha_cierre,       # Columna D: Fecha de Cierre
-            tipo,               # Columna E: Tipo Proceso
-            comprador,          # Columna F: Institución Compradora
-            nombre,             # Columna G: Nombre Proceso
-            prestacion,         # Columna H: Prestación (Categoría RedSalud)
-            monto_total_iva,    # Columna I: Monto Total + IVA
-            estado,             # Columna J: Estado de la Oferta
-            comentarios         # Columna K: Comentarios
+            workspace,          # A
+            codigo,             # B
+            fecha_pub,          # C
+            fecha_cierre,       # D
+            tipo,               # E
+            comprador,          # F
+            nombre,             # G
+            prestacion,         # H
+            monto_total_iva,    # I
+            estado,             # J
+            adjudicatario,      # K
+            comentarios         # L
         ])
 
     df = pd.DataFrame(filas, columns=[
-        "Workspace", "Código Proceso", "Fecha Publicación", "Fecha de Cierre",
-        "Tipo Proceso", "Institución Compradora", "Nombre Proceso",
-        "Prestación (Categoría RedSalud)", "Monto Total + IVA (Adjudicado / Estimado)",
-        "Estado de la Oferta", "Comentarios"
+        "Workspace", 
+        "Código Proceso", 
+        "Fecha Publicación", 
+        "Fecha de Cierre",
+        "Tipo Proceso", 
+        "Institución Compradora", 
+        "Nombre Proceso",
+        "Prestación (Categoría RedSalud)", 
+        "Monto Total + IVA (Adjudicado / Estimado)",
+        "Estado de la Oferta", 
+        "Adjudicatario (Proveedor Ganador)",
+        "Comentarios"
     ])
 
-    # Filtrar solo del año 2025 en adelante
+    # Filtrar 2025 en adelante
     if "Fecha Publicación" in df.columns:
         df["_year"] = pd.to_datetime(df["Fecha Publicación"], errors="coerce").dt.year
         df = df[df["_year"] >= 2025].drop(columns=["_year"], errors="ignore")
@@ -180,21 +241,20 @@ def sincronizar():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-    # 1. Obtener los ítems en vivo desde la API de LicitaLAB BI
     items_api = descargar_oportunidades_licitalab()
 
     if items_api:
         df_final = procesar_items_api(items_api)
-        log(f"📊 Registros procesados (Año 2025+): {len(df_final)}")
+        log(f"📊 Registros calibrados procesados (Año 2025+): {len(df_final)}")
 
         log("🧹 Limpiando la planilla Google Sheets...")
         sheet.clear()
 
-        log("📝 Escribiendo datos reales de Workspace, Fecha de Cierre e Institución Compradora...")
+        log("📝 Escribiendo los datos calibrados con Adjudicatario y Prestaciones corregidas...")
         valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
         sheet.update(range_name="A1", values=valores)
 
-        log("🚀 ¡Sincronización completada con éxito en Google Sheets!")
+        log("🚀 ¡Base Maestra sincronizada exitosamente con las 12 columnas!")
     else:
         log("⚠️ No se pudieron obtener datos desde la API. Revisa la conectividad.")
 
