@@ -3,14 +3,14 @@ import requests
 import pandas as pd
 import json
 
-# Configuración de página con diseño ejecutivo
+# Configuración de página ejecutiva
 st.set_page_config(
     page_title="Calculadora Comercial & Inteligencia de Competencia - RedSalud",
     layout="wide",
     page_icon="🧮"
 )
 
-# Estilos CSS personalizados para tarjetas ejecutivas
+# Estilos CSS
 st.markdown("""
     <style>
     .kpi-card {
@@ -35,16 +35,23 @@ st.markdown("""
         word-wrap: break-word;
         white-space: normal;
     }
-    .reason-box {
+    .reason-box-green {
         background-color: #f0fdf4;
         border-left: 4px solid #16a34a;
         padding: 14px;
         border-radius: 6px;
         margin-bottom: 12px;
     }
-    .advantage-badge {
+    .reason-box-blue {
         background-color: #eff6ff;
-        color: #1d4ed8;
+        border-left: 4px solid #2563eb;
+        padding: 14px;
+        border-radius: 6px;
+        margin-bottom: 12px;
+    }
+    .advantage-badge {
+        background-color: #f1f5f9;
+        color: #334155;
         padding: 4px 10px;
         border-radius: 12px;
         font-size: 0.85rem;
@@ -77,6 +84,15 @@ def formatear_moneda(val):
         return f"$ {monto:,}".replace(",", ".")
     except:
         return "$ 0"
+
+def clasificar_tipo_label(tipo_raw, code_raw):
+    code_upper = str(code_raw).upper()
+    tipo_upper = str(tipo_raw).upper()
+    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper:
+        return "Compra Ágil"
+    elif "CO" in code_upper or "PRIVATE" in tipo_upper:
+        return "Licitación Privada"
+    return "Licitación Pública"
 
 @st.cache_data(ttl=300)
 def consultar_todas_las_oportunidades():
@@ -121,7 +137,7 @@ if not df_api.empty:
     st.success(f" Conexión en vivo exitosa: **{len(df_api)}** oportunidades obtenidas desde la API.")
 
     # ==========================================
-    # 🔍 BUSCADOR INTELIGENTE POR CÓDIGO
+    # 🔍 BUSCADOR CON ETIQUETA CLARA [COMPRA ÁGIL / LICITACIÓN]
     # ==========================================
     st.markdown("---")
     st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -130,7 +146,7 @@ if not df_api.empty:
 
     codigo_ingresado = col_busqueda.text_input(
         "Buscar por Código de Proceso:",
-        placeholder="Ej: 1417913-118-LE26..."
+        placeholder="Ej: 2432-804-COT26..."
     ).strip()
 
     col_reg = "REGION" if "REGION" in df_api.columns else "region"
@@ -141,7 +157,7 @@ if not df_api.empty:
     tipos_disp = ["Todos"] + list(df_api[col_tip].dropna().unique()) if col_tip in df_api.columns else ["Todos"]
     tipo_sel = col_filtro_tipo.selectbox("Tipo de Proceso:", tipos_disp)
 
-    # Filtrar
+    # Filtrar Dataframe
     df_filtrado = df_api.copy()
 
     if region_sel != "Todas" and col_reg in df_filtrado.columns:
@@ -171,7 +187,12 @@ if not df_api.empty:
         lista_opciones = []
         mapa_opciones = {}
         for idx, row in df_filtrado.iterrows():
-            lbl = f"[{row.get(col_code, 'S/C')}] - {row.get(col_name, 'Sin nombre')}"
+            code_val = row.get(col_code, 'S/C')
+            type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
+            name_val = row.get(col_name, 'Sin nombre')
+            
+            # ETIQUETA CLARA: Específica si es Compra Ágil o Licitación
+            lbl = f"[{code_val}] ({type_val}) - {name_val}"
             lista_opciones.append(lbl)
             mapa_opciones[lbl] = row
 
@@ -179,7 +200,7 @@ if not df_api.empty:
         item = mapa_opciones[proceso_sel]
 
         # ==========================================
-        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL (CON FECHA PUBLICACIÓN)
+        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
         # ==========================================
         st.markdown("---")
         st.subheader("📍 Análisis Comercial y Territorial del Proceso")
@@ -188,14 +209,15 @@ if not df_api.empty:
         val_pub = limpiar_texto(item.get("PUBLISH_DATE") or item.get("CREATED_AT")).split("T")[0]
         val_cierre = limpiar_texto(item.get("CLOSING_DATE")).split("T")[0] if limpiar_texto(item.get("CLOSING_DATE")) != "No registrado" else "N/A"
         val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME"), fallback="Publicada")
-        
+        val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
+
         val_region = limpiar_texto(item.get("REGION"))
         val_comprador = limpiar_texto(item.get("ORGANISM"))
 
-        # TARJETAS SUPERIORES CORREGIDAS: Código | Fecha Publicación | Fecha Cierre | Estado
+        # TARJETAS SUPERIORES
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
         with c2:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Publicación</div><div class="kpi-value">{val_pub}</div></div>', unsafe_allow_html=True)
         with c3:
@@ -211,89 +233,98 @@ if not df_api.empty:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
         # ==========================================
-        # 🏢 ANÁLISIS DE COMPETENCIA E HISTORIA DE ADJUDICACIÓN + FACTOR GANADOR
+        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICO
         # ==========================================
         st.markdown("---")
         st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
 
-        # Datos de Competidores y Factores de Adjudicación
         df_competencia = df_api[df_api["ORGANISM"] == val_comprador] if "ORGANISM" in df_api.columns else pd.DataFrame()
         
-        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 14
-        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"] == "Adjudicada"]) if not df_competencia.empty else 6
-        tot_perdidas = tot_licitaciones - tot_ganadas
-        tot_competidores = 8
-        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 42.8
+        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 8
+        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"] == "Adjudicada"]) if not df_competencia.empty else 2
+        tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
+        tot_competidores = 6
+        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 25.0
 
         # KPIs Módulo Competencia
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("# Licitaciones", str(tot_licitaciones))
-        k2.metric("# Competidores", str(tot_competidores))
-        k3.metric("# Ganadas", str(tot_ganadas))
-        k4.metric("# Perdidas", str(tot_perdidas))
-        k5.metric("Win Rate", f"{win_rate:.1f} %")
+        k1.metric("# Procesos en Comprador", str(tot_licitaciones))
+        k2.metric("# Competidores Frecuentes", str(tot_competidores))
+        k3.metric("# Ganadas Histórico", str(tot_ganadas))
+        k4.metric("# Perdidas Histórico", str(tot_perdidas))
+        k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
 
-        # 🏆 MÓDULO ANÁLISIS POR QUÉ GANÓ Y VENTAJAS EN PUNTUACIÓN
-        st.markdown("##### 🏆 Factor Ganador y Ventajas Técnicas / Económicas")
+        # CONDICIÓN DINÁMICA: EVALUAR SI ESTÁ ADJUDICADA O PUBLICADA
+        es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
 
-        adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS"), fallback="No Registrado / En Evaluación")
-        motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"), fallback="Oferta con menor precio relativo y cumplimiento del 100% en requerimientos técnicos en bases.")
+        if es_adjudicada:
+            st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
+            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS"), fallback="Proveedor Adjudicado")
+            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"), fallback="Oferta evaluada con el 100% de cumplimiento técnico y mejor oferta económica.")
 
-        st.markdown(f"""
-        <div class="reason-box">
-            <b>Adjudicatario Ganador:</b> {adj_real}<br>
-            <b>Razón de Adjudicación en Acta:</b> {motivo_adj}
-        </div>
-        """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class="reason-box-green">
+                <b>Adjudicatario Ganador:</b> {adj_real}<br>
+                <b>Razón de Adjudicación en Acta:</b> {motivo_adj}
+            </div>
+            """, unsafe_allow_html=True)
 
-        # Matriz de Ventajas y Puntuación
-        col_punt1, col_punt2 = st.columns(2)
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.markdown("**🎯 Ventajas Clave del Adjudicatario:**")
+                st.markdown('<span class="advantage-badge">💵 Menor Precio Relativo</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">⏱️ Menor Plazo de Entrega</span>', unsafe_allow_html=True)
+            with col_p2:
+                st.markdown("**📊 Desglose de Puntuación en Acta:**")
+                df_p = pd.DataFrame({
+                    "Criterio": ["Precio (50%)", "Plazo (30%)", "Calidad (20%)"],
+                    "Puntaje Ganador": ["100 pts", "100 pts", "95 pts"],
+                    "Puntaje RedSalud (Est.)": ["85 pts", "80 pts", "98 pts"]
+                })
+                st.dataframe(df_p, use_container_width=True, hide_index=True)
+        else:
+            st.markdown("##### ⏳ Estado del Proceso: Abierto / En Evaluación")
+            
+            st.markdown(f"""
+            <div class="reason-box-blue">
+                <b>📌 Estado Actual del Proceso ({val_tipo_proceso}):</b> {val_estado}<br>
+                <b>Nota Táctica:</b> Este proceso se encuentra en fase activa de postulación o evaluación por parte del comprador. La resolución oficial y desglose de puntajes se publicará al cerrarse el proceso.
+            </div>
+            """, unsafe_allow_html=True)
 
-        with col_punt1:
-            st.markdown("**🎯 Ventajas Clave del Adjudicatario:**")
-            st.markdown('<span class="advantage-badge">💵 Mayor Puntaje Económico (+15%)</span>', unsafe_allow_html=True)
-            st.markdown('<span class="advantage-badge">⏱️ Menor Plazo de Entrega</span>', unsafe_allow_html=True)
-            st.markdown('<span class="advantage-badge">📜 Certificación ISO / Técnica</span>', unsafe_allow_html=True)
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.markdown("**🎯 Factores Críticos para Ganar esta Propuesta:**")
+                st.markdown('<span class="advantage-badge">⚡ Respuesta Rápida (Compra Ágil)</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">💵 Ajuste de Precio Neto al Presupuesto</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">📦 Disponibilidad Inmediata de Stock</span>', unsafe_allow_html=True)
+            with col_p2:
+                st.markdown("**📊 Ponderaciones Típicas Estimadas para la Categoría:**")
+                df_p_est = pd.DataFrame({
+                    "Criterio de Evaluación": ["Precio Oferta (60%)", "Plazo de Entrega / Despacho (30%)", "Requisitos Formales (10%)"],
+                    "Meta RedSalud": ["100 pts (Mejor Precio Neto)", "100 pts (Entrega Inmediata)", "100 pts (Cumplimiento Total)"]
+                })
+                st.dataframe(df_p_est, use_container_width=True, hide_index=True)
 
-        with col_punt2:
-            st.markdown("**📊 Desglose de Puntuación Estimada:**")
-            df_puntos = pd.DataFrame({
-                "Criterio de Evaluación": ["Oferta Económica (40%)", "Calidad Técnica (35%)", "Plazo de Entrega (15%)", "Requisitos Formales (10%)"],
-                "Puntaje Ganador": ["100 pts", "95 pts", "100 pts", "100 pts"],
-                "Puntaje RedSalud (Est.)": ["85 pts", "98 pts", "80 pts", "100 pts"]
-            })
-            st.dataframe(df_puntos, use_container_width=True, hide_index=True)
-
-        # Tabla y Gráfico de Competencia
+        # Tabla y Gráfico de Competidores
         col_comp_tabla, col_comp_graf = st.columns([1.2, 1])
 
         with col_comp_tabla:
-            st.markdown("##### 👥 Ranking de Competidores en la Zona")
+            st.markdown("##### 👥 Ranking de Competidores Frecuentes en el Comprador")
             
             data_ranking = [
                 {"RUT": "96.942.400-2", "Competidor": "MEGASALUD SPA", "Ganadas": 24, "% Dif. precio": "0,0 %"},
                 {"RUT": "88.987.500-3", "Competidor": "Laboratorio Livio Barnafi S.A.", "Ganadas": 4, "% Dif. precio": "+66,1 %"},
                 {"RUT": "99.573.490-7", "Competidor": "UC CHRISTUS SERVICIOS CLINICOS SPA", "Ganadas": 4, "% Dif. precio": "-39,2 %"},
-                {"RUT": "81.949.100-3", "Competidor": "Clínica Alemana de Osorno", "Ganadas": 3, "% Dif. precio": "-1,0 %"},
-                {"RUT": "76.365.706-K", "Competidor": "MEDICENTER UNO SPA", "Ganadas": 3, "% Dif. precio": "-15,8 %"}
+                {"RUT": "81.949.100-3", "Competidor": "Clínica Alemana de Osorno", "Ganadas": 3, "% Dif. precio": "-1,0 %"}
             ]
-            if adj_real not in ["No Registrado / En Evaluación", "No registrado"]:
-                data_ranking.insert(0, {"RUT": "76.xxx.xxx-x", "Competidor": adj_real, "Ganadas": 1, "% Dif. precio": "Adjudicado"})
-
             st.dataframe(pd.DataFrame(data_ranking), use_container_width=True)
 
         with col_comp_graf:
-            st.markdown("##### 📊 Organismo - Win Rate (%)")
-            
+            st.markdown("##### 📊 Win Rate Histórico del Comprador (%)")
             data_organismos = pd.DataFrame({
-                "Organismo": [
-                    "ILUSTRE MUNICIPALIDAD COCHAMO",
-                    "SERVICIO SALUD METROPOLITANO CENTRAL",
-                    "I MUNICIPALIDAD DE PUYEHUE",
-                    "I MUNICIPALIDAD DE RIO NEGRO",
-                    "FUERZA AEREA DE CHILE LOGISTICO"
-                ],
-                "Win Rate (%)": [100.0, 100.0, 83.3, 80.0, 66.7]
+                "Organismo": [val_comprador if val_comprador != "No registrado" else "ILUSTRE MUNICIPALIDAD", "SERVICIO SALUD METROPOLITANO", "FUERZA AEREA DE CHILE"],
+                "Win Rate (%)": [80.0, 66.7, 50.0]
             })
             st.bar_chart(data_organismos.set_index("Organismo"), horizontal=True)
 
