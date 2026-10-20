@@ -10,7 +10,7 @@ st.set_page_config(
     page_icon="🧮"
 )
 
-# Estilos CSS
+# Estilos CSS personalizados
 st.markdown("""
     <style>
     .kpi-card {
@@ -137,7 +137,7 @@ if not df_api.empty:
     st.success(f" Conexión en vivo exitosa: **{len(df_api)}** oportunidades obtenidas desde la API.")
 
     # ==========================================
-    # 🔍 BUSCADOR CON ETIQUETA CLARA [COMPRA ÁGIL / LICITACIÓN]
+    # 🔍 BUSCADOR
     # ==========================================
     st.markdown("---")
     st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -191,7 +191,6 @@ if not df_api.empty:
             type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
             name_val = row.get(col_name, 'Sin nombre')
             
-            # ETIQUETA CLARA: Específica si es Compra Ágil o Licitación
             lbl = f"[{code_val}] ({type_val}) - {name_val}"
             lista_opciones.append(lbl)
             mapa_opciones[lbl] = row
@@ -214,7 +213,7 @@ if not df_api.empty:
         val_region = limpiar_texto(item.get("REGION"))
         val_comprador = limpiar_texto(item.get("ORGANISM"))
 
-        # TARJETAS SUPERIORES
+        # TARJETAS SUPERIORES: Código | Fecha Publicación | Fecha Cierre | Estado
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
@@ -254,7 +253,7 @@ if not df_api.empty:
         k4.metric("# Perdidas Histórico", str(tot_perdidas))
         k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
 
-        # CONDICIÓN DINÁMICA: EVALUAR SI ESTÁ ADJUDICADA O PUBLICADA
+        # CONDICIÓN DINÁMICA
         es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
 
         if es_adjudicada:
@@ -327,8 +326,9 @@ if not df_api.empty:
                 "Win Rate (%)": [80.0, 66.7, 50.0]
             })
             st.bar_chart(data_organismos.set_index("Organismo"), horizontal=True)
-# ==========================================
-        # 💵 PRESUPUESTO, VALORES DE REFERENCIA Y COMENTARIOS
+
+        # ==========================================
+        # 💵 PRESUPUESTO & SIMULADOR DE OFERTA
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
@@ -341,7 +341,6 @@ if not df_api.empty:
         e1.metric("Monto Neto Estimado", formatear_moneda(monto_neto))
         e2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
         
-        # Plazo de Pago o Alerta Financiera
         plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
         e3.metric("Plazo Estimado de Pago", plazo_pago)
 
@@ -357,6 +356,36 @@ if not df_api.empty:
                 st.warning("⚠️ **Recomendación Táctica:** Ajustar margen de oferta debido a observaciones o presupuesto acotado.")
             else:
                 st.success("✅ **Recomendación Táctica:** Proceso estándar. Proceder a simulación con margen corporativo objetivo.")
+
+        # Simulador de Costos
+        st.markdown("---")
+        st.subheader("📐 Simulador de Costos y Margen de Oferta")
+
+        col_calc1, col_calc2 = st.columns(2)
+
+        costo_directo = col_calc1.number_input(
+            "Costo Directo Estimado (CLP):",
+            min_value=0,
+            value=int(monto_neto * 0.6) if monto_neto > 0 else 500000,
+            step=10000
+        )
+        costo_operativo = col_calc1.number_input(
+            "Gastos Operativos / Logística por Zona (CLP):",
+            min_value=0,
+            value=50000,
+            step=5000
+        )
+
+        margen_pct = col_calc2.slider("Margen de Utilidad Deseado (%)", min_value=1, max_value=80, value=20)
+
+        costo_total_base = costo_directo + costo_operativo
+
+        if costo_total_base > 0 and margen_pct < 100:
+            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100))
+            iva_sugerido = precio_neto_sugerido * 0.19
+            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+            ganancia_bruta = precio_neto_sugerido - costo_total_base
+
             st.markdown("### 📊 Propuesta Económica Recomendada")
             r1, r2, r3 = st.columns(3)
             r1.metric("Precio Oferta Sugerido (Neto)", formatear_moneda(precio_neto_sugerido))
