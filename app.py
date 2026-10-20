@@ -107,6 +107,34 @@ def clasificar_tipo_label(tipo_raw, code_raw):
         return "Licitación Privada"
     return "Licitación Pública"
 
+def detectar_region_por_organismo(organismo, region_raw):
+    """Mapeador geográfico de municipios y organismos chilenos para evitar regiones erróneas."""
+    reg_limpia = limpiar_texto(region_raw, fallback="")
+    if reg_limpia and reg_limpia not in ["No registrado", "Sin información"]:
+        return reg_limpia
+
+    org_upper = str(organismo).upper()
+    
+    # Mapeos específicos
+    if "CHÉPICA" in org_upper or "CHEPICA" in org_upper or "SAN FERNANDO" in org_upper or "RANCAGUA" in org_upper:
+        return "Región del Libertador General Bernardo O'Higgins"
+    elif "SAN PEDRO DE ATACAMA" in org_upper or "ANTOFAGASTA" in org_upper or "CALAMA" in org_upper:
+        return "Región de Antofagasta"
+    elif "IQUIQUE" in org_upper or "ALTO HOSPICIO" in org_upper or "TARAPACÁ" in org_upper:
+        return "Región de Tarapacá"
+    elif "VALPARAÍSO" in org_upper or "VALPARAISO" in org_upper or "VIÑA" in org_upper or "VINA" in org_upper:
+        return "Región de Valparaíso"
+    elif "FRUTILLAR" in org_upper or "PUERTO MONTT" in org_upper or "OSORNO" in org_upper or "RELONCAVÍ" in org_upper:
+        return "Región de Los Lagos"
+    elif "CONCEPCIÓN" in org_upper or "CONCEPCION" in org_upper or "TALCAHUANO" in org_upper or "BIOBÍO" in org_upper:
+        return "Región del Biobío"
+    elif "TEMUCO" in org_upper or "PADRE LAS CASAS" in org_upper or "ARAUCANÍA" in org_upper:
+        return "Región de La Araucanía"
+    elif "TALCA" in org_upper or "CURICÓ" in org_upper or "MAULE" in org_upper:
+        return "Región del Maule"
+
+    return "Región Metropolitana"
+
 @st.cache_data(ttl=900)
 def cargar_datos_con_respaldo_anti_bloqueo():
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
@@ -151,7 +179,6 @@ def cargar_datos_con_respaldo_anti_bloqueo():
             df_sheet["OPPORTUNITY_CODE"] = df_sheet["Código Proceso"] if "Código Proceso" in df_sheet.columns else df_sheet.iloc[:, 1]
             df_sheet["OPPORTUNITY_NAME"] = df_sheet["Nombre Proceso"] if "Nombre Proceso" in df_sheet.columns else df_sheet.iloc[:, 4]
             df_sheet["ORGANISM"] = df_sheet["Institución Compradora"] if "Institución Compradora" in df_sheet.columns else df_sheet.iloc[:, 3]
-            df_sheet["REGION"] = df_sheet["Territorio / Región"] if "Territorio / Región" in df_sheet.columns else "Región Metropolitana"
             df_sheet["PUBLISH_DATE"] = df_sheet["Fecha Publicación"] if "Fecha Publicación" in df_sheet.columns else ""
             df_sheet["CLOSING_DATE"] = df_sheet["Fecha de Cierre"] if "Fecha de Cierre" in df_sheet.columns else ""
             df_sheet["OPPORTUNITY_STATUS"] = df_sheet["Estado de la Oferta"] if "Estado de la Oferta" in df_sheet.columns else "Publicada"
@@ -212,7 +239,7 @@ if not df_api.empty:
         item = mapa_opciones[proceso_sel]
 
         # ==========================================
-        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL (CON REGIÓN / TERRITORIO)
+        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
         # ==========================================
         st.markdown("---")
         st.subheader("📍 Análisis Comercial y Territorial del Proceso")
@@ -223,8 +250,8 @@ if not df_api.empty:
         val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
         val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
 
-        val_region = limpiar_texto(item.get("REGION") or item.get("region") or item.get("Territorio / Región") or item.get("LOCALITY"), fallback="Región Metropolitana")
-        val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"))
+        val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("Institución Compradora"))
+        val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -244,7 +271,7 @@ if not df_api.empty:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
         # ==========================================
-        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICO
+        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN
         # ==========================================
         st.markdown("---")
         st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
@@ -288,7 +315,7 @@ if not df_api.empty:
             """, unsafe_allow_html=True)
 
         # ==========================================
-        # 💵 PRESUPUESTO Y MONTO ESTIMADO CORRECTO
+        # 💵 PRESUPUESTO & SIMULADOR CORREGIDO
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
@@ -296,9 +323,9 @@ if not df_api.empty:
         monto_raw = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("Monto Total + IVA (Adjudicado / Estimado)") or 0
         monto_neto = limpiar_monto_a_float(monto_raw)
 
-        # Normalizar montos exagerados en Compras Ágiles (Tope típico de Compra Ágil)
-        if val_tipo_proceso == "Compra Ágil" and monto_neto > 10000000:
-            monto_neto = 3000000.0  # Presupuesto estimado referencial para Compra Ágil
+        # Topecito táctico para Compras Ágiles en Mercado Público (Evitar $40M inflados)
+        if val_tipo_proceso == "Compra Ágil" and monto_neto > 8000000:
+            monto_neto = 3500000.0  # Presupuesto de cotización típico para Compra Ágil
 
         monto_iva = monto_neto * 1.19
 
@@ -312,14 +339,12 @@ if not df_api.empty:
         comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
         st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
 
-        # ==========================================
-        # 📐 SIMULADOR CON MATEMÁTICA REACTIVA EXACTA
-        # ==========================================
         st.markdown("---")
         st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
+        # CÁLCULO DE COSTO DIRECTO INICIAL REALISTA
         val_costo_dir_def = int(monto_neto * 0.6) if monto_neto > 0 else 500000
 
         costo_directo = col_calc1.number_input(
@@ -352,7 +377,7 @@ if not df_api.empty:
             key=f"margen_{val_code}"
         )
 
-        # CÁLCULO MATEMÁTICO DIRECTO Y TRANSPARENTE
+        # MATEMÁTICA EXACTA DEL PUNTO DE EQUILIBRIO Y PRECIO
         costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
 
         if costo_total_base > 0 and margen_pct < 100:
