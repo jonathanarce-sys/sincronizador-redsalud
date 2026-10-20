@@ -327,9 +327,8 @@ if not df_api.empty:
                 "Win Rate (%)": [80.0, 66.7, 50.0]
             })
             st.bar_chart(data_organismos.set_index("Organismo"), horizontal=True)
-
-        # ==========================================
-        # 💵 PRESUPUESTO & SIMULADOR DE OFERTA
+# ==========================================
+        # 💵 PRESUPUESTO, VALORES DE REFERENCIA Y COMENTARIOS
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
@@ -337,41 +336,27 @@ if not df_api.empty:
         monto_neto = float(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0)
         monto_iva = monto_neto * 1.19
 
+        # Fila de Métricas Financieras
         e1, e2, e3 = st.columns(3)
         e1.metric("Monto Neto Estimado", formatear_moneda(monto_neto))
         e2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
         
-        comentarios_txt = limpiar_texto(item.get("COMMENTS"), fallback="Sin observaciones registradas.")
-        e3.info(f"💬 **Comentarios de Gestión:**\n\n{comentarios_txt}")
+        # Plazo de Pago o Alerta Financiera
+        plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
+        e3.metric("Plazo Estimado de Pago", plazo_pago)
 
-        st.markdown("---")
-        st.subheader("📐 Simulador de Costos y Margen de Oferta")
-
-        col_calc1, col_calc2 = st.columns(2)
-
-        costo_directo = col_calc1.number_input(
-            "Costo Directo Estimado (CLP):",
-            min_value=0,
-            value=int(monto_neto * 0.6) if monto_neto > 0 else 500000,
-            step=10000
-        )
-        costo_operativo = col_calc1.number_input(
-            "Gastos Operativos / Logística por Zona (CLP):",
-            min_value=0,
-            value=50000,
-            step=5000
-        )
-
-        margen_pct = col_calc2.slider("Margen de Utilidad Deseado (%)", min_value=1, max_value=80, value=20)
-
-        costo_total_base = costo_directo + costo_operativo
-
-        if costo_total_base > 0 and margen_pct < 100:
-            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100))
-            iva_sugerido = precio_neto_sugerido * 0.19
-            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
-            ganancia_bruta = precio_neto_sugerido - costo_total_base
-
+        # Fila de Comentarios de Gestión & Recomendación Táctica
+        comentarios_txt = limpiar_texto(item.get("COMMENTS"), fallback="Sin observaciones registradas por la comisión.")
+        
+        c_coment, c_recom = st.columns([2, 1])
+        with c_coment:
+            st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
+        
+        with c_recom:
+            if "RESTRIN" in comentarios_txt.upper() or "RECHAZO" in comentarios_txt.upper():
+                st.warning("⚠️ **Recomendación Táctica:** Ajustar margen de oferta debido a observaciones o presupuesto acotado.")
+            else:
+                st.success("✅ **Recomendación Táctica:** Proceso estándar. Proceder a simulación con margen corporativo objetivo.")
             st.markdown("### 📊 Propuesta Económica Recomendada")
             r1, r2, r3 = st.columns(3)
             r1.metric("Precio Oferta Sugerido (Neto)", formatear_moneda(precio_neto_sugerido))
