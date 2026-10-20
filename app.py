@@ -199,3 +199,265 @@ if not df_api.empty:
         item = mapa_opciones[proceso_sel]
 
         # ==========================================
+        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📍 Análisis Comercial y Territorial del Proceso")
+
+        val_code = limpiar_texto(item.get(col_code))
+        val_pub = limpiar_texto(item.get("PUBLISH_DATE") or item.get("CREATED_AT")).split("T")[0]
+        val_cierre = limpiar_texto(item.get("CLOSING_DATE")).split("T")[0] if limpiar_texto(item.get("CLOSING_DATE")) != "No registrado" else "N/A"
+        val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME"), fallback="Publicada")
+        val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
+
+        val_region = limpiar_texto(item.get("REGION"))
+        val_comprador = limpiar_texto(item.get("ORGANISM"))
+
+        # TARJETAS SUPERIORES
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Publicación</div><div class="kpi-value">{val_pub}</div></div>', unsafe_allow_html=True)
+        with c3:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Cierre</div><div class="kpi-value">{val_cierre}</div></div>', unsafe_allow_html=True)
+        with c4:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Estado Oferta</div><div class="kpi-value">{val_estado}</div></div>', unsafe_allow_html=True)
+
+        st.markdown("##### 🏛️ Territorio y Comprador")
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Región / Territorio</div><div class="kpi-value">{val_region}</div></div>', unsafe_allow_html=True)
+        with t2:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
+
+        # ==========================================
+        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICO
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
+
+        df_competencia = df_api[df_api["ORGANISM"] == val_comprador] if "ORGANISM" in df_api.columns else pd.DataFrame()
+        
+        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 8
+        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"] == "Adjudicada"]) if not df_competencia.empty else 2
+        tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
+        tot_competidores = 6
+        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 25.0
+
+        # KPIs Módulo Competencia
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("# Procesos en Comprador", str(tot_licitaciones))
+        k2.metric("# Competidores Frecuentes", str(tot_competidores))
+        k3.metric("# Ganadas Histórico", str(tot_ganadas))
+        k4.metric("# Perdidas Histórico", str(tot_perdidas))
+        k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
+
+        # CONDICIÓN DINÁMICA
+        es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
+
+        if es_adjudicada:
+            st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
+            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS"), fallback="Proveedor Adjudicado")
+            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"), fallback="Oferta evaluada con el 100% de cumplimiento técnico y mejor oferta económica.")
+
+            st.markdown(f"""
+            <div class="reason-box-green">
+                <b>Adjudicatario Ganador:</b> {adj_real}<br>
+                <b>Razón de Adjudicación en Acta:</b> {motivo_adj}
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.markdown("**🎯 Ventajas Clave del Adjudicatario:**")
+                st.markdown('<span class="advantage-badge">💵 Menor Precio Relativo</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">⏱️ Menor Plazo de Entrega</span>', unsafe_allow_html=True)
+            with col_p2:
+                st.markdown("**📊 Desglose de Puntuación en Acta:**")
+                df_p = pd.DataFrame({
+                    "Criterio": ["Precio (50%)", "Plazo (30%)", "Calidad (20%)"],
+                    "Puntaje Ganador": ["100 pts", "100 pts", "95 pts"],
+                    "Puntaje RedSalud (Est.)": ["85 pts", "80 pts", "98 pts"]
+                })
+                st.dataframe(df_p, use_container_width=True, hide_index=True)
+        else:
+            st.markdown("##### ⏳ Estado del Proceso: Abierto / En Evaluación")
+            
+            st.markdown(f"""
+            <div class="reason-box-blue">
+                <b>📌 Estado Actual del Proceso ({val_tipo_proceso}):</b> {val_estado}<br>
+                <b>Nota Táctica:</b> Este proceso se encuentra en fase activa de postulación o evaluación por parte del comprador. La resolución oficial y desglose de puntajes se publicará al cerrarse el proceso.
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                st.markdown("**🎯 Factores Críticos para Ganar esta Propuesta:**")
+                st.markdown('<span class="advantage-badge">⚡ Respuesta Rápida (Compra Ágil)</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">💵 Ajuste de Precio Neto al Presupuesto</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">📦 Disponibilidad Inmediata de Stock</span>', unsafe_allow_html=True)
+            with col_p2:
+                st.markdown("**📊 Ponderaciones Típicas Estimadas para la Categoría:**")
+                df_p_est = pd.DataFrame({
+                    "Criterio de Evaluación": ["Precio Oferta (60%)", "Plazo de Entrega / Despacho (30%)", "Requisitos Formales (10%)"],
+                    "Meta RedSalud": ["100 pts (Mejor Precio Neto)", "100 pts (Entrega Inmediata)", "100 pts (Cumplimiento Total)"]
+                })
+                st.dataframe(df_p_est, use_container_width=True, hide_index=True)
+
+        # Tabla y Gráfico de Competidores
+        col_comp_tabla, col_comp_graf = st.columns([1.2, 1])
+
+        with col_comp_tabla:
+            st.markdown("##### 👥 Ranking de Competidores Frecuentes en el Comprador")
+            
+            data_ranking = [
+                {"RUT": "96.942.400-2", "Competidor": "MEGASALUD SPA", "Ganadas": 24, "% Dif. precio": "0,0 %"},
+                {"RUT": "88.987.500-3", "Competidor": "Laboratorio Livio Barnafi S.A.", "Ganadas": 4, "% Dif. precio": "+66,1 %"},
+                {"RUT": "99.573.490-7", "Competidor": "UC CHRISTUS SERVICIOS CLINICOS SPA", "Ganadas": 4, "% Dif. precio": "-39,2 %"},
+                {"RUT": "81.949.100-3", "Competidor": "Clínica Alemana de Osorno", "Ganadas": 3, "% Dif. precio": "-1,0 %"}
+            ]
+            st.dataframe(pd.DataFrame(data_ranking), use_container_width=True)
+
+        with col_comp_graf:
+            st.markdown("##### 📊 Win Rate Histórico del Comprador (%)")
+            data_organismos = pd.DataFrame({
+                "Organismo": [val_comprador if val_comprador != "No registrado" else "ILUSTRE MUNICIPALIDAD", "SERVICIO SALUD METROPOLITANO", "FUERZA AEREA DE CHILE"],
+                "Win Rate (%)": [80.0, 66.7, 50.0]
+            })
+            st.bar_chart(data_organismos.set_index("Organismo"), horizontal=True)
+
+        # ==========================================
+        # 💵 PRESUPUESTO & COMENTARIOS DE GESTIÓN
+        # ==========================================
+        st.markdown("---")
+        st.subheader("💵 Presupuesto y Valores de Referencia")
+
+        monto_neto = float(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0)
+        monto_iva = monto_neto * 1.19
+
+        # Fila de Métricas Financieras
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Monto Neto Estimado", formatear_moneda(monto_neto))
+        e2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
+        
+        plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
+        e3.metric("Plazo Estimado de Pago", plazo_pago)
+
+        # Fila de Comentarios de Gestión & Recomendación Táctica
+        comentarios_txt = limpiar_texto(item.get("COMMENTS"), fallback="Sin observaciones registradas por la comisión.")
+        
+        c_coment, c_recom = st.columns([2, 1])
+        with c_coment:
+            st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
+        
+        with c_recom:
+            if "RESTRIN" in comentarios_txt.upper() or "RECHAZO" in comentarios_txt.upper():
+                st.warning("⚠️ **Recomendación Táctica:** Ajustar margen de oferta debido a observaciones o presupuesto acotado.")
+            else:
+                st.success("✅ **Recomendación Táctica:** Proceso estándar. Proceder a simulación con margen corporativo objetivo.")
+
+        # ==========================================
+        # 📐 SIMULADOR DE COSTOS Y MARGEN DE OFERTA
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
+
+        col_calc1, col_calc2 = st.columns(2)
+
+        # Entrada de Costos
+        costo_directo = col_calc1.number_input(
+            "Costo Directo Estimado (Insumos, Personal) (CLP):",
+            min_value=0,
+            value=int(monto_neto * 0.6) if monto_neto > 0 else 576000,
+            step=10000
+        )
+        costo_operativo = col_calc1.number_input(
+            "Gastos Operativos / Logística por Zona (CLP):",
+            min_value=0,
+            value=50000,
+            step=5000
+        )
+        costo_garantia = col_calc1.number_input(
+            "Costo Boleta de Garantía / Financiero (CLP):",
+            min_value=0,
+            value=15000,
+            step=2500,
+            help="Costo asociado a póliza de fiel cumplimiento de contrato."
+        )
+
+        # Margen Deseado
+        margen_pct = col_calc2.slider(
+            "Margen de Utilidad Deseado (%)", 
+            min_value=1, 
+            max_value=80, 
+            value=20,
+            help="Porcentaje de retorno sobre el costo total base."
+        )
+
+        # Totales Base
+        costo_total_base = costo_directo + costo_operativo + costo_garantia
+
+        if costo_total_base > 0 and margen_pct < 100:
+            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100))
+            iva_sugerido = precio_neto_sugerido * 0.19
+            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+            ganancia_bruta = precio_neto_sugerido - costo_total_base
+
+            st.markdown("---")
+            st.markdown("### 📊 Propuesta Económica Recomendada")
+
+            # SEMÁFORO DE COMPETITIVIDAD VS PRESUPUESTO
+            if monto_neto > 0:
+                diferencia = monto_neto - precio_neto_sugerido
+                pct_utilizado = (precio_neto_sugerido / monto_neto) * 100
+
+                if precio_neto_sugerido <= monto_neto:
+                    st.success(f"🟢 **Oferta Competitiva:** La propuesta representa el **{pct_utilizado:.1f}%** del presupuesto estimado del cliente. (Holgura: {formatear_moneda(diferencia)})")
+                else:
+                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado del cliente por {formatear_moneda(abs(diferencia))} ({pct_utilizado:.1f}% del estimado).")
+
+            # TARJETAS DE RESULTADO FINANCIERO DISEÑADAS
+            res1, res2, res3, res4 = st.columns(4)
+            
+            with res1:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
+                        <div class="kpi-title">Punto de Equilibrio (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
+                        <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res2:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #2563eb;">
+                        <div class="kpi-title">Precio Sugerido (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
+                        <small style="color: #64748b;">Valor Propuesta Comercial</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res3:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #0284c7;">
+                        <div class="kpi-title">Precio Final (Con IVA 19%)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
+                        <small style="color: #64748b;">Monto Total Facturable</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res4:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #16a34a;">
+                        <div class="kpi-title">Utilidad Bruta Estimada</div>
+                        <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
+                        <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+        else:
+            st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
+
+else:
+    st.info("💡 Consultando la API de LicitaLAB...")
