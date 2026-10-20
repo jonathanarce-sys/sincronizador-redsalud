@@ -108,30 +108,58 @@ def clasificar_tipo_label(tipo_raw, code_raw):
     return "Licitación Pública"
 
 def detectar_region_por_organismo(organismo, region_raw):
-    """Mapeador geográfico de municipios y organismos chilenos para evitar regiones erróneas."""
+    """Mapeador geográfico avanzado de comunas y municipalidades de Chile."""
     reg_limpia = limpiar_texto(region_raw, fallback="")
-    if reg_limpia and reg_limpia not in ["No registrado", "Sin información"]:
+    if reg_limpia and reg_limpia not in ["No registrado", "Sin información", "RM"]:
         return reg_limpia
 
     org_upper = str(organismo).upper()
     
-    # Mapeos específicos
-    if "CHÉPICA" in org_upper or "CHEPICA" in org_upper or "SAN FERNANDO" in org_upper or "RANCAGUA" in org_upper:
+    # 1. Región del Ñuble
+    if any(k in org_upper for k in ["YUNGAY", "CHILLÁN", "CHILLAN", "BULNES", "SAN CARLOS", "ÑUBLE", "NUBLE"]):
+        return "Región del Ñuble"
+    # 2. Región de O'Higgins
+    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "CHIMBARONGO", "SANTA CRUZ", "O'HIGGINS"]):
         return "Región del Libertador General Bernardo O'Higgins"
-    elif "SAN PEDRO DE ATACAMA" in org_upper or "ANTOFAGASTA" in org_upper or "CALAMA" in org_upper:
+    # 3. Región de Antofagasta
+    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA", "TOCOPILLA", "MEJILLONES"]):
         return "Región de Antofagasta"
-    elif "IQUIQUE" in org_upper or "ALTO HOSPICIO" in org_upper or "TARAPACÁ" in org_upper:
+    # 4. Región de Tarapacá
+    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "POZO ALMONTE", "TARAPACÁ", "TARAPACA"]):
         return "Región de Tarapacá"
-    elif "VALPARAÍSO" in org_upper or "VALPARAISO" in org_upper or "VIÑA" in org_upper or "VINA" in org_upper:
+    # 5. Región de Valparaíso
+    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA", "VINA", "QUILLOTA", "SAN ANTONIO", "QUILPUÉ"]):
         return "Región de Valparaíso"
-    elif "FRUTILLAR" in org_upper or "PUERTO MONTT" in org_upper or "OSORNO" in org_upper or "RELONCAVÍ" in org_upper:
+    # 6. Región de Los Lagos
+    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO", "RELONCAVÍ", "RELONCAVI", "PUERTO VARAS", "ANCUD", "CASTRO"]):
         return "Región de Los Lagos"
-    elif "CONCEPCIÓN" in org_upper or "CONCEPCION" in org_upper or "TALCAHUANO" in org_upper or "BIOBÍO" in org_upper:
+    # 7. Región del Biobío
+    elif any(k in org_upper for k in ["CONCEPCIÓN", "CONCEPCION", "TALCAHUANO", "LOS ÁNGELES", "LOS ANGELES", "BIOBÍO", "BIOBIO", "CORONEL"]):
         return "Región del Biobío"
-    elif "TEMUCO" in org_upper or "PADRE LAS CASAS" in org_upper or "ARAUCANÍA" in org_upper:
+    # 8. Región de La Araucanía
+    elif any(k in org_upper for k in ["TEMUCO", "PADRE LAS CASAS", "ANGOL", "VILLARRICA", "PUCÓN", "PUCON", "ARAUCANÍA"]):
         return "Región de La Araucanía"
-    elif "TALCA" in org_upper or "CURICÓ" in org_upper or "MAULE" in org_upper:
+    # 9. Región del Maule
+    elif any(k in org_upper for k in ["TALCA", "CURICÓ", "CURICO", "LINARES", "CONSTITUCIÓN", "MAULE"]):
         return "Región del Maule"
+    # 10. Región de Coquimbo
+    elif any(k in org_upper for k in ["LA SERENA", "COQUIMBO", "OVALLE", "ILLAPEL"]):
+        return "Región de Coquimbo"
+    # 11. Región de Atacama
+    elif any(k in org_upper for k in ["COPIAPÓ", "COPIAPO", "VALLENAR", "CHAÑARAL"]):
+        return "Región de Atacama"
+    # 12. Región de Los Ríos
+    elif any(k in org_upper for k in ["VALDIVIA", "LA UNIÓN", "LA UNION", "RÍO BUENO"]):
+        return "Región de Los Ríos"
+    # 13. Región de Aysén
+    elif any(k in org_upper for k in ["COYHAIQUE", "AYSÉN", "AYSEN", "PUERTO AYSÉN"]):
+        return "Región de Aysén del General Carlos Ibáñez del Campo"
+    # 14. Región de Magallanes
+    elif any(k in org_upper for k in ["PUNTA ARENAS", "PUERTO NATALES", "MAGALLANES"]):
+        return "Región de Magallanes y de la Antártica Chilena"
+    # 15. Región de Arica y Parinacota
+    elif any(k in org_upper for k in ["ARICA", "PARINACOTA"]):
+        return "Región de Arica y Parinacota"
 
     return "Región Metropolitana"
 
@@ -209,7 +237,7 @@ if not df_api.empty:
     codigo_ingresado = col_busqueda.text_input(
         "Ingresa o busca por Código de Proceso:",
         value="1380-5003-COT26",
-        placeholder="Ej: 1380-5003-COT26, 2432-804-COT26..."
+        placeholder="Ej: 3590-191-COT26, 1380-5003-COT26..."
     ).strip()
 
     df_filtrado = df_api.copy()
@@ -239,7 +267,7 @@ if not df_api.empty:
         item = mapa_opciones[proceso_sel]
 
         # ==========================================
-        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
+        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL (CORREGIDO)
         # ==========================================
         st.markdown("---")
         st.subheader("📍 Análisis Comercial y Territorial del Proceso")
@@ -250,7 +278,7 @@ if not df_api.empty:
         val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
         val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
 
-        val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("Institución Compradora"))
+        val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"))
         val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
 
         c1, c2, c3, c4 = st.columns(4)
@@ -271,7 +299,7 @@ if not df_api.empty:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
         # ==========================================
-        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN
+        # 🏢 MÓDULO DE COMPETENCIA
         # ==========================================
         st.markdown("---")
         st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
@@ -315,17 +343,18 @@ if not df_api.empty:
             """, unsafe_allow_html=True)
 
         # ==========================================
-        # 💵 PRESUPUESTO & SIMULADOR CORREGIDO
+        # 💵 PRESUPUESTO Y MONTO ESTIMADO DE COMPRA ÁGIL REALISTA
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
 
-        monto_raw = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("Monto Total + IVA (Adjudicado / Estimado)") or 0
+        # Extracción priorizada de montos reales ofertados o estimados
+        monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
         monto_neto = limpiar_monto_a_float(monto_raw)
 
-        # Topecito táctico para Compras Ágiles en Mercado Público (Evitar $40M inflados)
-        if val_tipo_proceso == "Compra Ágil" and monto_neto > 8000000:
-            monto_neto = 3500000.0  # Presupuesto de cotización típico para Compra Ágil
+        # Normalización de techos para Compras Ágiles (Evita heredar el techo de $40M de convenios marco)
+        if val_tipo_proceso == "Compra Ágil" and (monto_neto > 7000000 or monto_neto == 0):
+            monto_neto = 2500000.0  # Presupuesto referencial realista para Compra Ágil
 
         monto_iva = monto_neto * 1.19
 
@@ -339,13 +368,16 @@ if not df_api.empty:
         comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
         st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
 
+        # ==========================================
+        # 📐 SIMULADOR CON MATEMÁTICA EXACTA Y SIN CÁLCULOS SOBREDIMENSIONADOS
+        # ==========================================
         st.markdown("---")
         st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
-        # CÁLCULO DE COSTO DIRECTO INICIAL REALISTA
-        val_costo_dir_def = int(monto_neto * 0.6) if monto_neto > 0 else 500000
+        # Costo directo por defecto ajustado al monto neto real
+        val_costo_dir_def = int(monto_neto * 0.6) if (monto_neto > 0 and monto_neto <= 10000000) else 1500000
 
         costo_directo = col_calc1.number_input(
             "Costo Directo Estimado (Insumos, Personal) (CLP):",
@@ -377,7 +409,7 @@ if not df_api.empty:
             key=f"margen_{val_code}"
         )
 
-        # MATEMÁTICA EXACTA DEL PUNTO DE EQUILIBRIO Y PRECIO
+        # CÁLCULO MATEMÁTICO DIRECTO Y CONSISTENTE
         costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
 
         if costo_total_base > 0 and margen_pct < 100:
