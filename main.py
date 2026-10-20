@@ -85,33 +85,53 @@ def limpiar_texto_o_lista(val):
             pass
     return val_str.strip(" []'\"")
 
-def determinar_workspace(item):
-    """Busca exhaustivamente la Clínica o Centro Médico asignado en LicitaLAB."""
-    candidatos = [
-        item.get("WORKSPACE_TITLE"),
-        item.get("workspace_title"),
-        item.get("WORKSPACE_NAME"),
-        item.get("workspace_name"),
-        item.get("WORKSPACE"),
-        item.get("workspace"),
-        item.get("MEMBER_NAME"),
-        item.get("member_name")
-    ]
+def determinar_workspace_redsalud(item, nombre_proceso):
+    """Extrae la Clínica o Centro Médico asignado evaluando Etiquetas (Tags), Miembros y Título."""
+    # 1. Búsqueda en Etiquetas (TRANSLATED_TAGS / TAGS / LABELS)
+    tags_raw = item.get("TRANSLATED_TAGS") or item.get("TAGS") or item.get("LABELS") or item.get("tags")
+    tags_txt = limpiar_texto_o_lista(tags_raw)
     
-    for cand in candidatos:
-        if cand and str(cand).strip() not in ["", "None", "null", "NaN"]:
-            val = str(cand).strip()
-            # Limpiar comillas si vienen en formato lista
-            val_limp = val.strip(" []'\"")
-            if val_limp:
-                return val_limp
-                
-    # Búsqueda por ID de Workspace si existe mapeo
-    ws_id = item.get("WORKSPACE_ID") or item.get("workspace_id")
-    if ws_id:
-        return f"Workspace ID: {ws_id}"
-        
-    return "Sin Asignar / Casa Matriz"
+    if tags_txt and tags_txt.upper() not in ["NONE", "NULL", ""]:
+        return tags_txt
+
+    # 2. Búsqueda en Título / Nombre o Comentarios de palabras clave de sedes RedSalud
+    texto_evaluar = f"{nombre_proceso} {limpiar_texto_o_lista(item.get('COMMENTS'))}".upper()
+    
+    sedes = {
+        "MAGALLANES": "CENTRO DE DIAGNOSTICO CLINICA MAGALLANES SPA",
+        "SANTIAGO": "Clínica RedSalud Santiago",
+        "VALPARAÍSO": "Clínica RedSalud Valparaíso",
+        "VALPARAISO": "Clínica RedSalud Valparaíso",
+        "PROVIDENCIA": "Centro Médico RedSalud Providencia",
+        "VITACURA": "Clínica RedSalud Vitacura",
+        "MAIPÚ": "Centro Médico RedSalud Maipú",
+        "MAIPU": "Centro Médico RedSalud Maipú",
+        "TEMUCO": "Clínica RedSalud Temuco",
+        "IQUIQUE": "Clínica RedSalud Iquique",
+        "ANTOFAGASTA": "Clínica RedSalud Antofagasta",
+        "RANCAGUA": "Clínica RedSalud Rancagua",
+        "TALCA": "Clínica RedSalud Talca"
+    }
+
+    for clave, nombre_sede in sedes.items():
+        if clave in texto_evaluar:
+            return nombre_sede
+
+    # 3. Búsqueda en Miembro / Usuario asignado o Línea de Negocio
+    miembro = item.get("MEMBER_NAME") or item.get("member_name")
+    if miembro and str(miembro).strip() not in ["", "None", "null"]:
+        return f"Asignado a: {str(miembro).strip()}"
+
+    b_line = limpiar_texto_o_lista(item.get("B_LINE_TITLE"))
+    if b_line and b_line.upper() not in ["MUNICIPALIDADES", "SALUD", "GOBIERNO", "NONE"]:
+        return f"RedSalud - {b_line}"
+
+    # 4. Fallback si es un registro de la Casa Matriz
+    ws_title = item.get("WORKSPACE_TITLE") or item.get("workspace_title")
+    if ws_title and str(ws_title).strip() not in ["", "None"]:
+        return str(ws_title).strip()
+
+    return "RedSalud Casa Matriz"
 
 def determinar_prestacion(item, nombre_proceso):
     b_line = limpiar_texto_o_lista(item.get("B_LINE_TITLE") or item.get("b_line_title"))
@@ -180,27 +200,27 @@ def procesar_items_api(items):
     filas = []
     
     for item in items:
-        # 1. Workspace real asignado (Búsqueda multicampo)
-        workspace = determinar_workspace(item)
+        # 1. Nombre Proceso
+        nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
+
+        # 2. Workspace asignado (Búsqueda inteligente multicampo/tags)
+        workspace = determinar_workspace_redsalud(item, nombre)
         
-        # 2. Código Proceso
+        # 3. Código Proceso
         codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
         
-        # 3. Fecha Publicación
+        # 4. Fecha Publicación
         fecha_pub = formatear_fecha(item.get("PUBLISH_DATE") or item.get("CREATED_AT"))
         
-        # 4. Fecha de Cierre real
+        # 5. Fecha de Cierre real
         fecha_cierre = formatear_fecha(item.get("CLOSING_DATE") or item.get("closing_date") or item.get("EXPIRATION_DATE"))
         
-        # 5. Tipo Proceso
+        # 6. Tipo Proceso
         tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
         tipo = clasificar_tipo(tipo_orig, codigo)
         
-        # 6. Institución Compradora
+        # 7. Institución Compradora
         comprador = str(item.get("ORGANISM") or item.get("organism") or item.get("BUYER_NAME") or "").strip()
-        
-        # 7. Nombre Proceso
-        nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
         
         # 8. Prestación
         prestacion = determinar_prestacion(item, nombre)
@@ -212,10 +232,10 @@ def procesar_items_api(items):
         # 10. Estado
         estado = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
         
-        # 11. Adjudicatario (Proveedor Ganador)
+        # 11. Adjudicatario
         adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS") or item.get("awarded_providers"))
         
-        # 12. Comentarios / Motivo
+        # 12. Comentarios
         comentarios = limpiar_texto_o_lista(item.get("COMMENTS") or item.get("comments") or item.get("MANAGED_STATUS_NAME"))
 
         filas.append([
@@ -248,7 +268,7 @@ def procesar_items_api(items):
         "Comentarios"
     ])
 
-    # Filtrar 2025 en adelante
+    # Filtrar solo 2025 en adelante
     if "Fecha Publicación" in df.columns:
         df["_year"] = pd.to_datetime(df["Fecha Publicación"], errors="coerce").dt.year
         df = df[df["_year"] >= 2025].drop(columns=["_year"], errors="ignore")
@@ -265,12 +285,12 @@ def sincronizar():
 
     if items_api:
         df_final = procesar_items_api(items_api)
-        log(f"📊 Registros calibrados procesados (Año 2025+): {len(df_final)}")
+        log(f"📊 Registros procesados (Año 2025+): {len(df_final)}")
 
         log("🧹 Limpiando la planilla Google Sheets...")
         sheet.clear()
 
-        log("📝 Escribiendo los datos calibrados con Workspaces reales por centro/clínica...")
+        log("📝 Escribiendo los datos con los Workspaces asignados por Clínica/Centro Médico...")
         valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
         sheet.update(range_name="A1", values=valores)
 
