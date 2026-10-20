@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import json
 
-# Configuración de página ejecutiva
+# Configuración ejecutiva de página
 st.set_page_config(
     page_title="Calculadora Comercial & Inteligencia de Competencia - RedSalud",
     layout="wide",
@@ -58,12 +58,13 @@ st.markdown("""
         font-weight: 600;
         display: inline-block;
         margin-right: 6px;
+        margin-bottom: 6px;
     }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("🧮 Calculadora Comercial y Simulador de Ofertas - RedSalud")
-st.markdown("Herramienta de inteligencia comercial conectada directamente a la **API de LicitaLAB**.")
+st.markdown("Herramienta de inteligencia comercial conectada a la **API de LicitaLAB**.")
 
 LICITALAB_API_KEY = st.secrets.get("LICITALAB_API_KEY", "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE").strip()
 URL_API_LICITALAB = "https://biapi.licitalab.cl/bi/v2/opportunities"
@@ -134,10 +135,10 @@ with st.spinner("Conectando con la API de LicitaLAB BI..."):
     df_api = consultar_todas_las_oportunidades()
 
 if not df_api.empty:
-    st.success(f" Conexión en vivo exitosa: **{len(df_api)}** oportunidades obtenidas desde la API.")
+    st.success(f" Conexión en vivo exitosa: **{len(df_api)}** oportunidades cargadas.")
 
     # ==========================================
-    # 🔍 BUSCADOR Y SELECCIÓN DE OPORTUNIDAD
+    # 🔍 BUSCADOR
     # ==========================================
     st.markdown("---")
     st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -146,7 +147,7 @@ if not df_api.empty:
 
     codigo_ingresado = col_busqueda.text_input(
         "Buscar por Código de Proceso:",
-        placeholder="Ej: 2432-804-COT26..."
+        placeholder="Ej: 1380-5003-COT26..."
     ).strip()
 
     col_reg = "REGION" if "REGION" in df_api.columns else "region"
@@ -157,7 +158,7 @@ if not df_api.empty:
     tipos_disp = ["Todos"] + list(df_api[col_tip].dropna().unique()) if col_tip in df_api.columns else ["Todos"]
     tipo_sel = col_filtro_tipo.selectbox("Tipo de Proceso:", tipos_disp)
 
-    # Filtrar Dataframe
+    # Filtrar
     df_filtrado = df_api.copy()
 
     if region_sel != "Todas" and col_reg in df_filtrado.columns:
@@ -213,7 +214,6 @@ if not df_api.empty:
         val_region = limpiar_texto(item.get("REGION"))
         val_comprador = limpiar_texto(item.get("ORGANISM"))
 
-        # TARJETAS SUPERIORES
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
@@ -232,34 +232,32 @@ if not df_api.empty:
             st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
         # ==========================================
-        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICO
+        # 🏢 ANÁLISIS DE COMPETENCIA DINÁMICO
         # ==========================================
         st.markdown("---")
         st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
 
-        df_competencia = df_api[df_api["ORGANISM"] == val_comprador] if "ORGANISM" in df_api.columns else pd.DataFrame()
+        df_competencia = df_api[df_api["ORGANISM"] == val_comprador] if ("ORGANISM" in df_api.columns and val_comprador != "No registrado") else pd.DataFrame()
         
-        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 8
-        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"] == "Adjudicada"]) if not df_competencia.empty else 2
+        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 1
+        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"].astype(str).str.contains("Adjudicad", case=False, na=False)]) if not df_competencia.empty else 0
         tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
-        tot_competidores = 6
-        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 25.0
+        tot_competidores = len(df_competencia["AWARDED_PROVIDERS"].dropna().unique()) if ("AWARDED_PROVIDERS" in df_competencia.columns and not df_competencia.empty) else 3
+        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 0.0
 
-        # KPIs Módulo Competencia
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("# Procesos en Comprador", str(tot_licitaciones))
-        k2.metric("# Competidores Frecuentes", str(tot_competidores))
+        k2.metric("# Competidores Frecuentes", str(max(1, tot_competidores)))
         k3.metric("# Ganadas Histórico", str(tot_ganadas))
         k4.metric("# Perdidas Histórico", str(tot_perdidas))
         k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
 
-        # CONDICIÓN DINÁMICA
         es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
 
         if es_adjudicada:
             st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
             adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS"), fallback="Proveedor Adjudicado")
-            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"), fallback="Oferta evaluada con el 100% de cumplimiento técnico y mejor oferta económica.")
+            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME"), fallback="Oferta con menor precio relativo y cumplimiento del 100% de requerimientos en bases.")
 
             st.markdown(f"""
             <div class="reason-box-green">
@@ -272,7 +270,7 @@ if not df_api.empty:
             with col_p1:
                 st.markdown("**🎯 Ventajas Clave del Adjudicatario:**")
                 st.markdown('<span class="advantage-badge">💵 Menor Precio Relativo</span>', unsafe_allow_html=True)
-                st.markdown('<span class="advantage-badge">⏱️ Menor Plazo de Entrega</span>', unsafe_allow_html=True)
+                st.markdown('<span class="advantage-badge">⏱️ Cumplimiento de Plazo de Entrega</span>', unsafe_allow_html=True)
             with col_p2:
                 st.markdown("**📊 Desglose de Puntuación en Acta:**")
                 df_p = pd.DataFrame({
@@ -282,53 +280,42 @@ if not df_api.empty:
                 })
                 st.dataframe(df_p, use_container_width=True, hide_index=True)
         else:
-            st.markdown("##### ⏳ Estado del Proceso: Abierto / En Evaluación")
+            st.markdown(f"##### ⏳ Estado del Proceso ({val_tipo_proceso}): Abierto / En Evaluación")
             
             st.markdown(f"""
             <div class="reason-box-blue">
-                <b>📌 Estado Actual del Proceso ({val_tipo_proceso}):</b> {val_estado}<br>
-                <b>Nota Táctica:</b> Este proceso se encuentra en fase activa de postulación o evaluación por parte del comprador. La resolución oficial y desglose de puntajes se publicará al cerrarse el proceso.
+                <b>📌 Estado Actual del Proceso:</b> {val_estado}<br>
+                <b>Nota Táctica para {val_tipo_proceso}:</b> Este proceso no registra adjudicación final aún. Se muestran los factores clave requeridos para maximizar probabilidad de éxito en la postulación.
             </div>
             """, unsafe_allow_html=True)
 
             col_p1, col_p2 = st.columns(2)
             with col_p1:
-                st.markdown("**🎯 Factores Críticos para Ganar esta Propuesta:**")
-                st.markdown('<span class="advantage-badge">⚡ Respuesta Rápida (Compra Ágil)</span>', unsafe_allow_html=True)
-                st.markdown('<span class="advantage-badge">💵 Ajuste de Precio Neto al Presupuesto</span>', unsafe_allow_html=True)
-                st.markdown('<span class="advantage-badge">📦 Disponibilidad Inmediata de Stock</span>', unsafe_allow_html=True)
+                st.markdown(f"**🎯 Factores Críticos para Ganar esta {val_tipo_proceso}:**")
+                if val_tipo_proceso == "Compra Ágil":
+                    st.markdown('<span class="advantage-badge">⚡ Respuesta Rápida en Portal</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="advantage-badge">💵 Ajuste de Precio Neto al Techo Presupuestario</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="advantage-badge">📦 Disponibilidad Inmediata / Despacho Rápido</span>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<span class="advantage-badge">📄 Cumplimiento Estricto de Anexos Administrativos</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="advantage-badge">🏆 Oferta Técnica con Especificaciones Solicitadas</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="advantage-badge">💵 Optimización de Puntuación Económica</span>', unsafe_allow_html=True)
             with col_p2:
-                st.markdown("**📊 Ponderaciones Típicas Estimadas para la Categoría:**")
-                df_p_est = pd.DataFrame({
-                    "Criterio de Evaluación": ["Precio Oferta (60%)", "Plazo de Entrega / Despacho (30%)", "Requisitos Formales (10%)"],
-                    "Meta RedSalud": ["100 pts (Mejor Precio Neto)", "100 pts (Entrega Inmediata)", "100 pts (Cumplimiento Total)"]
-                })
+                st.markdown(f"**📊 Ponderaciones Estimadas ({val_tipo_proceso}):**")
+                if val_tipo_proceso == "Compra Ágil":
+                    df_p_est = pd.DataFrame({
+                        "Criterio de Evaluación": ["Precio Oferta (70%)", "Plazo Entrega (30%)"],
+                        "Meta RedSalud": ["100 pts (Menor Precio Neto)", "100 pts (Entrega Inmediata)"]
+                    })
+                else:
+                    df_p_est = pd.DataFrame({
+                        "Criterio de Evaluación": ["Precio Oferta (50%)", "Calidad Técnica (30%)", "Plazo de Entrega (10%)", "Cumplimiento Formal (10%)"],
+                        "Meta RedSalud": ["100 pts", "100 pts", "100 pts", "100 pts"]
+                    })
                 st.dataframe(df_p_est, use_container_width=True, hide_index=True)
 
-        # Tabla y Gráfico de Competidores
-        col_comp_tabla, col_comp_graf = st.columns([1.2, 1])
-
-        with col_comp_tabla:
-            st.markdown("##### 👥 Ranking de Competidores Frecuentes en el Comprador")
-            
-            data_ranking = [
-                {"RUT": "96.942.400-2", "Competidor": "MEGASALUD SPA", "Ganadas": 24, "% Dif. precio": "0,0 %"},
-                {"RUT": "88.987.500-3", "Competidor": "Laboratorio Livio Barnafi S.A.", "Ganadas": 4, "% Dif. precio": "+66,1 %"},
-                {"RUT": "99.573.490-7", "Competidor": "UC CHRISTUS SERVICIOS CLINICOS SPA", "Ganadas": 4, "% Dif. precio": "-39,2 %"},
-                {"RUT": "81.949.100-3", "Competidor": "Clínica Alemana de Osorno", "Ganadas": 3, "% Dif. precio": "-1,0 %"}
-            ]
-            st.dataframe(pd.DataFrame(data_ranking), use_container_width=True)
-
-        with col_comp_graf:
-            st.markdown("##### 📊 Win Rate Histórico del Comprador (%)")
-            data_organismos = pd.DataFrame({
-                "Organismo": [val_comprador if val_comprador != "No registrado" else "ILUSTRE MUNICIPALIDAD", "SERVICIO SALUD METROPOLITANO", "FUERZA AEREA DE CHILE"],
-                "Win Rate (%)": [80.0, 66.7, 50.0]
-            })
-            st.bar_chart(data_organismos.set_index("Organismo"), horizontal=True)
-
         # ==========================================
-        # 💵 PRESUPUESTO & COMENTARIOS DE GESTIÓN
+        # 💵 PRESUPUESTO & SIMULADOR REACTIVO
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
@@ -336,7 +323,6 @@ if not df_api.empty:
         monto_neto = float(item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0)
         monto_iva = monto_neto * 1.19
 
-        # Fila de Métricas Financieras
         e1, e2, e3 = st.columns(3)
         e1.metric("Monto Neto Estimado", formatear_moneda(monto_neto))
         e2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
@@ -344,58 +330,47 @@ if not df_api.empty:
         plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
         e3.metric("Plazo Estimado de Pago", plazo_pago)
 
-        # Fila de Comentarios de Gestión & Recomendación Táctica
         comentarios_txt = limpiar_texto(item.get("COMMENTS"), fallback="Sin observaciones registradas por la comisión.")
-        
-        c_coment, c_recom = st.columns([2, 1])
-        with c_coment:
-            st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
-        
-        with c_recom:
-            if "RESTRIN" in comentarios_txt.upper() or "RECHAZO" in comentarios_txt.upper():
-                st.warning("⚠️ **Recomendación Táctica:** Ajustar margen de oferta debido a observaciones o presupuesto acotado.")
-            else:
-                st.success("✅ **Recomendación Táctica:** Proceso estándar. Proceder a simulación con margen corporativo objetivo.")
+        st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
 
-        # ==========================================
-        # 📐 SIMULADOR DE COSTOS Y MARGEN DE OFERTA
-        # ==========================================
         st.markdown("---")
         st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
-        # Entrada de Costos
+        # CLAVES DINÁMICAS REACTIVAS (VINCULADAS A val_code)
+        val_costo_dir_def = int(monto_neto * 0.6) if monto_neto > 0 else 500000
+
         costo_directo = col_calc1.number_input(
             "Costo Directo Estimado (Insumos, Personal) (CLP):",
             min_value=0,
-            value=int(monto_neto * 0.6) if monto_neto > 0 else 576000,
-            step=10000
+            value=val_costo_dir_def,
+            step=10000,
+            key=f"costo_directo_{val_code}"
         )
         costo_operativo = col_calc1.number_input(
             "Gastos Operativos / Logística por Zona (CLP):",
             min_value=0,
             value=50000,
-            step=5000
+            step=5000,
+            key=f"costo_operativo_{val_code}"
         )
         costo_garantia = col_calc1.number_input(
             "Costo Boleta de Garantía / Financiero (CLP):",
             min_value=0,
             value=15000,
             step=2500,
-            help="Costo asociado a póliza de fiel cumplimiento de contrato."
+            key=f"costo_garantia_{val_code}"
         )
 
-        # Margen Deseado
         margen_pct = col_calc2.slider(
-            "Margen de Utilidad Deseado (%)", 
-            min_value=1, 
-            max_value=80, 
+            "Margen de Utilidad Deseado (%)",
+            min_value=1,
+            max_value=80,
             value=20,
-            help="Porcentaje de retorno sobre el costo total base."
+            key=f"margen_{val_code}"
         )
 
-        # Totales Base
         costo_total_base = costo_directo + costo_operativo + costo_garantia
 
         if costo_total_base > 0 and margen_pct < 100:
@@ -407,7 +382,6 @@ if not df_api.empty:
             st.markdown("---")
             st.markdown("### 📊 Propuesta Económica Recomendada")
 
-            # SEMÁFORO DE COMPETITIVIDAD VS PRESUPUESTO
             if monto_neto > 0:
                 diferencia = monto_neto - precio_neto_sugerido
                 pct_utilizado = (precio_neto_sugerido / monto_neto) * 100
@@ -417,7 +391,6 @@ if not df_api.empty:
                 else:
                     st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado del cliente por {formatear_moneda(abs(diferencia))} ({pct_utilizado:.1f}% del estimado).")
 
-            # TARJETAS DE RESULTADO FINANCIERO DISEÑADAS
             res1, res2, res3, res4 = st.columns(4)
             
             with res1:
