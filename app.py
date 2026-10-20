@@ -6,7 +6,7 @@ from google.oauth2.service_account import Credentials
 import base64
 import json
 
-# Configuración ejecutiva de la página
+# Configuración ejecutiva de página
 st.set_page_config(
     page_title="Calculadora Comercial & Inteligencia de Competencia - RedSalud",
     layout="wide",
@@ -114,7 +114,6 @@ def cargar_datos_con_respaldo_anti_bloqueo():
     todos_items = []
     api_exitosa = False
 
-    # 1. Consulta controlada a LicitaLAB API
     try:
         res = requests.get(f"{URL_API_LICITALAB}?page=1", headers=headers, timeout=6)
         if res.status_code == 200:
@@ -131,7 +130,6 @@ def cargar_datos_con_respaldo_anti_bloqueo():
         df["_origen"] = "API LicitaLAB BI (En Vivo)"
         return df
 
-    # 2. Respaldo por Google Sheets si la API devuelve 429 (Too Many Requests) o falla
     try:
         creds_dict = None
         if "GCP_JSON_BASE64" in st.secrets:
@@ -151,7 +149,6 @@ def cargar_datos_con_respaldo_anti_bloqueo():
             records = sheet.get_all_records()
             df_sheet = pd.DataFrame(records)
             
-            # Mapeo de compatibilidad
             df_sheet["OPPORTUNITY_CODE"] = df_sheet["Código Proceso"] if "Código Proceso" in df_sheet.columns else df_sheet.iloc[:, 1]
             df_sheet["OPPORTUNITY_NAME"] = df_sheet["Nombre Proceso"] if "Nombre Proceso" in df_sheet.columns else df_sheet.iloc[:, 4]
             df_sheet["ORGANISM"] = df_sheet["Institución Compradora"] if "Institución Compradora" in df_sheet.columns else df_sheet.iloc[:, 3]
@@ -344,4 +341,69 @@ if not df_api.empty:
             min_value=1,
             max_value=80,
             value=20,
-            key=f"margen_{
+            key=f"margen_{val_code}"
+        )
+
+        costo_total_base = costo_directo + costo_operativo + costo_garantia
+
+        if costo_total_base > 0 and margen_pct < 100:
+            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100))
+            iva_sugerido = precio_neto_sugerido * 0.19
+            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+            ganancia_bruta = precio_neto_sugerido - costo_total_base
+
+            st.markdown("---")
+            st.markdown("### 📊 Propuesta Económica Recomendada")
+
+            if monto_neto > 0:
+                diferencia = monto_neto - precio_neto_sugerido
+                pct_utilizado = (precio_neto_sugerido / monto_neto) * 100
+
+                if precio_neto_sugerido <= monto_neto:
+                    st.success(f"🟢 **Oferta Competitiva:** La propuesta representa el **{pct_utilizado:.1f}%** del presupuesto estimado. (Holgura: {formatear_moneda(diferencia)})")
+                else:
+                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia))} ({pct_utilizado:.1f}% del estimado).")
+
+            res1, res2, res3, res4 = st.columns(4)
+            
+            with res1:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
+                        <div class="kpi-title">Punto de Equilibrio (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
+                        <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res2:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #2563eb;">
+                        <div class="kpi-title">Precio Sugerido (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
+                        <small style="color: #64748b;">Valor Propuesta Comercial</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res3:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #0284c7;">
+                        <div class="kpi-title">Precio Final (Con IVA 19%)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
+                        <small style="color: #64748b;">Monto Total Facturable</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res4:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #16a34a;">
+                        <div class="kpi-title">Utilidad Bruta Estimada</div>
+                        <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
+                        <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+        else:
+            st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
+
+else:
+    st.warning("⚠️ No se pudieron obtener datos.")
