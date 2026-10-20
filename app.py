@@ -1,206 +1,163 @@
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
+import requests
 import pandas as pd
-import base64
 import json
 
-# Configuración de página con diseño ancho y profesional
+# Configuración de la página
 st.set_page_config(
-    page_title="Calculadora de Ofertas - RedSalud",
+    page_title="Calculadora Comercial LicitaLAB - RedSalud",
     layout="wide",
     page_icon="🧮"
 )
 
-# Estilo visual limpio
-st.markdown("""
-    <style>
-    .stMetric {
-        background-color: #f8f9fa;
-        padding: 12px;
-        border-radius: 8px;
-        border: 1px solid #e9ecef;
-    }
-    </style>
-""", unsafe_allow_html=True)
+st.title("🧮 Calculadora Comercial y Simulador de Ofertas - RedSalud")
+st.markdown("Herramienta de inteligencia comercial conectada directamente a la **API de LicitaLAB**.")
 
-st.title("🧮 Calculadora de Licite / Ofertas - RedSalud")
-st.markdown("Herramienta interactiva para la estimación de costos, análisis territorial, competencia y márgenes de licitaciones.")
-
-SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-
-def limpiar_monto_a_float(val) -> float:
-    """Convierte cualquier valor de texto/moneda a float de forma segura sin romper la interfaz."""
-    if pd.isna(val) or val is None:
-        return 0.0
-    try:
-        val_str = str(val).replace("$", "").replace(".", "").replace(",", ".").replace("CLP", "").strip()
-        return float(val_str)
-    except Exception:
-        return 0.0
-
-def formatear_clp(monto: float) -> str:
-    """Formatea un número flotante a formato moneda CLP ($ 1.000.000)."""
-    try:
-        return f"$ {int(round(monto)):,}".replace(",", ".")
-    except Exception:
-        return "$ 0"
+# 🔑 Obtener API Key de LicitaLAB desde Streamlit Secrets o constante
+LICITALAB_API_KEY = st.secrets.get("LICITALAB_API_KEY", "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE")
+URL_API_LICITALAB = "https://biapi.licitalab.cl/bi/v2/opportunities"
 
 @st.cache_data(ttl=300)
-def cargar_y_procesar_datos():
-    creds_dict = None
-    if "GCP_JSON_BASE64" in st.secrets:
-        b64_str = st.secrets["GCP_JSON_BASE64"]
-        json_bytes = base64.b64decode(b64_str)
-        creds_dict = json.loads(json_bytes.decode("utf-8"))
-    elif "gcp_service_account" in st.secrets:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-    else:
-        st.error("❌ No se encontraron credenciales en Settings > Secrets de Streamlit.")
+def consultar_api_licitalab():
+    """Consulta la API de LicitaLAB BI y retorna las oportunidades en vivo."""
+    headers = {
+        "x-api-key": LICITALAB_API_KEY,
+        "Accept": "application/json"
+    }
+    try:
+        res = requests.get(f"{URL_API_LICITALAB}?page=1", headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("data", data) if isinstance(data, dict) else data
+            return pd.DataFrame(items) if isinstance(items, list) else pd.DataFrame()
+        else:
+            st.error(f"⚠️ Error al conectar con LicitaLAB API (Status {res.status_code})")
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"❌ Excepción al consultar la API: {e}")
         return pd.DataFrame()
 
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
+# Carga de Datos desde la API
+with st.spinner("Conectando con la API de LicitaLAB BI..."):
+    df_api = consultar_api_licitalab()
 
-    sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-    data = sheet.get_all_records()
-    df = pd.DataFrame(data)
-
-    if df.empty:
-        return df
-
-    # Limpieza de columnas no requeridas
-    cols_eliminar = [c for c in df.columns if "criterio" in c.lower() or "evaluaci" in c.lower()]
-    df = df.drop(columns=cols_eliminar, errors="ignore")
-
-    return df
-
-# Carga de datos
-with st.spinner("Cargando información desde la Base Maestra..."):
-    try:
-        df = cargar_y_procesar_datos()
-    except Exception as e:
-        st.error(f"❌ Error al conectar con Google Sheets: {e}")
-        df = pd.DataFrame()
-
-if not df.empty:
-    st.success(f" Base de datos conectada: **{len(df)}** oportunidades disponibles.")
+if not df_api.empty:
+    st.success(f" Conexión en vivo exitosa: **{len(df_api)}** oportunidades obtenidas directamente desde la API.")
 
     # ==========================================
-    # 🔍 BUSCADOR Y FILTROS ESTRATÉGICOS
+    # 🔎 BUSCADOR & FILTROS DE INTELIGENCIA
     # ==========================================
-    st.markdown("### 🔎 Búsqueda y Selección de Oportunidad")
-
-    # Identificación inteligente de columnas
-    col_codigo = next((c for c in df.columns if "código" in c.lower() or "codigo" in c.lower()), df.columns[0])
-    col_tipo = next((c for c in df.columns if "tipo" in c.lower()), df.columns[1] if len(df.columns) > 1 else df.columns[0])
-    col_nombre = next((c for c in df.columns if "nombre" in c.lower()), df.columns[2] if len(df.columns) > 2 else df.columns[0])
-    col_territorio = next((c for c in df.columns if "territorio" in c.lower() or "region" in c.lower() or "zona" in c.lower() or "lugar" in c.lower()), None)
+    st.markdown("---")
+    st.subheader("🔎 Buscador y Selección de Oportunidad")
 
     f1, f2, f3 = st.columns([2, 1, 1])
 
-    # 1. Buscador por Código
+    # 1. Búsqueda por código
     codigo_buscado = f1.text_input(
-        "🔎 Buscar por Código de Proceso:",
+        "Buscar por Código de Proceso:",
         placeholder="Ej: 1380-4954-COT26..."
     ).strip()
 
-    # 2. Filtro por Tipo de Proceso
-    tipos_disponibles = ["Todos"] + list(df[col_tipo].dropna().unique())
-    tipo_sel = f2.selectbox("Tipo de Proceso:", tipos_disponibles)
+    # 2. Filtro por Región / Territorio
+    col_region = "REGION" if "REGION" in df_api.columns else "region"
+    regiones_disp = ["Todas"] + list(df_api[col_region].dropna().unique()) if col_region in df_api.columns else ["Todas"]
+    region_sel = f2.selectbox("Territorio / Región:", regiones_disp)
 
-    # 3. Filtro por Territorio (si existe en la planilla)
-    if col_territorio:
-        territorios_disp = ["Todos"] + list(df[col_territorio].dropna().unique())
-        territorio_sel = f3.selectbox("Territorio / Zona:", territorios_disp)
-    else:
-        territorio_sel = "Todos"
+    # 3. Filtro por Tipo
+    col_tipo = "OPPORTUNITY_TYPE" if "OPPORTUNITY_TYPE" in df_api.columns else "opportunity_type"
+    tipos_disp = ["Todos"] + list(df_api[col_tipo].dropna().unique()) if col_tipo in df_api.columns else ["Todos"]
+    tipo_sel = f3.selectbox("Tipo de Proceso:", tipos_disp)
 
-    # Filtrar Dataframe
-    df_filtrado = df.copy()
+    # Filtrar DataFrame
+    df_filtrado = df_api.copy()
 
-    if tipo_sel != "Todos":
+    if region_sel != "Todas" and col_region in df_filtrado.columns:
+        df_filtrado = df_filtrado[df_filtrado[col_region] == region_sel]
+
+    if tipo_sel != "Todos" and col_tipo in df_filtrado.columns:
         df_filtrado = df_filtrado[df_filtrado[col_tipo] == tipo_sel]
 
-    if col_territorio and territorio_sel != "Todos":
-        df_filtrado = df_filtrado[df_filtrado[col_territorio] == territorio_sel]
-
-    if codigo_buscado:
-        df_filtrado = df_filtrado[df_filtrado[col_codigo].astype(str).str.contains(codigo_buscado, case=False, na=False)]
+    col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_filtrado.columns else "opportunity_code"
+    if codigo_buscado and col_code in df_filtrado.columns:
+        df_filtrado = df_filtrado[df_filtrado[col_code].astype(str).str.contains(codigo_buscado, case=False, na=False)]
 
     if df_filtrado.empty:
-        st.warning(f"⚠️ No se encontraron resultados con los criterios seleccionados.")
+        st.warning("⚠️ No se encontraron procesos con los criterios de búsqueda seleccionados.")
     else:
-        # Selector de Licitación
+        # Selector de proceso
+        col_name = "OPPORTUNITY_NAME" if "OPPORTUNITY_NAME" in df_filtrado.columns else "opportunity_name"
+        
         lista_opciones = []
         mapa_opciones = {}
         for idx, row in df_filtrado.iterrows():
-            lbl = f"[{row[col_codigo]}] - {row[col_nombre]}"
+            lbl = f"[{row.get(col_code, 'S/C')}] - {row.get(col_name, 'Sin nombre')}"
             lista_opciones.append(lbl)
             mapa_opciones[lbl] = row
 
-        proceso_seleccionado_lbl = st.selectbox(
-            "Selecciona la Licitación o Compra Ágil a calcular:",
-            lista_opciones
-        )
-
-        item = mapa_opciones[proceso_seleccionado_lbl]
+        proceso_sel = st.selectbox("Selecciona la Licitación o Compra Ágil a analizar:", lista_opciones)
+        item = mapa_opciones[proceso_sel]
 
         # ==========================================
-        # 📋 DETALLES DE LA OPORTUNIDAD & METRICAS
+        # 📍 INTELIGENCIA COMERCIAL Y TERRITORIAL
         # ==========================================
         st.markdown("---")
-        st.subheader("📋 Detalles de la Oportunidad Seleccionada")
+        st.subheader("📍 Análisis Comercial y Territorial del Proceso")
 
-        col_cierre = next((c for c in df.columns if "cierre" in c.lower() or "termino" in c.lower()), "Fecha de Cierre")
-        col_monto = next((c for c in df.columns if "monto" in c.lower() or "estimado" in c.lower() or "total" in c.lower()), "Monto")
-        col_estado = next((c for c in df.columns if "estado" in c.lower()), "Estado")
-        col_competencia = next((c for c in df.columns if "competencia" in c.lower() or "oferente" in c.lower() or "ganador" in c.lower()), None)
-
-        # Fila 1: Datos de Identificación
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Código Proceso", str(item.get(col_codigo, "N/A")))
-        m2.metric("Tipo Proceso", str(item.get(col_tipo, "N/A")))
-        m3.metric("Fecha de Cierre", str(item.get(col_cierre, "N/A")))
-        m4.metric("Estado de la Oferta", str(item.get(col_estado, "N/A")))
+        m1.metric("Código Proceso", str(item.get(col_code, "N/A")))
+        m2.metric("Workspace Asignado", str(item.get("WORKSPACE_TITLE", "Casa Matriz")))
+        m3.metric("Fecha de Cierre", str(item.get("CLOSING_DATE", "N/A")).split("T")[0])
+        m4.metric("Estado Oferta", str(item.get("OPPORTUNITY_STATUS", item.get("MANAGED_STATUS_NAME", "Publicada"))))
 
-        # Fila 2: Análisis Económico, Territorio y Competencia
-        monto_neto_val = limpiar_monto_a_float(item.get(col_monto, 0))
-        monto_iva_val = monto_neto_val * 1.19
-
-        st.markdown("##### 📍 Análisis Territorial, Competencia y Económico")
-        e1, e2, e3, e4 = st.columns(4)
-
-        e1.metric("Territorio / Zona", str(item.get(col_territorio, "No especificado")) if col_territorio else "N/A")
-        e2.metric("Monto Neto Estimado", formatear_clp(monto_neto_val))
-        e3.metric("Valor Total con IVA (Adjudicado/Por Adjudicar)", formatear_clp(monto_iva_val))
+        st.markdown("##### 🏛️ Territorio, Comprador y Competencia")
+        c1, c2, c3 = st.columns([1, 1.5, 1.5])
         
-        info_comp = str(item.get(col_competencia, "Sin registro de competencia")) if col_competencia else "No registrada"
-        e4.metric("Competencia / Oferentes", info_comp)
-
-        # Comentarios u Observaciones
-        comentario_txt = str(item.get("Comentarios", item.get("Observaciones", "Sin comentarios registrados.")))
-        st.info(f"💬 **Comentarios u Observaciones del Proceso:**\n\n{comentario_txt}")
+        c1.metric("Región / Territorio", str(item.get("REGION", "No indicada")))
+        c2.metric("Institución Compradora", str(item.get("ORGANISM", "No indicada")))
+        
+        # Competencia u Oferentes Previos
+        competidores = str(item.get("AWARDED_PROVIDERS", "Sin registro previo de competencia"))
+        if competidores in ["None", "null", "[]", ""]:
+            competidores = "Sin registro / Abierta"
+        c3.metric("Competencia / Adjudicatario Previo", competidores)
 
         # ==========================================
-        # 📐 SIMULADOR & CALCULADORA A PRUEBA DE ERRORES
+        # 💵 ANÁLISIS ECONÓMICO Y PRESUPUESTARIO
         # ==========================================
         st.markdown("---")
-        st.subheader("📐 Simulador y Calculadora de Margen de Oferta")
+        st.subheader("💵 Presupuesto y Valores de Referencia")
+
+        monto_neto_raw = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
+        try:
+            monto_neto = float(monto_neto_raw)
+        except:
+            monto_neto = 0.0
+
+        monto_iva = monto_neto * 1.19
+
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Monto Neto Disponible / Estimado", f"$ {int(monto_neto):,}".replace(",", "."))
+        e2.metric("Monto Total + IVA (19%)", f"$ {int(monto_iva):,}".replace(",", "."))
+        
+        comentarios_txt = str(item.get("COMMENTS", "Sin observaciones registradas."))
+        e3.info(f"💬 **Comentarios de Gestión:**\n\n{comentarios_txt}")
+
+        # ==========================================
+        # 📐 SIMULADOR TÁCTICO DE MARGEN DE OFERTA
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📐 Simulador de Costos y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
         costo_directo = col_calc1.number_input(
-            "Costo Directo Estimado (CLP)",
+            "Costo Directo Estimado (CLP):",
             min_value=0,
-            value=int(monto_neto_val * 0.6) if monto_neto_val > 0 else 500000,
+            value=int(monto_neto * 0.6) if monto_neto > 0 else 500000,
             step=10000
         )
         costo_operativo = col_calc1.number_input(
-            "Gastos Operativos / Logística (CLP)",
+            "Gastos Operativos / Logística por Zona (CLP):",
             min_value=0,
             value=50000,
             step=5000
@@ -210,21 +167,17 @@ if not df.empty:
 
         costo_total_base = costo_directo + costo_operativo
 
-        # Cálculos de resultados protegidos contra quiebres
         if costo_total_base > 0 and margen_pct < 100:
-            precio_sugerido_neto = costo_total_base / (1 - (margen_pct / 100))
-            iva_calc = precio_sugerido_neto * 0.19
-            precio_sugerido_bruto = precio_sugerido_neto + iva_calc
-            utilidad_bruta = precio_sugerido_neto - costo_total_base
+            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100))
+            iva_sugerido = precio_neto_sugerido * 0.19
+            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+            ganancia_bruta = precio_neto_sugerido - costo_total_base
 
-            st.markdown("### 📊 Resultado de la Propuesta")
-            res1, res2, res3 = st.columns(3)
-            
-            res1.metric("Precio Oferta Sugerido (Neto)", formatear_clp(precio_sugerido_neto))
-            res2.metric("Precio Oferta Final (Con IVA 19%)", formatear_clp(precio_sugerido_bruto))
-            res3.metric("Margen / Utilidad Bruta Estimada", formatear_clp(utilidad_bruta))
-        else:
-            st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
+            st.markdown("### 📊 Propuesta Económica Recomendada")
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Precio Oferta Sugerido (Neto)", f"$ {int(precio_neto_sugerido):,}".replace(",", "."))
+            r2.metric("Precio Oferta Final (Con IVA 19%)", f"$ {int(precio_bruto_sugerido):,}".replace(",", "."))
+            r3.metric("Utilidad Bruta Estimada", f"$ {int(ganancia_bruta):,}".replace(",", "."))
 
 else:
-    st.info("💡 Esperando datos de la base maestra...")
+    st.info("💡 Consultando la API de LicitaLAB...")
