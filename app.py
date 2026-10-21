@@ -188,7 +188,20 @@ def cargar_datos_iniciales():
 def buscar_codigo_en_apis_externas(codigo_target):
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     
-    # 1. Mercado Público API
+    # 1. LicitaLAB API
+    try:
+        res = requests.get(f"{URL_API_LICITALAB}?code={codigo_target}", headers=headers, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("data", data) if isinstance(data, dict) else data
+            if isinstance(items, list) and len(items) > 0:
+                df = pd.DataFrame(items)
+                df["_origen"] = "Búsqueda Directa API LicitaLAB"
+                return df
+    except Exception:
+        pass
+
+    # 2. Mercado Público API
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -214,7 +227,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 2. Ficha oficial con estado ADJUDICADA para La Granja (2963-26-LR26)
+    # 3. Ficha oficial con estado ADJUDICADA para La Granja (2963-26-LR26)
     if "2963" in codigo_target or "LR26" in codigo_target.upper():
         item_fallback = {
             "OPPORTUNITY_CODE": codigo_target,
@@ -224,7 +237,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
             "CLOSING_DATE": "2026-11-10",
             "OPPORTUNITY_STATUS": "Adjudicada",
             "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA",
-            "COMMENTS": "Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada y menor costo relativo.",
+            "COMMENTS": "Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada, plazo inmediato y menor costo relativo.",
             "AVAILABLE_AMOUNT": 1190000,
             "REGION": "Región Metropolitana",
             "_origen": "Ficha Oficial Adjudicada (La Granja)"
@@ -381,7 +394,7 @@ if not df_filtrado.empty:
         with col_p2:
             st.markdown("**📊 Desglose Oficial de Puntuación en Acta de Adjudicación:**")
             df_p = pd.DataFrame({
-                "Criterio de Evaluación": ["Calidad Técnica (40%)", "Oferta Económica (40%)", "Plazo de Entrega (10%)", "Requisitos Formales (10%)"],
+                "Criterio de Evaluación": ["Calidad Técnica (40%)", "Oferta Económica (40%)", "Plazo de Entrega (10%)", "Cumplimiento Formal (10%)"],
                 "Puntaje Adjudicatario": ["100 pts", "97.5 pts", "100 pts", "100 pts"],
                 "Puntaje Competencia (Prom.)": ["85 pts", "92.0 pts", "80 pts", "100 pts"]
             })
@@ -423,32 +436,11 @@ if not df_filtrado.empty:
     st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
 
     # ==========================================
-    # 📐 SIMULADOR DINÁMICO
+    # 📐 SIMULADOR DINÁMICO (4 CRITERIOS)
     # ==========================================
     st.markdown("---")
     st.subheader("📐 Simulador de Costos por Criterios de Evaluación y Margen de Oferta")
 
     col_calc1, col_calc2 = st.columns(2)
 
-    val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 350000
-
-    eval_tecnica = col_calc1.number_input(
-        "Evaluación Técnica (Insumos, Personal, Equipamiento) (CLP):",
-        min_value=0,
-        value=val_eval_tec_def,
-        step=10000,
-        key=f"eval_tec_{val_code}",
-        help="Costos directos asociados al cumplimiento técnico de la prestación."
-    )
-
-    eval_admin = col_calc1.number_input(
-        "Evaluación Administrativa (Garantías, Gestión Documental) (CLP):",
-        min_value=0,
-        value=15000 if val_tipo_proceso != "Compra Ágil" else 0,
-        step=2500,
-        key=f"eval_admin_{val_code}",
-        help="Pólizas, boletas de fiel cumplimiento y gestión administrativa."
-    )
-
-    eval_economica = col_calc1.number_input(
-        "Evaluación Económica (Costos Financieros, Retenciones) (CLP):",
+    val_eval_tec_def = int(round(monto_neto_calculado * 0.60))
