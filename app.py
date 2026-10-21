@@ -82,26 +82,24 @@ def limpiar_texto(val, fallback="No registrado"):
     return s.strip(" []'\"")
 
 def limpiar_monto_a_float(val) -> float:
-    """Convierte de forma segura cualquier texto o número a float evitando factores de escala erróneos."""
     if val is None or pd.isna(val):
         return 0.0
     try:
         val_str = str(val).replace("$", "").replace(".", "").replace(",", ".").replace("CLP", "").strip()
-        monto = float(val_str)
-        return monto
+        return float(val_str)
     except Exception:
         return 0.0
 
 def ajustar_monto_compra_agil(monto_raw, tipo_proceso):
-    """Detecta y corrige distorsiones de escala en montos de Compras Ágiles (ej: $7.600.000 -> $760.000)."""
+    """Detecta y corrige el factor de escala de 10x en Compras Ágiles (ej: $7.600.000 -> $760.000)."""
     monto = limpiar_monto_a_float(monto_raw)
     
     if tipo_proceso == "Compra Ágil":
-        # Si el monto viene multiplicado por 10 o sobrepasa el techo típico de Compra Ágil (100 UTM)
-        if monto > 6700000 and monto % 10 == 0:
+        # Corrección del error de escala de 10x
+        if monto >= 6000000 and monto <= 10000000:
             monto = monto / 10.0
         elif monto > 10000000:
-            monto = 760000.0  # Ajuste referencial por defecto para cotización de Compra Ágil
+            monto = 760000.0  # Techo por defecto de cotización
             
     return monto
 
@@ -330,34 +328,45 @@ if not df_api.empty:
             """, unsafe_allow_html=True)
 
         # ==========================================
-        # 💵 PRESUPUESTO REALISTA & NORMALIZADO
+        # 💵 PRESUPUESTO & MONTO EDITABLE
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
 
         monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
-        monto_neto = ajustar_monto_compra_agil(monto_raw, val_tipo_proceso)
+        monto_calculado_auto = ajustar_monto_compra_agil(monto_raw, val_tipo_proceso)
+
+        # Entrada para ajustar/corregir el Monto Neto Estimado manualmente si la API trae un valor errado
+        p1, p2, p3 = st.columns([1.5, 1.5, 1])
+        
+        monto_neto_input = p1.number_input(
+            "Monto Neto Estimado del Cliente (CLP):",
+            min_value=0,
+            value=int(monto_calculado_auto),
+            step=50000,
+            key=f"monto_neto_user_{val_code}",
+            help="Puedes modificar esta cifra si la API trae un monto bruto o inflado."
+        )
+
+        monto_neto = float(monto_neto_input)
         monto_iva = monto_neto * 1.19
 
-        e1, e2, e3 = st.columns(3)
-        e1.metric("Monto Neto Estimado", formatear_moneda(monto_neto))
-        e2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
-        
+        p2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
         plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
-        e3.metric("Plazo Estimado de Pago", plazo_pago)
+        p3.metric("Plazo Estimado de Pago", plazo_pago)
 
         comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
         st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
 
         # ==========================================
-        # 📐 SIMULADOR CON MATEMÁTICA EXACTA Y SIN SOBREPRECIOS
+        # 📐 SIMULADOR DE COSTOS Y MARGEN
         # ==========================================
         st.markdown("---")
         st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
-        # Costo directo por defecto en proporción al monto neto real
+        # Costo directo inicial realista derivado del monto neto corregido
         val_costo_dir_def = int(monto_neto * 0.6) if monto_neto > 0 else 500000
 
         costo_directo = col_calc1.number_input(
@@ -390,7 +399,7 @@ if not df_api.empty:
             key=f"margen_{val_code}"
         )
 
-        # CÁLCULO DIRECTO EXACTO SIN FORMATOS VICIADOS
+        # CÁLCULO DIRECTO EXACTO
         costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
 
         if costo_total_base > 0 and margen_pct < 100:
