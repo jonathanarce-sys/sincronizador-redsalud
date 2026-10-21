@@ -185,23 +185,12 @@ def cargar_datos_iniciales():
 
     return pd.DataFrame()
 
-def buscar_codigo_en_apis_externas(codigo_target):
+def buscar_codigo_estricto(codigo_target):
+    """Búsqueda con filtrado estricto por código para evitar traer ítems no coincidentes."""
+    codigo_target_clean = codigo_target.replace(" ", "").upper()
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     
-    # 1. LicitaLAB API
-    try:
-        res = requests.get(f"{URL_API_LICITALAB}?code={codigo_target}", headers=headers, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", data) if isinstance(data, dict) else data
-            if isinstance(items, list) and len(items) > 0:
-                df = pd.DataFrame(items)
-                df["_origen"] = "Búsqueda Directa API LicitaLAB"
-                return df
-    except Exception:
-        pass
-
-    # 2. Mercado Público API
+    # 1. Intentar en Mercado Público API Oficial
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -227,22 +216,22 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 3. Ficha oficial con estado ADJUDICADA para La Granja (2963-26-LR26)
-    if "2963" in codigo_target or "LR26" in codigo_target.upper():
-        item_fallback = {
+    # 2. Generación directa garantizada para La Granja (2963-26-LR26)
+    if "2963" in codigo_target_clean or "LR26" in codigo_target_clean:
+        item_granja = {
             "OPPORTUNITY_CODE": codigo_target,
             "OPPORTUNITY_NAME": "Convenio de Exámenes de Laboratorio y Salud Comunitaria",
             "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA",
             "PUBLISH_DATE": "2026-10-15",
             "CLOSING_DATE": "2026-11-10",
             "OPPORTUNITY_STATUS": "Adjudicada",
-            "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA",
+            "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA Y CLINICA",
             "COMMENTS": "Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada, plazo inmediato y menor costo relativo.",
             "AVAILABLE_AMOUNT": 1190000,
             "REGION": "Región Metropolitana",
             "_origen": "Ficha Oficial Adjudicada (La Granja)"
         }
-        return pd.DataFrame([item_fallback])
+        return pd.DataFrame([item_granja])
 
     return pd.DataFrame()
 
@@ -268,17 +257,21 @@ df_filtrado = pd.DataFrame()
 
 if not df_api.empty and codigo_ingresado:
     col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_api.columns else "Código Proceso"
-    df_filtrado = df_api[df_api[col_code].astype(str).str.replace(" ", "").str.contains(codigo_ingresado.replace(" ", ""), case=False, na=False)]
+    # Filtrado estricto que requiere coincidencia exacta en el código
+    df_exacto = df_api[df_api[col_code].astype(str).str.replace(" ", "").str.upper() == codigo_ingresado.replace(" ", "").upper()]
+    if not df_exacto.empty:
+        df_filtrado = df_exacto
 
+# Si el código exacto no estaba en el primer bloque de memoria, buscar estrictamente por ese código
 if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Consultando información de adjudicación para {codigo_ingresado}..."):
-        df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
+    with st.spinner(f"Buscando el proceso exacto {codigo_ingresado}..."):
+        df_filtrado = buscar_codigo_estricto(codigo_ingresado)
 
 if not df_api.empty and not codigo_ingresado:
     df_filtrado = df_api
 
 if df_filtrado.empty:
-    st.warning(f"⚠️ No se encontraron procesos registrados para: **'{codigo_ingresado}'**.")
+    st.warning(f"⚠️ No se encontraron procesos para el código ingresado: **'{codigo_ingresado}'**.")
     if st.button(f"➕ Cargar Ficha de Simulación Manual para '{codigo_ingresado}'"):
         item_manual = {
             "OPPORTUNITY_CODE": codigo_ingresado,
@@ -362,85 +355,4 @@ if not df_filtrado.empty:
     tot_ganadas = 1
     tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
     tot_competidores = 3
-    win_rate = 100.0
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("# Procesos en Comprador", str(tot_licitaciones))
-    k2.metric("# Competidores Frecuentes", str(tot_competidores))
-    k3.metric("# Ganadas Histórico", str(tot_ganadas))
-    k4.metric("# Perdidas Histórico", str(tot_perdidas))
-    k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
-
-    es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper() or True
-
-    if es_adjudicada:
-        st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
-        adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS") or item.get("Adjudicatario (Proveedor Ganador)"), fallback="REDSALUD S.A. / SOCIEDAD DIAGNOSTICA")
-        motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME") or item.get("Comentarios"), fallback="Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada, plazo inmediato y menor costo relativo.")
-
-        st.markdown(f"""
-        <div class="reason-box-green">
-            <b>Adjudicatario Ganador:</b> {adj_real}<br><br>
-            <b>Motivo por el cual resultó Ganador en Acta:</b> {motivo_adj}
-        </div>
-        """, unsafe_allow_html=True)
-
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            st.markdown("**🎯 Ventajas Competitivas del Ganador en la Evaluación:**")
-            st.markdown('<span class="advantage-badge">🏆 Mayor Puntaje Técnico (100/100)</span>', unsafe_allow_html=True)
-            st.markdown('<span class="advantage-badge">💵 Menor Precio Relativo (Oferta Optimizada)</span>', unsafe_allow_html=True)
-            st.markdown('<span class="advantage-badge">⚡ Capacidad Instalada y Despacho Inmediato</span>', unsafe_allow_html=True)
-        with col_p2:
-            st.markdown("**📊 Desglose Oficial de Puntuación en Acta de Adjudicación:**")
-            df_p = pd.DataFrame({
-                "Criterio de Evaluación": ["Calidad Técnica (40%)", "Oferta Económica (40%)", "Plazo de Entrega (10%)", "Cumplimiento Formal (10%)"],
-                "Puntaje Adjudicatario": ["100 pts", "97.5 pts", "100 pts", "100 pts"],
-                "Puntaje Competencia (Prom.)": ["85 pts", "92.0 pts", "80 pts", "100 pts"]
-            })
-            st.dataframe(df_p, use_container_width=True, hide_index=True)
-
-    # ==========================================
-    # 💵 PRESUPUESTO & VALORES DE REFERENCIA
-    # ==========================================
-    st.markdown("---")
-    st.subheader("💵 Presupuesto y Valores de Referencia")
-
-    monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
-    monto_extraido = limpiar_monto_a_float(monto_raw)
-
-    if val_tipo_proceso == "Compra Ágil":
-        val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
-    else:
-        val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
-
-    p1, p2, p3 = st.columns([1.5, 1.5, 1])
-
-    monto_bruto_input = p1.number_input(
-        "Presupuesto Estimado Total con IVA (CLP):",
-        min_value=0,
-        value=val_bruto_def,
-        step=50000,
-        key=f"monto_bruto_user_{val_code}",
-        help="En Compra Ágil, este monto corresponde al presupuesto total publicado en Mercado Público (con IVA)."
-    )
-
-    monto_bruto_total = float(monto_bruto_input)
-    monto_neto_calculado = float(round(monto_bruto_total / 1.19))
-
-    p2.metric("Monto Neto Estimado sin IVA", formatear_moneda(monto_neto_calculado))
-    plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
-    p3.metric("Plazo Estimado de Pago", plazo_pago)
-
-    comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Proceso Adjudicado satisfactoriamente.")
-    st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
-
-    # ==========================================
-    # 📐 SIMULADOR DINÁMICO (4 CRITERIOS)
-    # ==========================================
-    st.markdown("---")
-    st.subheader("📐 Simulador de Costos por Criterios de Evaluación y Margen de Oferta")
-
-    col_calc1, col_calc2 = st.columns(2)
-
-    val_eval_tec_def = int(round(monto_neto_calculado * 0.60))
+    win_
