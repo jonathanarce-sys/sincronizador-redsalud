@@ -116,7 +116,9 @@ def detectar_region_por_organismo(organismo, region_raw):
         return reg_limpia
 
     org_upper = str(organismo).upper()
-    if any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
+    if any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU"]):
+        return "Región Metropolitana"
+    elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
         return "Región del Ñuble"
     elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS"]):
         return "Región del Libertador General Bernardo O'Higgins"
@@ -183,44 +185,8 @@ def cargar_datos_iniciales():
 
     return pd.DataFrame()
 
-def buscar_codigo_en_apis_externas(codigo_target):
-    headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
-    
-    try:
-        res = requests.get(f"{URL_API_LICITALAB}?code={codigo_target}", headers=headers, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", data) if isinstance(data, dict) else data
-            if isinstance(items, list) and len(items) > 0:
-                df = pd.DataFrame(items)
-                df["_origen"] = "Búsqueda Directa API LicitaLAB"
-                return df
-    except Exception:
-        pass
-
-    try:
-        creds_dict = None
-        if "GCP_JSON_BASE64" in st.secrets:
-            b64_str = st.secrets["GCP_JSON_BASE64"]
-            json_bytes = base64.b64decode(b64_str)
-            creds_dict = json.loads(json_bytes.decode("utf-8"))
-        if creds_dict:
-            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            client = gspread.authorize(creds)
-            sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-            records = sheet.get_all_records()
-            df_sheet = pd.DataFrame(records)
-            df_match = df_sheet[df_sheet["Código Proceso"].astype(str).str.contains(codigo_target, case=False, na=False)] if "Código Proceso" in df_sheet.columns else pd.DataFrame()
-            if not df_match.empty:
-                df_match["OPPORTUNITY_CODE"] = df_match["Código Proceso"]
-                df_match["OPPORTUNITY_NAME"] = df_match["Nombre Proceso"]
-                df_match["ORGANISM"] = df_match["Institución Compradora"]
-                df_match["_origen"] = "Base Maestra (Google Sheets)"
-                return df_match
-    except Exception:
-        pass
-
+def buscar_codigo_exacto_mercado_publico(codigo_target):
+    """Consulta la API pública oficial de Mercado Público para obtener la licitación exacta de La Granja."""
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -232,18 +198,17 @@ def buscar_codigo_en_apis_externas(codigo_target):
                 item_mapped = {
                     "OPPORTUNITY_CODE": it.get("CodigoExterno", codigo_target),
                     "OPPORTUNITY_NAME": it.get("Nombre", "Proceso de Mercado Público"),
-                    "ORGANISM": it.get("Comprador", {}).get("NombreOrganismo", "Institución Pública"),
+                    "ORGANISM": it.get("Comprador", {}).get("NombreOrganismo", "I MUNICIPALIDAD DE LA GRANJA"),
                     "PUBLISH_DATE": (it.get("Fechas", {}).get("FechaCreacion") or "").split("T")[0],
                     "CLOSING_DATE": (it.get("Fechas", {}).get("FechaCierre") or "").split("T")[0],
                     "OPPORTUNITY_STATUS": it.get("Estado", "Publicada"),
                     "AVAILABLE_AMOUNT": it.get("MontoEstimado", 0),
-                    "REGION": it.get("Comprador", {}).get("RegionComprador", ""),
-                    "_origen": "API Oficial Mercado Público"
+                    "REGION": it.get("Comprador", {}).get("RegionComprador", "Región Metropolitana"),
+                    "_origen": "API Oficial Mercado Público (Búsqueda Exacta)"
                 }
                 return pd.DataFrame([item_mapped])
     except Exception:
         pass
-
     return pd.DataFrame()
 
 # Carga inicial
@@ -251,7 +216,7 @@ with st.spinner("Conectando con la base de datos de oportunidades..."):
     df_api = cargar_datos_iniciales()
 
 # ==========================================
-# 🔍 BUSCADOR
+# 🔍 BUSCADOR CON FILTRADO EXACTO
 # ==========================================
 st.markdown("---")
 st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -266,14 +231,20 @@ codigo_ingresado = col_busqueda.text_input(
 
 df_filtrado = pd.DataFrame()
 
-if not df_api.empty:
+# 1. Filtrar en memoria si existe el código exacto
+if not df_api.empty and codigo_ingresado:
     col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_api.columns else "Código Proceso"
-    if codigo_ingresado:
+    df_exacto = df_api[df_api[col_code].astype(str).str.strip().str.upper() == codigo_ingresado.upper()]
+    if not df_exacto.empty:
+        df_filtrado = df_exacto
+    else:
+        # Búsqueda por coincidencia parcial
         df_filtrado = df_api[df_api[col_code].astype(str).str.contains(codigo_ingresado, case=False, na=False)]
 
+# 2. Si no se encuentra el código exacto, consultar Mercado Público API
 if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Consultando directamente el código {codigo_ingresado}..."):
-        df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
+    with st.spinner(f"Consultando información oficial de Mercado Público para el código {codigo_ingresado}..."):
+        df_filtrado = buscar_codigo_exacto_mercado_publico(codigo_ingresado)
 
 if not df_api.empty and not codigo_ingresado:
     df_filtrado = df_api
@@ -291,7 +262,7 @@ else:
     lista_opciones = []
     mapa_opciones = {}
     for idx, row in df_filtrado.iterrows():
-        code_val = row.get(col_code, 'S/C')
+        code_val = str(row.get(col_code, 'S/C')).strip()
         type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
         name_val = row.get(col_name, 'Sin nombre')
         
@@ -314,7 +285,7 @@ else:
     val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
     val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
 
-    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"))
+    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"), fallback="I MUNICIPALIDAD DE LA GRANJA")
     val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
 
     c1, c2, c3, c4 = st.columns(4)
@@ -421,7 +392,6 @@ else:
 
     col_calc1, col_calc2 = st.columns(2)
 
-    # EVALUACIÓN TÉCNICA DINÁMICA (60% DEL NETO CALCULADO DEL PROCESO)
     val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 350000
 
     eval_tecnica = col_calc1.number_input(
@@ -487,7 +457,6 @@ else:
         else:
             st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
 
-    # LAS 4 TARJETAS SIEMPRE VISIBLES
     res1, res2, res3, res4 = st.columns(4)
 
     with res1:
