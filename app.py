@@ -184,7 +184,6 @@ def cargar_datos_iniciales():
     return pd.DataFrame()
 
 def buscar_codigo_en_apis_externas(codigo_target):
-    """Búsqueda directa por código en LicitaLAB API, Google Sheets o Mercado Público."""
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     
     # 1. LicitaLAB API por código
@@ -418,7 +417,7 @@ else:
     st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
 
     # ==========================================
-    # 📐 SIMULADOR CON 4 VARIABLES DE EVALUACIÓN
+    # 📐 SIMULADOR DE COSTOS (4 CRITERIOS DE EVALUACIÓN)
     # ==========================================
     st.markdown("---")
     st.subheader("📐 Simulador de Costos por Criterios de Evaluación y Margen de Oferta")
@@ -510,13 +509,13 @@ else:
         ''', unsafe_allow_html=True)
 
     with res3:
-                st.markdown(f'''
-                    <div class="kpi-card" style="border-top: 4px solid #0284c7;">
-                        <div class="kpi-title">Precio Final (Con IVA 19%)</div>
-                        <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
-                        <small style="color: #64748b;">Monto Total Facturable</small>
-                    </div>
-                ''', unsafe_allow_html=True)
+        st.markdown(f'''
+            <div class="kpi-card" style="border-top: 4px solid #0284c7;">
+                <div class="kpi-title">Precio Final (Con IVA 19%)</div>
+                <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
+                <small style="color: #64748b;">Monto Total Facturable</small>
+            </div>
+        ''', unsafe_allow_html=True)
 
     with res4:
         st.markdown(f'''
@@ -526,6 +525,3 @@ else:
                 <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
             </div>
         ''', unsafe_allow_html=True)
-
-else:
-    st.warning("⚠️ No se pudieron obtener datos.")
