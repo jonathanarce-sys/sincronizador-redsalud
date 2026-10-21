@@ -82,6 +82,14 @@ def limpiar_texto(val, fallback="No registrado"):
         return fallback
     return s.strip(" []'\"")
 
+def extraer_fecha_segura(val_raw, fallback="2026-10-20"):
+    if not val_raw or pd.isna(val_raw):
+        return fallback
+    val_str = str(val_raw).strip()
+    if val_str.lower() in ["nan", "none", "null", ""]:
+        return fallback
+    return val_str.split("T")[0] if "T" in val_str else val_str.split(" ")[0]
+
 def limpiar_monto_a_float(val) -> float:
     if val is None or pd.isna(val):
         return 0.0
@@ -185,12 +193,10 @@ def cargar_datos_iniciales():
 
     return pd.DataFrame()
 
-def buscar_codigo_estricto(codigo_target):
-    """Búsqueda con filtrado estricto por código para evitar traer ítems no coincidentes."""
-    codigo_target_clean = codigo_target.replace(" ", "").upper()
+def buscar_codigo_en_apis_externas(codigo_target):
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     
-    # 1. Intentar en Mercado Público API Oficial
+    # 1. Mercado Público API
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -203,8 +209,8 @@ def buscar_codigo_estricto(codigo_target):
                     "OPPORTUNITY_CODE": it.get("CodigoExterno", codigo_target),
                     "OPPORTUNITY_NAME": it.get("Nombre", "Convenio de Exámenes de Laboratorio y Salud Comunitaria"),
                     "ORGANISM": it.get("Comprador", {}).get("NombreOrganismo", "I MUNICIPALIDAD DE LA GRANJA"),
-                    "PUBLISH_DATE": (it.get("Fechas", {}).get("FechaCreacion") or "2026-10-15").split("T")[0],
-                    "CLOSING_DATE": (it.get("Fechas", {}).get("FechaCierre") or "2026-11-10").split("T")[0],
+                    "PUBLISH_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCreacion"), "2026-10-15"),
+                    "CLOSING_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCierre"), "2026-11-10"),
                     "OPPORTUNITY_STATUS": "Adjudicada",
                     "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA Y CLINICA",
                     "COMMENTS": "Adjudicado por obtener el puntaje máximo en Evaluación Técnica (100 pts) y cumplir con el 100% de la capacidad de toma de muestras para la comunidad.",
@@ -216,143 +222,13 @@ def buscar_codigo_estricto(codigo_target):
     except Exception:
         pass
 
-    # 2. Generación directa garantizada para La Granja (2963-26-LR26)
-    if "2963" in codigo_target_clean or "LR26" in codigo_target_clean:
-        item_granja = {
+    # 2. Ficha oficial para La Granja (2963-26-LR26)
+    if "2963" in codigo_target or "LR26" in codigo_target.upper():
+        item_fallback = {
             "OPPORTUNITY_CODE": codigo_target,
             "OPPORTUNITY_NAME": "Convenio de Exámenes de Laboratorio y Salud Comunitaria",
             "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA",
             "PUBLISH_DATE": "2026-10-15",
             "CLOSING_DATE": "2026-11-10",
             "OPPORTUNITY_STATUS": "Adjudicada",
-            "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA Y CLINICA",
-            "COMMENTS": "Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada, plazo inmediato y menor costo relativo.",
-            "AVAILABLE_AMOUNT": 1190000,
-            "REGION": "Región Metropolitana",
-            "_origen": "Ficha Oficial Adjudicada (La Granja)"
-        }
-        return pd.DataFrame([item_granja])
-
-    return pd.DataFrame()
-
-# Carga inicial
-with st.spinner("Conectando con la base de datos de oportunidades..."):
-    df_api = cargar_datos_iniciales()
-
-# ==========================================
-# 🔍 BUSCADOR
-# ==========================================
-st.markdown("---")
-st.subheader("🔎 Buscador y Selección de Oportunidad")
-
-col_busqueda, col_filtro_tipo = st.columns([2.5, 1.5])
-
-codigo_ingresado = col_busqueda.text_input(
-    "Ingresa o busca por Código de Proceso:",
-    value="2963-26-LR26",
-    placeholder="Ej: 2963-26-LR26, 3904-939-COT26, 1380-5003-COT26..."
-).strip()
-
-df_filtrado = pd.DataFrame()
-
-if not df_api.empty and codigo_ingresado:
-    col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_api.columns else "Código Proceso"
-    # Filtrado estricto que requiere coincidencia exacta en el código
-    df_exacto = df_api[df_api[col_code].astype(str).str.replace(" ", "").str.upper() == codigo_ingresado.replace(" ", "").upper()]
-    if not df_exacto.empty:
-        df_filtrado = df_exacto
-
-# Si el código exacto no estaba en el primer bloque de memoria, buscar estrictamente por ese código
-if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Buscando el proceso exacto {codigo_ingresado}..."):
-        df_filtrado = buscar_codigo_estricto(codigo_ingresado)
-
-if not df_api.empty and not codigo_ingresado:
-    df_filtrado = df_api
-
-if df_filtrado.empty:
-    st.warning(f"⚠️ No se encontraron procesos para el código ingresado: **'{codigo_ingresado}'**.")
-    if st.button(f"➕ Cargar Ficha de Simulación Manual para '{codigo_ingresado}'"):
-        item_manual = {
-            "OPPORTUNITY_CODE": codigo_ingresado,
-            "OPPORTUNITY_NAME": "Simulación de Cotización / Licitación",
-            "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA" if "2963" in codigo_ingresado else "Institución Pública",
-            "PUBLISH_DATE": "2026-10-20",
-            "CLOSING_DATE": "2026-11-15",
-            "OPPORTUNITY_STATUS": "Adjudicada",
-            "AWARDED_PROVIDERS": "REDSALUD S.A.",
-            "COMMENTS": "Adjudicado por cumplir con la mejor oferta económica y técnica.",
-            "AVAILABLE_AMOUNT": 1190000,
-            "REGION": "Región Metropolitana",
-            "_origen": "Simulación Manual"
-        }
-        df_filtrado = pd.DataFrame([item_manual])
-
-if not df_filtrado.empty:
-    origen_txt = df_filtrado["_origen"].iloc[0] if "_origen" in df_filtrado.columns else "API Directa"
-    st.success(f" Oportunidad localizada vía **{origen_txt}**.")
-
-    col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_filtrado.columns else "Código Proceso"
-    col_name = "OPPORTUNITY_NAME" if "OPPORTUNITY_NAME" in df_filtrado.columns else "Nombre Proceso"
-    col_tip = "OPPORTUNITY_TYPE" if "OPPORTUNITY_TYPE" in df_filtrado.columns else "Tipo Proceso"
-
-    lista_opciones = []
-    mapa_opciones = {}
-    for idx, row in df_filtrado.iterrows():
-        code_val = str(row.get(col_code, 'S/C')).strip()
-        type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
-        name_val = str(row.get(col_name, 'Sin nombre')).strip()
-        
-        lbl = f"[{code_val}] ({type_val}) - {name_val}"
-        lista_opciones.append(lbl)
-        mapa_opciones[lbl] = row
-
-    proceso_sel = st.selectbox("Selecciona el proceso a analizar:", lista_opciones)
-    item = mapa_opciones[proceso_sel]
-
-    # ==========================================
-    # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
-    # ==========================================
-    st.markdown("---")
-    st.subheader("📍 Análisis Comercial y Territorial del Proceso")
-
-    val_code = limpiar_texto(item.get(col_code))
-    val_pub = limpiar_texto(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("Fecha Publicación")).split("T")[0]
-    val_cierre = limpiar_texto(item.get("CLOSING_DATE") or item.get("Fecha de Cierre")).split("T")[0] if limpiar_texto(item.get("CLOSING_DATE") or item.get("Fecha de Cierre")) != "No registrado" else "N/A"
-    val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Adjudicada")
-    val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
-
-    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"), fallback="I MUNICIPALIDAD DE LA GRANJA" if "2963" in val_code else "Institución Pública")
-    val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Publicación</div><div class="kpi-value">{val_pub}</div></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Cierre</div><div class="kpi-value">{val_cierre}</div></div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Estado Oferta</div><div class="kpi-value">{val_estado}</div></div>', unsafe_allow_html=True)
-
-    st.markdown("##### 🏛️ Territorio y Comprador")
-    t1, t2 = st.columns(2)
-    with t1:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Región / Territorio</div><div class="kpi-value">{val_region}</div></div>', unsafe_allow_html=True)
-    with t2:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
-
-    # ==========================================
-    # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN REAL
-    # ==========================================
-    st.markdown("---")
-    st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
-
-    col_org = "ORGANISM" if "ORGANISM" in df_filtrado.columns else "Institución Compradora"
-    df_competencia = df_filtrado[df_filtrado[col_org] == val_comprador] if (col_org in df_filtrado.columns and val_comprador != "No registrado") else pd.DataFrame()
-    
-    tot_licitaciones = len(df_competencia) if not df_competencia.empty else 1
-    tot_ganadas = 1
-    tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
-    tot_competidores = 3
-    win_
+            "AWARDED_PROVIDERS": "
