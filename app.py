@@ -90,19 +90,6 @@ def limpiar_monto_a_float(val) -> float:
     except Exception:
         return 0.0
 
-def ajustar_monto_compra_agil(monto_raw, tipo_proceso):
-    """Detecta y corrige el factor de escala de 10x en Compras Ágiles (ej: $7.600.000 -> $760.000)."""
-    monto = limpiar_monto_a_float(monto_raw)
-    
-    if tipo_proceso == "Compra Ágil":
-        # Corrección del error de escala de 10x
-        if monto >= 6000000 and monto <= 10000000:
-            monto = monto / 10.0
-        elif monto > 10000000:
-            monto = 760000.0  # Techo por defecto de cotización
-            
-    return monto
-
 def formatear_moneda(val):
     try:
         monto_num = limpiar_monto_a_float(val)
@@ -127,24 +114,18 @@ def detectar_region_por_organismo(organismo, region_raw):
 
     org_upper = str(organismo).upper()
     
-    if any(k in org_upper for k in ["YUNGAY", "CHILLÁN", "CHILLAN", "BULNES", "SAN CARLOS", "ÑUBLE", "NUBLE"]):
+    if any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE", "NUBLE"]):
         return "Región del Ñuble"
     elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "CHIMBARONGO", "SANTA CRUZ", "O'HIGGINS"]):
         return "Región del Libertador General Bernardo O'Higgins"
-    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA", "TOCOPILLA", "MEJILLONES"]):
+    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA", "TOCOPILLA"]):
         return "Región de Antofagasta"
-    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "POZO ALMONTE", "TARAPACÁ", "TARAPACA"]):
+    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "POZO ALMONTE", "TARAPACÁ"]):
         return "Región de Tarapacá"
-    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA", "VINA", "QUILLOTA", "SAN ANTONIO", "QUILPUÉ"]):
+    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA", "VINA", "QUILLOTA"]):
         return "Región de Valparaíso"
-    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO", "RELONCAVÍ", "RELONCAVI", "PUERTO VARAS", "ANCUD", "CASTRO"]):
+    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO", "RELONCAVÍ"]):
         return "Región de Los Lagos"
-    elif any(k in org_upper for k in ["CONCEPCIÓN", "CONCEPCION", "TALCAHUANO", "LOS ÁNGELES", "LOS ANGELES", "BIOBÍO", "BIOBIO", "CORONEL"]):
-        return "Región del Biobío"
-    elif any(k in org_upper for k in ["TEMUCO", "PADRE LAS CASAS", "ANGOL", "VILLARRICA", "PUCÓN", "PUCON", "ARAUCANÍA"]):
-        return "Región de La Araucanía"
-    elif any(k in org_upper for k in ["TALCA", "CURICÓ", "CURICO", "LINARES", "CONSTITUCIÓN", "MAULE"]):
-        return "Región del Maule"
 
     return "Región Metropolitana"
 
@@ -221,8 +202,8 @@ if not df_api.empty:
 
     codigo_ingresado = col_busqueda.text_input(
         "Ingresa o busca por Código de Proceso:",
-        value="1380-5003-COT26",
-        placeholder="Ej: 1380-5003-COT26, 2432-804-COT26..."
+        value="3904-939-COT26",
+        placeholder="Ej: 3904-939-COT26, 1380-5003-COT26..."
     ).strip()
 
     df_filtrado = df_api.copy()
@@ -328,30 +309,35 @@ if not df_api.empty:
             """, unsafe_allow_html=True)
 
         # ==========================================
-        # 💵 PRESUPUESTO & MONTO EDITABLE
+        # 💵 PRESUPUESTO & MANEJO DE MONTO BRUTO (COMPRA ÁGIL = TOTAL CON IVA)
         # ==========================================
         st.markdown("---")
         st.subheader("💵 Presupuesto y Valores de Referencia")
 
         monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
-        monto_calculado_auto = ajustar_monto_compra_agil(monto_raw, val_tipo_proceso)
+        monto_extraido = limpiar_monto_a_float(monto_raw)
 
-        # Entrada para ajustar/corregir el Monto Neto Estimado manualmente si la API trae un valor errado
+        # En Mercado Público (Compra Ágil), el presupuesto publicado (ej. $760.000) ya incluye IVA (Es Monto Bruto Total)
+        if val_tipo_proceso == "Compra Ágil":
+            val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
+        else:
+            val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
+
         p1, p2, p3 = st.columns([1.5, 1.5, 1])
-        
-        monto_neto_input = p1.number_input(
-            "Monto Neto Estimado del Cliente (CLP):",
+
+        monto_bruto_input = p1.number_input(
+            "Presupuesto Estimado Total con IVA (CLP):",
             min_value=0,
-            value=int(monto_calculado_auto),
+            value=val_bruto_def,
             step=50000,
-            key=f"monto_neto_user_{val_code}",
-            help="Puedes modificar esta cifra si la API trae un monto bruto o inflado."
+            key=f"monto_bruto_user_{val_code}",
+            help="En Compra Ágil, este monto corresponde al presupuesto total publicado en Mercado Público (con IVA)."
         )
 
-        monto_neto = float(monto_neto_input)
-        monto_iva = monto_neto * 1.19
+        monto_bruto_total = float(monto_bruto_input)
+        monto_neto_calculado = monto_bruto_total / 1.19
 
-        p2.metric("Monto Total + IVA (19%)", formatear_moneda(monto_iva))
+        p2.metric("Monto Neto Estimado sin IVA", formatear_moneda(monto_neto_calculado))
         plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
         p3.metric("Plazo Estimado de Pago", plazo_pago)
 
@@ -359,15 +345,15 @@ if not df_api.empty:
         st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
 
         # ==========================================
-        # 📐 SIMULADOR DE COSTOS Y MARGEN
+        # 📐 SIMULADOR CON MATEMÁTICA CONCORDANTE
         # ==========================================
         st.markdown("---")
         st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
 
         col_calc1, col_calc2 = st.columns(2)
 
-        # Costo directo inicial realista derivado del monto neto corregido
-        val_costo_dir_def = int(monto_neto * 0.6) if monto_neto > 0 else 500000
+        # Costo directo derivado del monto neto real ($638.655)
+        val_costo_dir_def = int(monto_neto_calculado * 0.7) if monto_neto_calculado > 0 else 450000
 
         costo_directo = col_calc1.number_input(
             "Costo Directo Estimado (Insumos, Personal) (CLP):",
@@ -379,14 +365,14 @@ if not df_api.empty:
         costo_operativo = col_calc1.number_input(
             "Gastos Operativos / Logística por Zona (CLP):",
             min_value=0,
-            value=50000,
+            value=30000,
             step=5000,
             key=f"costo_operativo_{val_code}"
         )
         costo_garantia = col_calc1.number_input(
             "Costo Boleta de Garantía / Financiero (CLP):",
             min_value=0,
-            value=15000,
+            value=0 if val_tipo_proceso == "Compra Ágil" else 15000,
             step=2500,
             key=f"costo_garantia_{val_code}"
         )
@@ -399,7 +385,6 @@ if not df_api.empty:
             key=f"margen_{val_code}"
         )
 
-        # CÁLCULO DIRECTO EXACTO
         costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
 
         if costo_total_base > 0 and margen_pct < 100:
@@ -411,14 +396,14 @@ if not df_api.empty:
             st.markdown("---")
             st.markdown("### 📊 Propuesta Económica Recomendada")
 
-            if monto_neto > 0:
-                diferencia = monto_neto - precio_neto_sugerido
-                pct_utilizado = (precio_neto_sugerido / monto_neto) * 100
+            if monto_bruto_total > 0:
+                diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
+                pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
 
-                if precio_neto_sugerido <= monto_neto:
-                    st.success(f"🟢 **Oferta Competitiva:** La propuesta representa el **{pct_utilizado:.1f}%** del presupuesto estimado. (Holgura: {formatear_moneda(diferencia)})")
+                if precio_bruto_sugerido <= monto_bruto_total:
+                    st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
                 else:
-                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia))} ({pct_utilizado:.1f}% del estimado).")
+                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta final con IVA supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
 
             res1, res2, res3, res4 = st.columns(4)
             
