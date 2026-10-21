@@ -8,7 +8,7 @@ import json
 
 # Configuración ejecutiva de página
 st.set_page_config(
-    page_title="Calculadora Comercial & Inteligencia de Competencia - RedSalud",
+    page_title=" Gestor Comercial & Inteligencia de Competencia - RedSalud",
     layout="wide",
     page_icon="🧮"
 )
