@@ -186,7 +186,6 @@ def cargar_datos_iniciales():
 def buscar_codigo_en_apis_externas(codigo_target):
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     
-    # 1. LicitaLAB API por código
     try:
         res = requests.get(f"{URL_API_LICITALAB}?code={codigo_target}", headers=headers, timeout=6)
         if res.status_code == 200:
@@ -199,7 +198,6 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 2. Búsqueda en Google Sheets Base Maestra
     try:
         creds_dict = None
         if "GCP_JSON_BASE64" in st.secrets:
@@ -223,7 +221,6 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 3. Mercado Público API
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -254,7 +251,7 @@ with st.spinner("Conectando con la base de datos de oportunidades..."):
     df_api = cargar_datos_iniciales()
 
 # ==========================================
-# 🔍 BUSCADOR MULTICAPA
+# 🔍 BUSCADOR
 # ==========================================
 st.markdown("---")
 st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -417,14 +414,16 @@ else:
     st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
 
     # ==========================================
-    # 📐 SIMULADOR DE COSTOS (4 CRITERIOS DE EVALUACIÓN)
+    # 📐 SIMULADOR DINÁMICO (4 CRITERIOS DE EVALUACIÓN)
     # ==========================================
     st.markdown("---")
     st.subheader("📐 Simulador de Costos por Criterios de Evaluación y Margen de Oferta")
 
     col_calc1, col_calc2 = st.columns(2)
 
-    val_eval_tec_def = int(round(monto_neto_calculado * 0.50)) if monto_neto_calculado > 0 else 350000
+    # EVALUACIÓN TÉCNICA DINÁMICA (60% DEL NETO CALCULADO DEL PROCESO)
+    val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 350000
+
     eval_tecnica = col_calc1.number_input(
         "Evaluación Técnica (Insumos, Personal, Equipamiento) (CLP):",
         min_value=0,
@@ -488,6 +487,7 @@ else:
         else:
             st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
 
+    # LAS 4 TARJETAS SIEMPRE VISIBLES
     res1, res2, res3, res4 = st.columns(4)
 
     with res1:
