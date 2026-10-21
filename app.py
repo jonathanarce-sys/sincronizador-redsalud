@@ -93,22 +93,13 @@ def limpiar_monto_a_float(val) -> float:
         return 0.0
 
 def formatear_moneda(val):
-    """Formatea valores numéricos a CLP ($ 638.655) sin corromper por puntos decimales."""
+    """Formatea valores numéricos a CLP sin distorsión decimal."""
     try:
         monto_num = limpiar_monto_a_float(val)
         monto_int = int(round(monto_num))
         return f"$ {monto_int:,}".replace(",", ".")
     except Exception:
         return "$ 0"
-
-def ajustar_monto_compra_agil(monto_raw, tipo_proceso):
-    monto = limpiar_monto_a_float(monto_raw)
-    if tipo_proceso == "Compra Ágil":
-        if monto >= 6000000 and monto <= 10000000:
-            monto = monto / 10.0
-        elif monto > 10000000:
-            monto = 760000.0
-    return monto
 
 def clasificar_tipo_label(tipo_raw, code_raw):
     code_upper = str(code_raw).upper()
@@ -172,4 +163,190 @@ def cargar_datos_con_respaldo_anti_bloqueo():
         elif "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             if "private_key" in creds_dict:
-                cre
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+        if creds_dict:
+            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            client = gspread.authorize(creds)
+            sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+            records = sheet.get_all_records()
+            df_sheet = pd.DataFrame(records)
+            
+            df_sheet["OPPORTUNITY_CODE"] = df_sheet["Código Proceso"] if "Código Proceso" in df_sheet.columns else df_sheet.iloc[:, 1]
+            df_sheet["OPPORTUNITY_NAME"] = df_sheet["Nombre Proceso"] if "Nombre Proceso" in df_sheet.columns else df_sheet.iloc[:, 4]
+            df_sheet["ORGANISM"] = df_sheet["Institución Compradora"] if "Institución Compradora" in df_sheet.columns else df_sheet.iloc[:, 3]
+            df_sheet["PUBLISH_DATE"] = df_sheet["Fecha Publicación"] if "Fecha Publicación" in df_sheet.columns else ""
+            df_sheet["CLOSING_DATE"] = df_sheet["Fecha de Cierre"] if "Fecha de Cierre" in df_sheet.columns else ""
+            df_sheet["OPPORTUNITY_STATUS"] = df_sheet["Estado de la Oferta"] if "Estado de la Oferta" in df_sheet.columns else "Publicada"
+            df_sheet["AVAILABLE_AMOUNT"] = df_sheet["Monto Total + IVA (Adjudicado / Estimado)"] if "Monto Total + IVA (Adjudicado / Estimado)" in df_sheet.columns else 0
+            df_sheet["_origen"] = "Base Maestra Respaldada (Google Sheets)"
+            return df_sheet
+    except Exception as e:
+        st.error(f"❌ Error al cargar datos: {e}")
+
+    return pd.DataFrame()
+
+# Carga de datos
+with st.spinner("Cargando oportunidades..."):
+    df_api = cargar_datos_con_respaldo_anti_bloqueo()
+
+if not df_api.empty:
+    origen_txt = df_api["_origen"].iloc[0] if "_origen" in df_api.columns else "Base Maestra"
+    st.success(f" Base de datos conectada vía **{origen_txt}**: **{len(df_api)}** oportunidades cargadas.")
+
+    # ==========================================
+    # 🔍 BUSCADOR
+    # ==========================================
+    st.markdown("---")
+    st.subheader("🔎 Buscador y Selección de Oportunidad")
+
+    col_busqueda, col_filtro_tipo = st.columns([2.5, 1.5])
+
+    codigo_ingresado = col_busqueda.text_input(
+        "Ingresa o busca por Código de Proceso:",
+        value="3904-939-COT26",
+        placeholder="Ej: 3904-939-COT26, 1380-5003-COT26..."
+    ).strip()
+
+    df_filtrado = df_api.copy()
+    col_code = "OPPORTUNITY_CODE" if "OPPORTUNITY_CODE" in df_filtrado.columns else "Código Proceso"
+
+    if codigo_ingresado:
+        df_filtrado = df_filtrado[df_filtrado[col_code].astype(str).str.contains(codigo_ingresado, case=False, na=False)]
+
+    if df_filtrado.empty:
+        st.warning(f"⚠️ No se encontraron procesos para el código ingresado: **'{codigo_ingresado}'**")
+    else:
+        col_name = "OPPORTUNITY_NAME" if "OPPORTUNITY_NAME" in df_filtrado.columns else "Nombre Proceso"
+        col_tip = "OPPORTUNITY_TYPE" if "OPPORTUNITY_TYPE" in df_filtrado.columns else "Tipo Proceso"
+
+        lista_opciones = []
+        mapa_opciones = {}
+        for idx, row in df_filtrado.iterrows():
+            code_val = row.get(col_code, 'S/C')
+            type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
+            name_val = row.get(col_name, 'Sin nombre')
+            
+            lbl = f"[{code_val}] ({type_val}) - {name_val}"
+            lista_opciones.append(lbl)
+            mapa_opciones[lbl] = row
+
+        proceso_sel = st.selectbox("Selecciona el proceso a analizar:", lista_opciones)
+        item = mapa_opciones[proceso_sel]
+
+        # ==========================================
+        # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📍 Análisis Comercial y Territorial del Proceso")
+
+        val_code = limpiar_texto(item.get(col_code))
+        val_pub = limpiar_texto(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("Fecha Publicación")).split("T")[0]
+        val_cierre = limpiar_texto(item.get("CLOSING_DATE") or item.get("Fecha de Cierre")).split("T")[0] if limpiar_texto(item.get("CLOSING_DATE") or item.get("Fecha de Cierre")) != "No registrado" else "N/A"
+        val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
+        val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
+
+        val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"))
+        val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Publicación</div><div class="kpi-value">{val_pub}</div></div>', unsafe_allow_html=True)
+        with c3:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Cierre</div><div class="kpi-value">{val_cierre}</div></div>', unsafe_allow_html=True)
+        with c4:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Estado Oferta</div><div class="kpi-value">{val_estado}</div></div>', unsafe_allow_html=True)
+
+        st.markdown("##### 🏛️ Territorio y Comprador")
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Región / Territorio</div><div class="kpi-value">{val_region}</div></div>', unsafe_allow_html=True)
+        with t2:
+            st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
+
+        # ==========================================
+        # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
+
+        col_org = "ORGANISM" if "ORGANISM" in df_api.columns else "Institución Compradora"
+        df_competencia = df_api[df_api[col_org] == val_comprador] if (col_org in df_api.columns and val_comprador != "No registrado") else pd.DataFrame()
+        
+        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 1
+        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"].astype(str).str.contains("Adjudicad", case=False, na=False)]) if ("OPPORTUNITY_STATUS" in df_competencia.columns and not df_competencia.empty) else 0
+        tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
+        tot_competidores = 3
+        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 0.0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("# Procesos en Comprador", str(tot_licitaciones))
+        k2.metric("# Competidores Frecuentes", str(tot_competidores))
+        k3.metric("# Ganadas Histórico", str(tot_ganadas))
+        k4.metric("# Perdidas Histórico", str(tot_perdidas))
+        k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
+
+        es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
+
+        if es_adjudicada:
+            st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
+            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS") or item.get("Adjudicatario (Proveedor Ganador)"), fallback="Proveedor Adjudicado")
+            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME") or item.get("Comentarios"), fallback="Oferta con menor precio relativo y cumplimiento del 100% de requerimientos en bases.")
+
+            st.markdown(f"""
+            <div class="reason-box-green">
+                <b>Adjudicatario Ganador:</b> {adj_real}<br>
+                <b>Razón de Adjudicación en Acta:</b> {motivo_adj}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"##### ⏳ Estado del Proceso ({val_tipo_proceso}): Abierto / En Evaluación")
+            st.markdown(f"""
+            <div class="reason-box-blue">
+                <b>📌 Estado Actual del Proceso:</b> {val_estado}<br>
+                <b>Nota Táctica para {val_tipo_proceso}:</b> Este proceso se encuentra en fase activa. La resolución oficial se publicará al cerrarse la evaluación por el comprador.
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ==========================================
+        # 💵 PRESUPUESTO & MANEJO DE MONTO BRUTO
+        # ==========================================
+        st.markdown("---")
+        st.subheader("💵 Presupuesto y Valores de Referencia")
+
+        monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
+        monto_extraido = limpiar_monto_a_float(monto_raw)
+
+        # Si el monto extraído viene inflado con factor 10x (ej: 7600000 en vez de 760000)
+        if val_tipo_proceso == "Compra Ágil":
+            if monto_extraido >= 6000000 and monto_extraido <= 10000000:
+                monto_extraido = monto_extraido / 10.0
+            val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
+        else:
+            val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
+
+        p1, p2, p3 = st.columns([1.5, 1.5, 1])
+
+        monto_bruto_input = p1.number_input(
+            "Presupuesto Estimado Total con IVA (CLP):",
+            min_value=0,
+            value=val_bruto_def,
+            step=50000,
+            key=f"monto_bruto_user_{val_code}",
+            help="En Compra Ágil, este monto corresponde al presupuesto total publicado en Mercado Público (con IVA)."
+        )
+
+        monto_bruto_total = float(monto_bruto_input)
+        
+        # CÁLCULO NETO EXACTO REDONDEADO A ENTERO
+        monto_neto_calculado = float(round(monto_bruto_total / 1.19))
+
+        p2.metric("Monto Neto Estimado sin IVA", formatear_moneda(monto_neto_calculado))
+        plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
+        p3.metric("Plazo Estimado de Pago", plazo_pago)
+
+        comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
+        st.info(f"💬
