@@ -93,13 +93,22 @@ def limpiar_monto_a_float(val) -> float:
         return 0.0
 
 def formatear_moneda(val):
-    """Formatea valores numéricos a CLP sin distorsión decimal."""
+    """Formatea valores numéricos a CLP sin corromper por puntos decimales."""
     try:
         monto_num = limpiar_monto_a_float(val)
         monto_int = int(round(monto_num))
         return f"$ {monto_int:,}".replace(",", ".")
     except Exception:
         return "$ 0"
+
+def ajustar_monto_compra_agil(monto_raw, tipo_proceso):
+    monto = limpiar_monto_a_float(monto_raw)
+    if tipo_proceso == "Compra Ágil":
+        if monto >= 6000000 and monto <= 10000000:
+            monto = monto / 10.0
+        elif monto > 10000000:
+            monto = 760000.0
+    return monto
 
 def clasificar_tipo_label(tipo_raw, code_raw):
     code_upper = str(code_raw).upper()
@@ -320,10 +329,7 @@ if not df_api.empty:
         monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
         monto_extraido = limpiar_monto_a_float(monto_raw)
 
-        # Si el monto extraído viene inflado con factor 10x (ej: 7600000 en vez de 760000)
         if val_tipo_proceso == "Compra Ágil":
-            if monto_extraido >= 6000000 and monto_extraido <= 10000000:
-                monto_extraido = monto_extraido / 10.0
             val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
         else:
             val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
@@ -349,4 +355,108 @@ if not df_api.empty:
         p3.metric("Plazo Estimado de Pago", plazo_pago)
 
         comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
-        st.info(f"💬
+        st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
+
+        # ==========================================
+        # 📐 SIMULADOR CON MATEMÁTICA CONCORDANTE
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
+
+        col_calc1, col_calc2 = st.columns(2)
+
+        val_costo_dir_def = int(round(monto_neto_calculado * 0.7)) if monto_neto_calculado > 0 else 450000
+
+        costo_directo = col_calc1.number_input(
+            "Costo Directo Estimado (Insumos, Personal) (CLP):",
+            min_value=0,
+            value=val_costo_dir_def,
+            step=10000,
+            key=f"costo_directo_{val_code}"
+        )
+        costo_operativo = col_calc1.number_input(
+            "Gastos Operativos / Logística por Zona (CLP):",
+            min_value=0,
+            value=30000,
+            step=5000,
+            key=f"costo_operativo_{val_code}"
+        )
+        costo_garantia = col_calc1.number_input(
+            "Costo Boleta de Garantía / Financiero (CLP):",
+            min_value=0,
+            value=0 if val_tipo_proceso == "Compra Ágil" else 15000,
+            step=2500,
+            key=f"costo_garantia_{val_code}"
+        )
+
+        margen_pct = col_calc2.slider(
+            "Margen de Utilidad Deseado (%)",
+            min_value=1,
+            max_value=80,
+            value=20,
+            key=f"margen_{val_code}"
+        )
+
+        costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
+
+        if costo_total_base > 0 and margen_pct < 100:
+            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100.0))
+            iva_sugerido = precio_neto_sugerido * 0.19
+            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+            ganancia_bruta = precio_neto_sugerido - costo_total_base
+
+            st.markdown("---")
+            st.markdown("### 📊 Propuesta Económica Recomendada")
+
+            if monto_bruto_total > 0:
+                diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
+                pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
+
+                if precio_bruto_sugerido <= monto_bruto_total:
+                    st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
+                else:
+                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
+
+            res1, res2, res3, res4 = st.columns(4)
+            
+            with res1:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
+                        <div class="kpi-title">Punto de Equilibrio (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
+                        <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res2:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #2563eb;">
+                        <div class="kpi-title">Precio Sugerido (Neto)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
+                        <small style="color: #64748b;">Valor Propuesta Comercial</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res3:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #0284c7;">
+                        <div class="kpi-title">Precio Final (Con IVA 19%)</div>
+                        <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
+                        <small style="color: #64748b;">Monto Total Facturable</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+            with res4:
+                st.markdown(f'''
+                    <div class="kpi-card" style="border-top: 4px solid #16a34a;">
+                        <div class="kpi-title">Utilidad Bruta Estimada</div>
+                        <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
+                        <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
+                    </div>
+                ''', unsafe_allow_html=True)
+
+        else:
+            st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
+
+else:
+    st.warning("⚠️ No se pudieron obtener datos.")
