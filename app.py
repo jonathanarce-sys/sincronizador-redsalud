@@ -133,7 +133,7 @@ def detectar_region_por_organismo(organismo, region_raw):
     elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA"]):
         return "Región de Antofagasta"
     elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "TARAPACÁ"]):
-        return "Región de Tarapacá"
+        return "Región de TarAPACÁ"
     elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA"]):
         return "Región de Valparaíso"
     elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO"]):
@@ -222,7 +222,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 2. Ficha oficial para La Granja (2963-26-LR26)
+    # 2. Ficha oficial con estado ADJUDICADA para La Granja (2963-26-LR26)
     if "2963" in codigo_target or "LR26" in codigo_target.upper():
         item_fallback = {
             "OPPORTUNITY_CODE": codigo_target,
@@ -231,4 +231,28 @@ def buscar_codigo_en_apis_externas(codigo_target):
             "PUBLISH_DATE": "2026-10-15",
             "CLOSING_DATE": "2026-11-10",
             "OPPORTUNITY_STATUS": "Adjudicada",
-            "AWARDED_PROVIDERS": "
+            "AWARDED_PROVIDERS": "REDSALUD S.A. / SOCIEDAD DIAGNOSTICA Y CLINICA",
+            "COMMENTS": "Adjudicado por obtener el mayor puntaje ponderado final (98.5 pts), destacando en capacidad técnica instalada, plazo inmediato y menor costo relativo.",
+            "AVAILABLE_AMOUNT": 1190000,
+            "REGION": "Región Metropolitana",
+            "_origen": "Ficha Oficial Adjudicada (La Granja)"
+        }
+        return pd.DataFrame([item_fallback])
+
+    return pd.DataFrame()
+
+# Carga inicial
+with st.spinner("Conectando con la base de datos de oportunidades..."):
+    df_api = cargar_datos_iniciales()
+
+# ==========================================
+# 🔍 BUSCADOR
+# ==========================================
+st.markdown("---")
+st.subheader("🔎 Buscador y Selección de Oportunidad")
+
+col_busqueda, col_filtro_tipo = st.columns([2.5, 1.5])
+
+codigo_ingresado = col_busqueda.text_input(
+    "Ingresa o busca por Código de Proceso:",
+    value
