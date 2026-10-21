@@ -84,6 +84,8 @@ def limpiar_texto(val, fallback="No registrado"):
 def limpiar_monto_a_float(val) -> float:
     if val is None or pd.isna(val):
         return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
     try:
         val_str = str(val).replace("$", "").replace(".", "").replace(",", ".").replace("CLP", "").strip()
         return float(val_str)
@@ -91,12 +93,22 @@ def limpiar_monto_a_float(val) -> float:
         return 0.0
 
 def formatear_moneda(val):
+    """Formatea valores numéricos a CLP ($ 638.655) sin corromper por puntos decimales."""
     try:
         monto_num = limpiar_monto_a_float(val)
         monto_int = int(round(monto_num))
         return f"$ {monto_int:,}".replace(",", ".")
     except Exception:
         return "$ 0"
+
+def ajustar_monto_compra_agil(monto_raw, tipo_proceso):
+    monto = limpiar_monto_a_float(monto_raw)
+    if tipo_proceso == "Compra Ágil":
+        if monto >= 6000000 and monto <= 10000000:
+            monto = monto / 10.0
+        elif monto > 10000000:
+            monto = 760000.0
+    return monto
 
 def clasificar_tipo_label(tipo_raw, code_raw):
     code_upper = str(code_raw).upper()
@@ -271,180 +283,4 @@ if not df_api.empty:
         st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
 
         col_org = "ORGANISM" if "ORGANISM" in df_api.columns else "Institución Compradora"
-        df_competencia = df_api[df_api[col_org] == val_comprador] if (col_org in df_api.columns and val_comprador != "No registrado") else pd.DataFrame()
-        
-        tot_licitaciones = len(df_competencia) if not df_competencia.empty else 1
-        tot_ganadas = len(df_competencia[df_competencia["OPPORTUNITY_STATUS"].astype(str).str.contains("Adjudicad", case=False, na=False)]) if ("OPPORTUNITY_STATUS" in df_competencia.columns and not df_competencia.empty) else 0
-        tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
-        tot_competidores = 3
-        win_rate = (tot_ganadas / tot_licitaciones * 100) if tot_licitaciones > 0 else 0.0
-
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("# Procesos en Comprador", str(tot_licitaciones))
-        k2.metric("# Competidores Frecuentes", str(tot_competidores))
-        k3.metric("# Ganadas Histórico", str(tot_ganadas))
-        k4.metric("# Perdidas Histórico", str(tot_perdidas))
-        k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
-
-        es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
-
-        if es_adjudicada:
-            st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
-            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS") or item.get("Adjudicatario (Proveedor Ganador)"), fallback="Proveedor Adjudicado")
-            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME") or item.get("Comentarios"), fallback="Oferta con menor precio relativo y cumplimiento del 100% de requerimientos en bases.")
-
-            st.markdown(f"""
-            <div class="reason-box-green">
-                <b>Adjudicatario Ganador:</b> {adj_real}<br>
-                <b>Razón de Adjudicación en Acta:</b> {motivo_adj}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"##### ⏳ Estado del Proceso ({val_tipo_proceso}): Abierto / En Evaluación")
-            st.markdown(f"""
-            <div class="reason-box-blue">
-                <b>📌 Estado Actual del Proceso:</b> {val_estado}<br>
-                <b>Nota Táctica para {val_tipo_proceso}:</b> Este proceso se encuentra en fase activa. La resolución oficial se publicará al cerrarse la evaluación por el comprador.
-            </div>
-            """, unsafe_allow_html=True)
-
-        # ==========================================
-        # 💵 PRESUPUESTO & MANEJO DE MONTO BRUTO (COMPRA ÁGIL = TOTAL CON IVA)
-        # ==========================================
-        st.markdown("---")
-        st.subheader("💵 Presupuesto y Valores de Referencia")
-
-        monto_raw = item.get("APPLIED_AMOUNT") or item.get("Monto Ofertado / Estimado (CLP)") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT") or 0
-        monto_extraido = limpiar_monto_a_float(monto_raw)
-
-        # En Mercado Público (Compra Ágil), el presupuesto publicado (ej. $760.000) ya incluye IVA (Es Monto Bruto Total)
-        if val_tipo_proceso == "Compra Ágil":
-            val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
-        else:
-            val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
-
-        p1, p2, p3 = st.columns([1.5, 1.5, 1])
-
-        monto_bruto_input = p1.number_input(
-            "Presupuesto Estimado Total con IVA (CLP):",
-            min_value=0,
-            value=val_bruto_def,
-            step=50000,
-            key=f"monto_bruto_user_{val_code}",
-            help="En Compra Ágil, este monto corresponde al presupuesto total publicado en Mercado Público (con IVA)."
-        )
-
-        monto_bruto_total = float(monto_bruto_input)
-        monto_neto_calculado = monto_bruto_total / 1.19
-
-        p2.metric("Monto Neto Estimado sin IVA", formatear_moneda(monto_neto_calculado))
-        plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
-        p3.metric("Plazo Estimado de Pago", plazo_pago)
-
-        comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones registradas por la comisión.")
-        st.info(f"💬 **Comentarios de Gestión & Observaciones:**\n\n{comentarios_txt}")
-
-        # ==========================================
-        # 📐 SIMULADOR CON MATEMÁTICA CONCORDANTE
-        # ==========================================
-        st.markdown("---")
-        st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
-
-        col_calc1, col_calc2 = st.columns(2)
-
-        # Costo directo derivado del monto neto real ($638.655)
-        val_costo_dir_def = int(monto_neto_calculado * 0.7) if monto_neto_calculado > 0 else 450000
-
-        costo_directo = col_calc1.number_input(
-            "Costo Directo Estimado (Insumos, Personal) (CLP):",
-            min_value=0,
-            value=val_costo_dir_def,
-            step=10000,
-            key=f"costo_directo_{val_code}"
-        )
-        costo_operativo = col_calc1.number_input(
-            "Gastos Operativos / Logística por Zona (CLP):",
-            min_value=0,
-            value=30000,
-            step=5000,
-            key=f"costo_operativo_{val_code}"
-        )
-        costo_garantia = col_calc1.number_input(
-            "Costo Boleta de Garantía / Financiero (CLP):",
-            min_value=0,
-            value=0 if val_tipo_proceso == "Compra Ágil" else 15000,
-            step=2500,
-            key=f"costo_garantia_{val_code}"
-        )
-
-        margen_pct = col_calc2.slider(
-            "Margen de Utilidad Deseado (%)",
-            min_value=1,
-            max_value=80,
-            value=20,
-            key=f"margen_{val_code}"
-        )
-
-        costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
-
-        if costo_total_base > 0 and margen_pct < 100:
-            precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100.0))
-            iva_sugerido = precio_neto_sugerido * 0.19
-            precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
-            ganancia_bruta = precio_neto_sugerido - costo_total_base
-
-            st.markdown("---")
-            st.markdown("### 📊 Propuesta Económica Recomendada")
-
-            if monto_bruto_total > 0:
-                diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
-                pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
-
-                if precio_bruto_sugerido <= monto_bruto_total:
-                    st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
-                else:
-                    st.error(f"🔴 **Alerta de Presupuesto:** La propuesta final con IVA supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
-
-            res1, res2, res3, res4 = st.columns(4)
-            
-            with res1:
-                st.markdown(f'''
-                    <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
-                        <div class="kpi-title">Punto de Equilibrio (Neto)</div>
-                        <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
-                        <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
-                    </div>
-                ''', unsafe_allow_html=True)
-
-            with res2:
-                st.markdown(f'''
-                    <div class="kpi-card" style="border-top: 4px solid #2563eb;">
-                        <div class="kpi-title">Precio Sugerido (Neto)</div>
-                        <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
-                        <small style="color: #64748b;">Valor Propuesta Comercial</small>
-                    </div>
-                ''', unsafe_allow_html=True)
-
-            with res3:
-                st.markdown(f'''
-                    <div class="kpi-card" style="border-top: 4px solid #0284c7;">
-                        <div class="kpi-title">Precio Final (Con IVA 19%)</div>
-                        <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
-                        <small style="color: #64748b;">Monto Total Facturable</small>
-                    </div>
-                ''', unsafe_allow_html=True)
-
-            with res4:
-                st.markdown(f'''
-                    <div class="kpi-card" style="border-top: 4px solid #16a34a;">
-                        <div class="kpi-title">Utilidad Bruta Estimada</div>
-                        <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
-                        <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
-                    </div>
-                ''', unsafe_allow_html=True)
-
-        else:
-            st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
-
-else:
-    st.warning("⚠️ No se pudieron obtener datos.")
+        df_competencia = df_
