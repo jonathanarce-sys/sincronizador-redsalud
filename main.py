@@ -58,14 +58,40 @@ def formatear_fecha(val_fecha):
     val_str = str(val_fecha).strip()
     return val_str.split("T")[0] if "T" in val_str else val_str
 
-def formatear_moneda(val):
-    if val is None or val == "" or str(val).upper() == "NONE":
-        return "$ 0"
-    try:
-        monto = int(float(val))
-        return f"$ {monto:,}".replace(",", ".")
-    except:
-        return str(val)
+def extraer_monto_robusto(item, nombre_proceso):
+    """Busca en cascada en todas las claves de monto posibles de LicitaLAB BI API."""
+    candidatos_monto = [
+        item.get("TOTAL_AWARDED_AMOUNT"),
+        item.get("APPLIED_AMOUNT"),
+        item.get("AVAILABLE_AMOUNT"),
+        item.get("ESTIMATED_AMOUNT"),
+        item.get("ITEMS_TOTAL"),
+        item.get("BUDGET_AMOUNT"),
+        item.get("PRICE")
+    ]
+    
+    monto_num = 0.0
+    for cand in candidatos_monto:
+        if cand is not None and str(cand).upper() not in ["NONE", "NULL", "NAN", ""]:
+            try:
+                val_clean = float(str(cand).replace("$", "").replace(".", "").replace(",", ".").strip())
+                if val_clean > 0:
+                    monto_num = val_clean
+                    break
+            except Exception:
+                continue
+
+    # Si se encontró un monto válido positivo
+    if monto_num > 0:
+        monto_con_iva = int(round(monto_num * 1.19))
+        return f"$ {monto_con_iva:,}".replace(",", ".")
+
+    # Si el monto es 0 y se trata de un Convenio de Suministro
+    nombre_upper = str(nombre_proceso).upper()
+    if "CONVENIO DE SUMINISTRO" in nombre_upper or "SUMINISTRO" in nombre_upper:
+        return "Sin Presupuesto Público (Convenio Suministro)"
+    
+    return "Sin Presupuesto Referencial ($ 0)"
 
 def limpiar_texto_o_lista(val):
     if val is None or val == "" or str(val).upper() == "NONE":
@@ -86,15 +112,12 @@ def limpiar_texto_o_lista(val):
     return val_str.strip(" []'\"")
 
 def determinar_workspace_redsalud(item, nombre_proceso):
-    """Extrae la Clínica o Centro Médico asignado evaluando Etiquetas (Tags), Miembros y Título."""
-    # 1. Búsqueda en Etiquetas (TRANSLATED_TAGS / TAGS / LABELS)
     tags_raw = item.get("TRANSLATED_TAGS") or item.get("TAGS") or item.get("LABELS") or item.get("tags")
     tags_txt = limpiar_texto_o_lista(tags_raw)
     
     if tags_txt and tags_txt.upper() not in ["NONE", "NULL", ""]:
         return tags_txt
 
-    # 2. Búsqueda en Título / Nombre o Comentarios de palabras clave de sedes RedSalud
     texto_evaluar = f"{nombre_proceso} {limpiar_texto_o_lista(item.get('COMMENTS'))}".upper()
     
     sedes = {
@@ -117,7 +140,6 @@ def determinar_workspace_redsalud(item, nombre_proceso):
         if clave in texto_evaluar:
             return nombre_sede
 
-    # 3. Búsqueda en Miembro / Usuario asignado o Línea de Negocio
     miembro = item.get("MEMBER_NAME") or item.get("member_name")
     if miembro and str(miembro).strip() not in ["", "None", "null"]:
         return f"Asignado a: {str(miembro).strip()}"
@@ -126,7 +148,6 @@ def determinar_workspace_redsalud(item, nombre_proceso):
     if b_line and b_line.upper() not in ["MUNICIPALIDADES", "SALUD", "GOBIERNO", "NONE"]:
         return f"RedSalud - {b_line}"
 
-    # 4. Fallback si es un registro de la Casa Matriz
     ws_title = item.get("WORKSPACE_TITLE") or item.get("workspace_title")
     if ws_title and str(ws_title).strip() not in ["", "None"]:
         return str(ws_title).strip()
@@ -153,6 +174,8 @@ def determinar_prestacion(item, nombre_proceso):
         return "Farmacia / Medicamentos"
     elif any(k in nombre_upper for k in ["DENTAL", "ENDODONCIA", "LIMAS"]):
         return "Dental"
+    elif any(k in nombre_upper for k in ["PABELLON", "CIRUGIA", "CIRUGÍAS", "INSU PABELLON"]):
+        return "Cirugías / Pabellón"
     elif any(k in nombre_upper for k in ["CONSULTA", "MEDICAS", "ESPECIALISTAS"]):
         return "Consultas Médicas"
         
@@ -200,42 +223,21 @@ def procesar_items_api(items):
     filas = []
     
     for item in items:
-        # 1. Nombre Proceso
         nombre = str(item.get("OPPORTUNITY_NAME") or item.get("opportunity_name") or "").strip()
-
-        # 2. Workspace asignado (Búsqueda inteligente multicampo/tags)
         workspace = determinar_workspace_redsalud(item, nombre)
-        
-        # 3. Código Proceso
         codigo = str(item.get("OPPORTUNITY_CODE") or item.get("opportunity_code") or "").strip()
-        
-        # 4. Fecha Publicación
         fecha_pub = formatear_fecha(item.get("PUBLISH_DATE") or item.get("CREATED_AT"))
-        
-        # 5. Fecha de Cierre real
         fecha_cierre = formatear_fecha(item.get("CLOSING_DATE") or item.get("closing_date") or item.get("EXPIRATION_DATE"))
-        
-        # 6. Tipo Proceso
         tipo_orig = str(item.get("OPPORTUNITY_TYPE") or item.get("opportunity_type") or "").strip()
         tipo = clasificar_tipo(tipo_orig, codigo)
-        
-        # 7. Institución Compradora
         comprador = str(item.get("ORGANISM") or item.get("organism") or item.get("BUYER_NAME") or "").strip()
-        
-        # 8. Prestación
         prestacion = determinar_prestacion(item, nombre)
         
-        # 9. Monto Total + IVA
-        monto_neto = item.get("APPLIED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or item.get("TOTAL_AWARDED_AMOUNT")
-        monto_total_iva = formatear_moneda(monto_neto)
+        # BÚSQUEDA ROBUSTA DE MONTO + IVA Y ETIQUETADO DE CONVENIOS DE SUMINISTRO
+        monto_total_iva = extraer_monto_robusto(item, nombre)
         
-        # 10. Estado
         estado = str(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or "").strip()
-        
-        # 11. Adjudicatario
         adjudicatario = limpiar_texto_o_lista(item.get("AWARDED_PROVIDERS") or item.get("awarded_providers"))
-        
-        # 12. Comentarios
         comentarios = limpiar_texto_o_lista(item.get("COMMENTS") or item.get("comments") or item.get("MANAGED_STATUS_NAME"))
 
         filas.append([
@@ -268,7 +270,6 @@ def procesar_items_api(items):
         "Comentarios"
     ])
 
-    # Filtrar solo 2025 en adelante
     if "Fecha Publicación" in df.columns:
         df["_year"] = pd.to_datetime(df["Fecha Publicación"], errors="coerce").dt.year
         df = df[df["_year"] >= 2025].drop(columns=["_year"], errors="ignore")
@@ -290,13 +291,13 @@ def sincronizar():
         log("🧹 Limpiando la planilla Google Sheets...")
         sheet.clear()
 
-        log("📝 Escribiendo los datos con los Workspaces asignados por Clínica/Centro Médico...")
+        log("📝 Escribiendo los datos con montos de Convenios de Suministro corregidos...")
         valores = [df_final.columns.tolist()] + df_final.fillna("").astype(str).values.tolist()
         sheet.update(range_name="A1", values=valores)
 
         log("🚀 ¡Base Maestra sincronizada exitosamente!")
     else:
-        log("⚠️ No se pudieron obtener datos desde la API. Revisa la conectividad.")
+        log("⚠️ No se pudieron obtener datos desde la API.")
 
 if __name__ == "__main__":
     sincronizar()
