@@ -32,7 +32,7 @@ st.markdown("""
         margin-bottom: 6px;
     }
     .kpi-value {
-        font-size: 1.2rem;
+        font-size: 1.25rem;
         color: #0f172a;
         font-weight: 700;
         word-wrap: break-word;
@@ -116,18 +116,17 @@ def detectar_region_por_organismo(organismo, region_raw):
         return reg_limpia
 
     org_upper = str(organismo).upper()
-    
-    if any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE", "NUBLE"]):
+    if any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
         return "Región del Ñuble"
-    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "CHIMBARONGO", "SANTA CRUZ", "O'HIGGINS"]):
+    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS"]):
         return "Región del Libertador General Bernardo O'Higgins"
-    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA", "TOCOPILLA"]):
+    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA"]):
         return "Región de Antofagasta"
-    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "POZO ALMONTE", "TARAPACÁ"]):
-        return "Región de TarAPACÁ"
-    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA", "VINA", "QUILLOTA"]):
+    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "TARAPACÁ"]):
+        return "Región de Tarapacá"
+    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA"]):
         return "Región de Valparaíso"
-    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO", "RELONCAVÍ"]):
+    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO"]):
         return "Región de Los Lagos"
 
     return "Región Metropolitana"
@@ -136,7 +135,6 @@ def detectar_region_por_organismo(organismo, region_raw):
 def cargar_datos_iniciales():
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
     todos_items = []
-    
     try:
         res = requests.get(f"{URL_API_LICITALAB}?page=1", headers=headers, timeout=6)
         if res.status_code == 200:
@@ -152,7 +150,6 @@ def cargar_datos_iniciales():
         df["_origen"] = "API LicitaLAB BI (En Vivo)"
         return df
 
-    # Respaldo con Google Sheets
     try:
         creds_dict = None
         if "GCP_JSON_BASE64" in st.secrets:
@@ -187,10 +184,7 @@ def cargar_datos_iniciales():
     return pd.DataFrame()
 
 def buscar_codigo_en_apis_externas(codigo_target):
-    """Consulta directa a LicitaLAB y Mercado Público cuando un código no está en la memoria inicial."""
     headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
-    
-    # 1. Consulta directa a LicitaLAB API
     try:
         res = requests.get(f"{URL_API_LICITALAB}?code={codigo_target}", headers=headers, timeout=6)
         if res.status_code == 200:
@@ -203,7 +197,6 @@ def buscar_codigo_en_apis_externas(codigo_target):
     except Exception:
         pass
 
-    # 2. Consulta directa a Mercado Público API pública
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -234,7 +227,7 @@ with st.spinner("Conectando con la base de datos de oportunidades..."):
     df_api = cargar_datos_iniciales()
 
 # ==========================================
-# 🔍 BUSCADOR CASCADA Nivel 1, 2 y 3
+# 🔍 BUSCADOR CASCADA
 # ==========================================
 st.markdown("---")
 st.subheader("🔎 Buscador y Selección de Oportunidad")
@@ -254,16 +247,15 @@ if not df_api.empty:
     if codigo_ingresado:
         df_filtrado = df_api[df_api[col_code].astype(str).str.contains(codigo_ingresado, case=False, na=False)]
 
-# Si no estuvo en la memoria inicial, buscar en Nivel 2 y 3 (LicitaLAB / Mercado Público Directo)
 if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Consultando directamente en la red de ChileCompra el código {codigo_ingresado}..."):
+    with st.spinner(f"Consultando directamente el código {codigo_ingresado}..."):
         df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
 
 if not df_api.empty and not codigo_ingresado:
     df_filtrado = df_api
 
 if df_filtrado.empty:
-    st.warning(f"⚠️ No se encontraron procesos para el código ingresado: **'{codigo_ingresado}'**. Revisa el número de código o el estado en Mercado Público.")
+    st.warning(f"⚠️ No se encontraron procesos para el código ingresado: **'{codigo_ingresado}'**.")
 else:
     origen_txt = df_filtrado["_origen"].iloc[0] if "_origen" in df_filtrado.columns else "API Directa"
     st.success(f" Oportunidad localizada vía **{origen_txt}**.")
@@ -319,7 +311,7 @@ else:
         st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
     # ==========================================
-    # 🏢 MÓDULO DE COMPETENCIA
+    # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN
     # ==========================================
     st.markdown("---")
     st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
@@ -363,7 +355,7 @@ else:
         """, unsafe_allow_html=True)
 
     # ==========================================
-    # 💵 PRESUPUESTO & MANEJO DE MONTO BRUTO
+    # 💵 PRESUPUESTO Y VALORES DE REFERENCIA
     # ==========================================
     st.markdown("---")
     st.subheader("💵 Presupuesto y Valores de Referencia")
@@ -398,7 +390,7 @@ else:
     st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
 
     # ==========================================
-    # 📐 SIMULADOR DE COSTOS
+    # 📐 SIMULADOR DE COSTOS (RENDIMIENTO GARANTIZADO DE TARJETAS)
     # ==========================================
     st.markdown("---")
     st.subheader("📐 Simulador de Costos, Garantías y Margen de Oferta")
@@ -439,61 +431,59 @@ else:
 
     costo_total_base = float(costo_directo + costo_operativo + costo_garantia)
 
-    if costo_total_base > 0 and margen_pct < 100:
-        precio_neto_sugerido = costo_total_base / (1 - (margen_pct / 100.0))
-        iva_sugerido = precio_neto_sugerido * 0.19
-        precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
-        ganancia_bruta = precio_neto_sugerido - costo_total_base
+    # CÁLCULO Y RENDERIZADO INCONDICIONAL DE TARJETAS
+    precio_neto_sugerido = (costo_total_base / (1 - (margen_pct / 100.0))) if (costo_total_base > 0 and margen_pct < 100) else 0.0
+    iva_sugerido = precio_neto_sugerido * 0.19
+    precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+    ganancia_bruta = precio_neto_sugerido - costo_total_base
 
-        st.markdown("---")
-        st.markdown("### 📊 Propuesta Económica Recomendada")
+    st.markdown("---")
+    st.markdown("### 📊 Propuesta Económica Recomendada")
 
-        if monto_bruto_total > 0:
-            diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
-            pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
+    if monto_bruto_total > 0 and precio_bruto_sugerido > 0:
+        diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
+        pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
 
-            if precio_bruto_sugerido <= monto_bruto_total:
-                st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
-            else:
-                st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
+        if precio_bruto_sugerido <= monto_bruto_total:
+            st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
+        else:
+            st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
 
-        res1, res2, res3, res4 = st.columns(4)
-        
-        with res1:
-            st.markdown(f'''
-                <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
-                    <div class="kpi-title">Punto de Equilibrio (Neto)</div>
-                    <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
-                    <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
-                </div>
-            ''', unsafe_allow_html=True)
+    # DESPLIEGUE SIEMPRE VISIBLE DE LAS 4 TARJETAS
+    res1, res2, res3, res4 = st.columns(4)
 
-        with res2:
-            st.markdown(f'''
-                <div class="kpi-card" style="border-top: 4px solid #2563eb;">
-                    <div class="kpi-title">Precio Sugerido (Neto)</div>
-                    <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
-                    <small style="color: #64748b;">Valor Propuesta Comercial</small>
-                </div>
-            ''', unsafe_allow_html=True)
+    with res1:
+        st.markdown(f'''
+            <div class="kpi-card" style="border-top: 4px solid #3b82f6;">
+                <div class="kpi-title">Punto de Equilibrio (Neto)</div>
+                <div class="kpi-value">{formatear_moneda(costo_total_base)}</div>
+                <small style="color: #64748b;">Costo Mínimo Sin Ganancia</small>
+            </div>
+        ''', unsafe_allow_html=True)
 
-        with res3:
-            st.markdown(f'''
-                <div class="kpi-card" style="border-top: 4px solid #0284c7;">
-                    <div class="kpi-title">Precio Final (Con IVA 19%)</div>
-                    <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
-                    <small style="color: #64748b;">Monto Total Facturable</small>
-                </div>
-            ''', unsafe_allow_html=True)
+    with res2:
+        st.markdown(f'''
+            <div class="kpi-card" style="border-top: 4px solid #2563eb;">
+                <div class="kpi-title">Precio Sugerido (Neto)</div>
+                <div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div>
+                <small style="color: #64748b;">Valor Propuesta Comercial</small>
+            </div>
+        ''', unsafe_allow_html=True)
 
-        with res4:
-            st.markdown(f'''
-                <div class="kpi-card" style="border-top: 4px solid #16a34a;">
-                    <div class="kpi-title">Utilidad Bruta Estimada</div>
-                    <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
-                    <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
-                </div>
-            ''', unsafe_allow_html=True)
+    with res3:
+        st.markdown(f'''
+            <div class="kpi-card" style="border-top: 4px solid #0284c7;">
+                <div class="kpi-title">Precio Final (Con IVA 19%)</div>
+                <div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div>
+                <small style="color: #64748b;">Monto Total Facturable</small>
+            </div>
+        ''', unsafe_allow_html=True)
 
-    else:
-        st.warning("⚠️ Ingrese un costo mayor a $0 para calcular la propuesta.")
+    with res4:
+        st.markdown(f'''
+            <div class="kpi-card" style="border-top: 4px solid #16a34a;">
+                <div class="kpi-title">Utilidad Bruta Estimada</div>
+                <div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div>
+                <small style="color: #166534;">Margen Efectivo: {margen_pct}%</small>
+            </div>
+        ''', unsafe_allow_html=True)
