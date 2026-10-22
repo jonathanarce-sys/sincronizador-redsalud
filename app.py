@@ -30,49 +30,69 @@ MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
 def limpiar_texto(val, fallback="No registrado"):
-    if val is None or pd.isna(val): return fallback
+    if val is None or pd.isna(val):
+        return fallback
     s = str(val).strip()
-    if s.lower() in ["nan", "none", "null", "[]", ""]: return fallback
+    if s.lower() in ["nan", "none", "null", "[]", ""]:
+        return fallback
     return s.strip(" []'\"")
 
 def extraer_fecha_segura(val_raw, fallback="2026-10-20"):
-    if not val_raw or pd.isna(val_raw): return fallback
+    if not val_raw or pd.isna(val_raw):
+        return fallback
     val_str = str(val_raw).strip()
-    if val_str.lower() in ["nan", "none", "null", ""]: return fallback
+    if val_str.lower() in ["nan", "none", "null", ""]:
+        return fallback
     return val_str.split("T")[0] if "T" in val_str else val_str.split(" ")[0]
 
 def limpiar_monto_a_float(val) -> float:
-    if val is None or pd.isna(val): return 0.0
-    if isinstance(val, (int, float)): return float(val)
+    if val is None or pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
     try:
         val_str = str(val).replace("$", "").replace(".", "").replace(",", ".").replace("CLP", "").strip()
         return float(val_str)
-    except Exception: return 0.0
+    except Exception:
+        return 0.0
 
 def formatear_moneda(val):
     try:
         monto_num = limpiar_monto_a_float(val)
         return f"$ {int(round(monto_num)):,}".replace(",", ".")
-    except Exception: return "$ 0"
+    except Exception:
+        return "$ 0"
 
 def clasificar_tipo_label(tipo_raw, code_raw):
-    code_upper, tipo_upper = str(code_raw).upper(), str(tipo_raw).upper()
-    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper: return "Compra Ágil"
-    elif "CO" in code_upper or "PRIVATE" in tipo_upper: return "Licitación Privada"
+    code_upper = str(code_raw).upper()
+    tipo_upper = str(tipo_raw).upper()
+    if "COT" in code_upper or "AGILE" in tipo_upper or "COMPRA ÁGIL" in tipo_upper:
+        return "Compra Ágil"
+    elif "CO" in code_upper or "PRIVATE" in tipo_upper:
+        return "Licitación Privada"
     return "Licitación Pública"
 
 def detectar_region_por_organismo(organismo, region_raw):
     reg_limpia = limpiar_texto(region_raw, fallback="")
-    if reg_limpia and reg_limpia not in ["No registrado", "Sin información", "RM"]: return reg_limpia
+    if reg_limpia and reg_limpia not in ["No registrado", "Sin información", "RM"]:
+        return reg_limpia
     org_upper = str(organismo).upper()
-    if any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU"]): return "Región Metropolitana"
-    elif any(k in org_upper for k in ["CURICÓ", "CURICO", "TALCA", "MAULE", "LINARES"]): return "Región del Maule"
-    elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]): return "Región del Ñuble"
-    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS"]): return "Región del Libertador General Bernardo O'Higgins"
-    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA"]): return "Región de Antofagasta"
-    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "TARAPACÁ"]): return "Región de Tarapacá"
-    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA"]): return "Región de Valparaíso"
-    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO"]): return "Región de Los Lagos"
+    if any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU"]):
+        return "Región Metropolitana"
+    elif any(k in org_upper for k in ["CURICÓ", "CURICO", "TALCA", "MAULE", "LINARES"]):
+        return "Región del Maule"
+    elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
+        return "Región del Ñuble"
+    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS"]):
+        return "Región del Libertador General Bernardo O'Higgins"
+    elif any(k in org_upper for k in ["SAN PEDRO DE ATACAMA", "ANTOFAGASTA", "CALAMA"]):
+        return "Región de Antofagasta"
+    elif any(k in org_upper for k in ["IQUIQUE", "ALTO HOSPICIO", "TARAPACÁ"]):
+        return "Región de Tarapacá"
+    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA"]):
+        return "Región de Valparaíso"
+    elif any(k in org_upper for k in ["FRUTILLAR", "PUERTO MONTT", "OSORNO"]):
+        return "Región de Los Lagos"
     return "Región Metropolitana"
 
 @st.cache_data(ttl=900)
@@ -84,8 +104,10 @@ def cargar_datos_iniciales():
         if res.status_code == 200:
             data = res.json()
             items = data.get("data", data) if isinstance(data, dict) else data
-            if isinstance(items, list) and len(items) > 0: todos_items.extend(items)
-    except Exception: pass
+            if isinstance(items, list) and len(items) > 0:
+                todos_items.extend(items)
+    except Exception:
+        pass
 
     if todos_items:
         df = pd.DataFrame(todos_items)
@@ -99,7 +121,8 @@ def cargar_datos_iniciales():
             creds_dict = json.loads(json_bytes.decode("utf-8"))
         elif "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
         if creds_dict:
             scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -117,12 +140,12 @@ def cargar_datos_iniciales():
             df_sheet["AVAILABLE_AMOUNT"] = df_sheet["Monto Total + IVA (Adjudicado / Estimado)"] if "Monto Total + IVA (Adjudicado / Estimado)" in df_sheet.columns else 0
             df_sheet["_origen"] = "Base Maestra Respaldada (Google Sheets)"
             return df_sheet
-    except Exception: pass
+    except Exception:
+        pass
 
     return pd.DataFrame()
 
 def buscar_codigo_en_apis_externas(codigo_target):
-    # Mercado Público API
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=6)
@@ -144,9 +167,9 @@ def buscar_codigo_en_apis_externas(codigo_target):
                     "_origen": "API Oficial Mercado Público"
                 }
                 return pd.DataFrame([item_mapped])
-    except Exception: pass
+    except Exception:
+        pass
 
-    # Ficha Oficial Adjudicada La Granja (2963-26-LR26)
     if "2963" in codigo_target or "LR26" in codigo_target.upper():
         item_granja = {
             "OPPORTUNITY_CODE": codigo_target,
@@ -163,7 +186,6 @@ def buscar_codigo_en_apis_externas(codigo_target):
         }
         return pd.DataFrame([item_granja])
 
-    # Ficha Auto-generada para cualquier nuevo código
     item_auto = {
         "OPPORTUNITY_CODE": codigo_target,
         "OPPORTUNITY_NAME": f"Servicios / Suministros Salud - Proceso {codigo_target}",
@@ -217,4 +239,46 @@ if not df_filtrado.empty:
     mapa_opciones = {}
     for idx, row in df_filtrado.iterrows():
         code_val = str(row.get(col_code, 'S/C')).strip()
-        type_val = clasificar_tipo_
+        type_val = clasificar_tipo_label(row.get(col_tip, ''), code_val)
+        name_val = str(row.get(col_name, 'Sin nombre')).strip()
+        lbl = f"[{code_val}] ({type_val}) - {name_val}"
+        lista_opciones.append(lbl)
+        mapa_opciones[lbl] = row
+
+    proceso_sel = st.selectbox("Selecciona el proceso a analizar:", lista_opciones)
+    item = mapa_opciones[proceso_sel]
+
+    # ==========================================
+    # 📌 ANÁLISIS COMERCIAL Y TERRITORIAL
+    # ==========================================
+    st.markdown("---")
+    st.subheader("📍 Análisis Comercial y Territorial del Proceso")
+
+    val_code = limpiar_texto(item.get(col_code))
+    val_pub = extraer_fecha_segura(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("Fecha Publicación"))
+    val_cierre = extraer_fecha_segura(item.get("CLOSING_DATE") or item.get("Fecha de Cierre"), fallback="N/A")
+    val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
+    val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
+
+    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"), fallback="Institución Pública")
+    val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Código Proceso ({val_tipo_proceso})</div><div class="kpi-value">{val_code}</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Publicación</div><div class="kpi-value">{val_pub}</div></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Fecha de Cierre</div><div class="kpi-value">{val_cierre}</div></div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Estado Oferta</div><div class="kpi-value">{val_estado}</div></div>', unsafe_allow_html=True)
+
+    st.markdown("##### 🏛️ Territorio y Comprador")
+    t1, t2 = st.columns(2)
+    with t1:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Región / Territorio</div><div class="kpi-value">{val_region}</div></div>', unsafe_allow_html=True)
+    with t2:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
+
+    # ==========================================
+    # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICA
