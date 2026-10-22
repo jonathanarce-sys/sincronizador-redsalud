@@ -10,19 +10,20 @@ import json
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
-# Encabezados Oficiales Estandarizados para la Base Maestra
+# Encabezados Oficiales Alienados con la Estructura Real de la Planilla
 ENCABEZADOS_BASE_MAESTRA = [
     "ID Proceso",
     "Código Proceso",
     "Tipo Proceso",
     "Institución Compradora",
-    "Nombre Proceso",
+    "Región / Territorio",
     "Estado de la Oferta",
+    "Nombre Proceso",
+    "Categoría / Línea de Servicio",
     "Fecha Publicación",
     "Fecha de Cierre",
     "Monto Total + IVA (Adjudicado / Estimado)",
     "Adjudicatario (Proveedor Ganador)",
-    "Región / Territorio",
     "Comentarios / Observaciones",
     "Código OC",
     "Estado OC",
@@ -82,7 +83,7 @@ def consultar_orden_compra_por_fila(row):
     comprador = str(row.get("Institución Compradora", "Institución Compradora")).strip()
     
     # Extraer monto base de la fila
-    monto_bruto_row = 0
+    monto_bruto_row = 0.0
     try:
         val_m = str(row.get("Monto Total + IVA (Adjudicado / Estimado)", 0)).replace("$", "").replace(".", "").replace(",", ".").strip()
         monto_bruto_row = float(val_m)
@@ -122,7 +123,7 @@ def consultar_orden_compra_por_fila(row):
             "Fecha Emisión OC": "2025-06-05"
         }
 
-    # 4. Proceso Dinámico Adaptativo para las demás instituciones (La Cisterna, Vitacura, SSMO, San Juan de Dios, etc.)
+    # 4. Proceso Dinámico Adaptativo por Institución
     monto_neto_calc = int(round(monto_bruto_row / 1.19)) if monto_bruto_row > 0 else 0
     monto_bruto_calc = int(round(monto_bruto_row)) if monto_bruto_row > 0 else 0
     fecha_cierre = str(row.get("Fecha de Cierre", "2026-01-30")).strip().split("T")[0]
@@ -152,14 +153,13 @@ def sincronizar_base_maestra():
         records = []
 
     if not records:
-        print("⚠️ No se obtuvieron registros. Sincronización finalizada.")
+        print("⚠️ No se obtuvieron registros de la planilla.")
         return
 
-    print(f"📄 Procesando {len(records)} filas y asignando emisores dinámicos por institución...")
+    print(f"📄 Reorganizando {len(records)} filas según los encabezados correctos...")
 
     filas_actualizadas = []
     for row in records:
-        # Generar información de la OC basada en la fila exacta del proceso
         oc_info = consultar_orden_compra_por_fila(row)
         
         row["Código OC"] = oc_info["Código OC"]
@@ -174,9 +174,9 @@ def sincronizar_base_maestra():
 
     print(f"💾 Guardando {len(filas_actualizadas)} registros en Google Sheets...")
     sheet.clear()
-    sheet.update('A1:R1', [ENCABEZADOS_BASE_MAESTRA])
-    sheet.update(f'A2:R{len(filas_actualizadas) + 1}', filas_actualizadas)
-    print("✅ Sincronización completada con éxito. Cada código cuenta con su emisor y monto correspondiente.")
+    sheet.update('A1:S1', [ENCABEZADOS_BASE_MAESTRA])
+    sheet.update(f'A2:S{len(filas_actualizadas) + 1}', filas_actualizadas)
+    print("✅ Sincronización completada con éxito. Todos los encabezados quedaron alineados con sus datos reales.")
 
 if __name__ == "__main__":
     sincronizar_base_maestra()
