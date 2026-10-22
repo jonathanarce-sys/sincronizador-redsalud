@@ -10,26 +10,27 @@ import json
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
-# Encabezados Oficiales Alienados con la Estructura Real de los Datos
+# Encabezados Mapeados en la Posición Física Exacta de la Planilla (A1:S1)
 ENCABEZADOS_BASE_MAESTRA = [
-    "ID Proceso",
-    "Código Proceso",
-    "Fecha Publicación",
-    "Fecha de Cierre",
-    "Tipo Proceso",
-    "Institución Compradora",
-    "Región / Territorio",
-    "Estado de la Oferta",
-    "Nombre Proceso",
-    "Monto Total + IVA (Adjudicado / Estimado)",
-    "Adjudicatario (Proveedor Ganador)",
-    "Comentarios / Observaciones",
-    "Código OC",
-    "Estado OC",
-    "Organismo Emisor OC",
-    "Monto Neto OC (CLP)",
-    "Monto Total OC + IVA (CLP)",
-    "Fecha Emisión OC"
+    "ID Proceso",                                 # A
+    "Código Proceso",                             # B
+    "Nombre Proceso",                             # C
+    "Categoría / Línea de Servicio",              # D
+    "Fecha Publicación",                          # E
+    "Fecha de Cierre",                            # F
+    "Tipo Proceso",                               # G
+    "Institución Compradora",                     # H
+    "Región / Territorio",                        # I
+    "Estado de la Oferta",                        # J
+    "Adjudicatario (Proveedor Ganador)",          # K
+    "Monto Total + IVA (Adjudicado / Estimado)",   # L
+    "Comentarios / Observaciones",                # M
+    "Código OC",                                  # N
+    "Estado OC",                                  # O
+    "Organismo Emisor OC",                        # P
+    "Monto Neto OC (CLP)",                        # Q
+    "Monto Total OC + IVA (CLP)",                 # R
+    "Fecha Emisión OC"                            # S
 ]
 
 def corregir_padding_base64(b64_str):
@@ -76,7 +77,7 @@ def obtener_cliente_gspread():
     raise ValueError("No se pudieron validar las credenciales de GCP.")
 
 def consultar_orden_compra_por_fila(row):
-    """Genera la información de la OC en función de la institución de cada fila."""
+    """Genera la información de la OC en función de los datos de cada fila."""
     codigo_proceso = str(row.get("Código Proceso", "")).strip()
     code_clean = codigo_proceso.upper()
     comprador = str(row.get("Institución Compradora", "Institución Compradora")).strip()
@@ -121,7 +122,7 @@ def consultar_orden_compra_por_fila(row):
             "Fecha Emisión OC": "2025-06-05"
         }
 
-    # 4. Proceso Dinámico Adaptativo por Institución
+    # 4. Proceso Dinámico Adaptativo
     monto_neto_calc = int(round(monto_bruto_row / 1.19)) if monto_bruto_row > 0 else 0
     monto_bruto_calc = int(round(monto_bruto_row)) if monto_bruto_row > 0 else 0
     fecha_cierre = str(row.get("Fecha de Cierre", "2026-01-30")).strip().split("T")[0]
@@ -154,7 +155,7 @@ def sincronizar_base_maestra():
         print("⚠️ No se obtuvieron registros de la planilla.")
         return
 
-    print(f"📄 Reorganizando {len(records)} filas según los encabezados correctos...")
+    print(f"📄 Mapeando {len(records)} filas en las posiciones físicas exactas (A a la S)...")
 
     filas_actualizadas = []
     for row in records:
@@ -170,11 +171,11 @@ def sincronizar_base_maestra():
         fila_ordenada = [row.get(col, "") for col in ENCABEZADOS_BASE_MAESTRA]
         filas_actualizadas.append(fila_ordenada)
 
-    print(f"💾 Guardando {len(filas_actualizadas)} registros en Google Sheets...")
+    print(f"💾 Guardando {len(filas_actualizadas)} registros alineados en Google Sheets...")
     sheet.clear()
-    sheet.update('A1:R1', [ENCABEZADOS_BASE_MAESTRA])
-    sheet.update(f'A2:R{len(filas_actualizadas) + 1}', filas_actualizadas)
-    print("✅ Sincronización completada con éxito. Todos los encabezados quedaron perfectamente alineados.")
+    sheet.update('A1:S1', [ENCABEZADOS_BASE_MAESTRA])
+    sheet.update(f'A2:S{len(filas_actualizadas) + 1}', filas_actualizadas)
+    print("✅ Sincronización completada con éxito. Todos los encabezados A-S encajan perfectamente con sus datos.")
 
 if __name__ == "__main__":
     sincronizar_base_maestra()
