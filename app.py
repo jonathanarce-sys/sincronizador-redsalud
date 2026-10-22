@@ -164,7 +164,7 @@ def obtener_datos_proceso(codigo_target):
     # 1. Ficha Pelluhue (3251-18-LE25)
     if "3251" in codigo_clean or "LE25" in codigo_clean:
         return pd.DataFrame([{
-            "OPPORTUNITY_CODE": codigo_target,
+            "OPPORTUNITY_CODE": codigo_target if codigo_target else "3251-18-LE25",
             "OPPORTUNITY_NAME": "Adquisición e Insumos Oftalmológicos y de Salud",
             "ORGANISM": "I Municipalidad De Pelluhue",
             "PUBLISH_DATE": "2025-05-10",
@@ -180,7 +180,7 @@ def obtener_datos_proceso(codigo_target):
     # 2. Ficha La Granja (2963-26-LR26)
     if "2963" in codigo_clean or "LR26" in codigo_clean:
         return pd.DataFrame([{
-            "OPPORTUNITY_CODE": codigo_target,
+            "OPPORTUNITY_CODE": codigo_target if codigo_target else "2963-26-LR26",
             "OPPORTUNITY_NAME": "Convenio de Exámenes de Laboratorio y Salud Comunitaria",
             "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA",
             "PUBLISH_DATE": "2026-10-15",
@@ -195,7 +195,7 @@ def obtener_datos_proceso(codigo_target):
 
     # 3. Ficha Dinámica Instantánea para cualquier otro código
     return pd.DataFrame([{
-        "OPPORTUNITY_CODE": codigo_target,
+        "OPPORTUNITY_CODE": codigo_target if codigo_target else "S/C",
         "OPPORTUNITY_NAME": f"Proceso Sanitario / Salud {codigo_target}",
         "ORGANISM": "Servicio de Salud / Institución Pública",
         "PUBLISH_DATE": "2025-05-10",
