@@ -161,18 +161,14 @@ def extraer_adjudicatario_real_de_item(row_dict):
     return None
 
 def generar_tabla_desglose_dinamica(val_code, val_tipo_proceso):
-    """Genera dinámicamente la tabla de puntuación por acta según el proceso seleccionado."""
     code_upper = str(val_code).upper()
-    
     if "2963" in code_upper:
-        # Licitación La Granja
         return pd.DataFrame({
             "Criterio de Evaluación": ["Evaluación Técnica (40%)", "Evaluación Económica (40%)", "Evaluación Administrativa (10%)", "Evaluación Territorial (10%)"],
             "Puntaje Adjudicatario": ["100.0 pts", "97.5 pts", "100.0 pts", "100.0 pts"],
             "Puntaje Competencia (Prom.)": ["85.0 pts", "92.0 pts", "90.0 pts", "80.0 pts"]
         })
     elif "3251" in code_upper:
-        # Licitación Pelluhue
         return pd.DataFrame({
             "Criterio de Evaluación": ["Evaluación Económica (45%)", "Evaluación Técnica (35%)", "Evaluación Territorial (10%)", "Evaluación Administrativa (10%)"],
             "Puntaje Adjudicatario": ["100.0 pts", "98.0 pts", "95.0 pts", "100.0 pts"],
@@ -185,7 +181,6 @@ def generar_tabla_desglose_dinamica(val_code, val_tipo_proceso):
             "Puntaje Competencia (Prom.)": ["91.0 pts", "80.0 pts", "85.0 pts", "N/A"]
         })
     else:
-        # Licitación Estándar
         return pd.DataFrame({
             "Criterio de Evaluación": ["Evaluación Técnica (40%)", "Evaluación Económica (40%)", "Evaluación Territorial (10%)", "Evaluación Administrativa (10%)"],
             "Puntaje Adjudicatario": ["98.0 pts", "96.5 pts", "100.0 pts", "100.0 pts"],
@@ -226,7 +221,7 @@ def cargar_datos_iniciales():
 
     try:
         headers = {"x-api-key": LICITALAB_API_KEY, "Accept": "application/json"}
-        res = requests.get(f"{URL_API_LICITALAB}?page=1", headers=headers, timeout=4)
+        res = requests.get(f"{URL_API_LICITALAB}?page=1", headers=headers, timeout=2)
         if res.status_code == 200:
             data = res.json()
             items = data.get("data", data) if isinstance(data, dict) else data
@@ -274,7 +269,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
 
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/Licitaciones.json?codigo={codigo_target}&ticket={MERCADO_PUBLICO_TICKET}"
-        res = requests.get(url_mp, timeout=4)
+        res = requests.get(url_mp, timeout=2)
         if res.status_code == 200:
             listado = res.json().get("Listado", [])
             if listado:
@@ -311,7 +306,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
         "_origen": "Resolución Dinámica de Búsqueda"
     }])
 
-# Carga inicial segura
+# Carga inicial ultra segura
 try:
     df_api = cargar_datos_iniciales()
 except Exception:
@@ -335,8 +330,7 @@ if not df_api.empty and codigo_ingresado:
     df_filtrado = df_api[df_api[col_code].astype(str).str.replace(" ", "").str.contains(codigo_ingresado.replace(" ", ""), case=False, na=False)]
 
 if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Consultando datos reales para {codigo_ingresado}..."):
-        df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
+    df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
 
 if not df_api.empty and not codigo_ingresado:
     df_filtrado = df_api
@@ -443,7 +437,6 @@ if not df_filtrado.empty:
             st.markdown('<span class="advantage-badge">⚡ Capacidad Instalada y Despacho Inmediato</span>', unsafe_allow_html=True)
         with col_p2:
             st.markdown("**📊 Desglose Oficial de Puntuación en Acta de Adjudicación:**")
-            # GENERACIÓN DINÁMICA DE LA TABLA DE PUNTUACIONES
             df_p = generar_tabla_desglose_dinamica(val_code, val_tipo_proceso)
             st.dataframe(df_p, use_container_width=True, hide_index=True)
 
@@ -457,4 +450,94 @@ if not df_filtrado.empty:
     if val_tipo_proceso == "Compra Ágil":
         val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 500000
     else:
-        val_bruto_def = int
+        val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1850000
+
+    p1, p2, p3 = st.columns([1.5, 1.5, 1])
+    monto_bruto_input = p1.number_input(
+        "Presupuesto Estimado Total con IVA (CLP):",
+        min_value=0,
+        value=val_bruto_def,
+        step=25000,
+        key=f"monto_bruto_user_{val_code}"
+    )
+
+    monto_bruto_total = float(monto_bruto_input)
+    monto_neto_calculado = float(round(monto_bruto_total / 1.19))
+
+    p2.metric("Monto Neto Estimado sin IVA", formatear_moneda(monto_neto_calculado))
+    plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
+    p3.metric("Plazo Estimado de Pago", plazo_pago)
+
+    comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones adicionales.")
+    st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
+
+    # Módulo 4: Simulador de Costos por 4 Criterios
+    st.markdown("---")
+    st.subheader("📐 Simulador de Costos por Criterios de Evaluación y Margen de Oferta")
+
+    col_calc1, col_calc2 = st.columns(2)
+    val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 350000
+
+    eval_tecnica = col_calc1.number_input(
+        "Evaluación Técnica (Insumos, Personal, Equipamiento) (CLP):",
+        min_value=0,
+        value=val_eval_tec_def,
+        step=10000,
+        key=f"eval_tec_{val_code}"
+    )
+    eval_admin = col_calc1.number_input(
+        "Evaluación Administrativa (Garantías, Gestión Documental) (CLP):",
+        min_value=0,
+        value=15000 if val_tipo_proceso != "Compra Ágil" else 0,
+        step=2500,
+        key=f"eval_admin_{val_code}"
+    )
+    eval_economica = col_calc1.number_input(
+        "Evaluación Económica (Costos Financieros, Retenciones) (CLP):",
+        min_value=0,
+        value=10000,
+        step=2500,
+        key=f"eval_econ_{val_code}"
+    )
+    eval_territorial = col_calc1.number_input(
+        "Evaluación Territorial (Logística, Traslado por Zona) (CLP):",
+        min_value=0,
+        value=15000,
+        step=2500,
+        key=f"eval_terr_{val_code}"
+    )
+
+    margen_pct = col_calc2.slider(
+        "Margen de Utilidad Deseado (%)",
+        min_value=1,
+        max_value=80,
+        value=20,
+        key=f"margen_{val_code}"
+    )
+
+    costo_total_base = float(eval_tecnica + eval_admin + eval_economica + eval_territorial)
+    precio_neto_sugerido = (costo_total_base / (1 - (margen_pct / 100.0))) if (costo_total_base > 0 and margen_pct < 100) else 0.0
+    iva_sugerido = precio_neto_sugerido * 0.19
+    precio_bruto_sugerido = precio_neto_sugerido + iva_sugerido
+    ganancia_bruta = precio_neto_sugerido - costo_total_base
+
+    st.markdown("---")
+    st.markdown("### 📊 Propuesta Económica Recomendada")
+
+    if monto_bruto_total > 0 and precio_bruto_sugerido > 0:
+        diferencia_bruta = monto_bruto_total - precio_bruto_sugerido
+        pct_utilizado = (precio_bruto_sugerido / monto_bruto_total) * 100
+        if precio_bruto_sugerido <= monto_bruto_total:
+            st.success(f"🟢 **Oferta Competitiva:** La propuesta final con IVA ({formatear_moneda(precio_bruto_sugerido)}) representa el **{pct_utilizado:.1f}%** del presupuesto del cliente ({formatear_moneda(monto_bruto_total)}). (Holgura: {formatear_moneda(diferencia_bruta)})")
+        else:
+            st.error(f"🔴 **Alerta de Presupuesto:** La propuesta supera el presupuesto estimado por {formatear_moneda(abs(diferencia_bruta))} ({pct_utilizado:.1f}% del estimado).")
+
+    res1, res2, res3, res4 = st.columns(4)
+    with res1:
+        st.markdown(f'<div class="kpi-card" style="border-top: 4px solid #3b82f6;"><div class="kpi-title">Punto de Equilibrio (Neto)</div><div class="kpi-value">{formatear_moneda(costo_total_base)}</div><small style="color: #64748b;">Suma 4 Evaluaciones</small></div>', unsafe_allow_html=True)
+    with res2:
+        st.markdown(f'<div class="kpi-card" style="border-top: 4px solid #2563eb;"><div class="kpi-title">Precio Sugerido (Neto)</div><div class="kpi-value">{formatear_moneda(precio_neto_sugerido)}</div><small style="color: #64748b;">Valor Propuesta Comercial</small></div>', unsafe_allow_html=True)
+    with res3:
+        st.markdown(f'<div class="kpi-card" style="border-top: 4px solid #0284c7;"><div class="kpi-title">Precio Final (Con IVA 19%)</div><div class="kpi-value">{formatear_moneda(precio_bruto_sugerido)}</div><small style="color: #64748b;">Monto Total Facturable</small></div>', unsafe_allow_html=True)
+    with res4:
+        st.markdown(f'<div class="kpi-card" style="border-top: 4px solid #16a34a;"><div class="kpi-title">Utilidad Bruta Estimada</div><div class="kpi-value" style="color: #15803d;">{formatear_moneda(ganancia_bruta)}</div><small style="color: #166534;">Margen Efectivo: {margen_pct}%</small></div>', unsafe_allow_html=True)
