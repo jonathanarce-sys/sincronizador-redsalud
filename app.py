@@ -126,6 +126,8 @@ def detectar_region_por_organismo(organismo, region_raw):
     org_upper = str(organismo).upper()
     if any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU"]):
         return "Región Metropolitana"
+    elif any(k in org_upper for k in ["CURICÓ", "CURICO", "TALCA", "MAULE", "LINARES"]):
+        return "Región del Maule"
     elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
         return "Región del Ñuble"
     elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS"]):
@@ -184,7 +186,7 @@ def cargar_datos_iniciales():
             df_sheet["ORGANISM"] = df_sheet["Institución Compradora"] if "Institución Compradora" in df_sheet.columns else df_sheet.iloc[:, 3]
             df_sheet["PUBLISH_DATE"] = df_sheet["Fecha Publicación"] if "Fecha Publicación" in df_sheet.columns else ""
             df_sheet["CLOSING_DATE"] = df_sheet["Fecha de Cierre"] if "Fecha de Cierre" in df_sheet.columns else ""
-            df_sheet["OPPORTUNITY_STATUS"] = df_sheet["Estado de la Oferta"] if "Estado de la Oferta" in df_sheet.columns else "Adjudicada"
+            df_sheet["OPPORTUNITY_STATUS"] = df_sheet["Estado de la Oferta"] if "Estado de la Oferta" in df_sheet.columns else "Publicada"
             df_sheet["AVAILABLE_AMOUNT"] = df_sheet["Monto Total + IVA (Adjudicado / Estimado)"] if "Monto Total + IVA (Adjudicado / Estimado)" in df_sheet.columns else 0
             df_sheet["_origen"] = "Base Maestra Respaldada (Google Sheets)"
             return df_sheet
@@ -205,26 +207,27 @@ def buscar_codigo_en_apis_externas(codigo_target):
             listado = data.get("Listado", [])
             if listado:
                 it = listado[0]
+                estado_mp = str(it.get("Estado", "Publicada")).title()
                 item_mapped = {
                     "OPPORTUNITY_CODE": it.get("CodigoExterno", codigo_target),
-                    "OPPORTUNITY_NAME": it.get("Nombre", "Convenio de Exámenes de Laboratorio y Salud Comunitaria"),
-                    "ORGANISM": it.get("Comprador", {}).get("NombreOrganismo", "I MUNICIPALIDAD DE LA GRANJA"),
-                    "PUBLISH_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCreacion"), "2026-10-15"),
-                    "CLOSING_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCierre"), "2026-11-10"),
-                    "OPPORTUNITY_STATUS": "Adjudicada",
-                    "AWARDED_PROVIDERS": "MEDICENTER UNO SPA (RUT: 76.365.706-K)",
-                    "COMMENTS": "Adjudicado a MEDICENTER UNO SPA (76.365.706-K) por obtener el mayor puntaje en la evaluación técnica y propuesta económica integral.",
-                    "AVAILABLE_AMOUNT": it.get("MontoEstimado", 1190000),
-                    "REGION": it.get("Comprador", {}).get("RegionComprador", "Región Metropolitana"),
+                    "OPPORTUNITY_NAME": it.get("Nombre", "Proceso de Compras Públicas"),
+                    "ORGANISM": it.get("Comprador", {}).get("NombreOrganismo", "Institución Pública"),
+                    "PUBLISH_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCreacion"), "2026-10-21"),
+                    "CLOSING_DATE": extraer_fecha_segura(it.get("Fechas", {}).get("FechaCierre"), "2026-10-22"),
+                    "OPPORTUNITY_STATUS": estado_mp,
+                    "AWARDED_PROVIDERS": it.get("Adjudicacion", {}).get("NombreProveedor", "No adjudicado aún"),
+                    "COMMENTS": it.get("Descripcion", "Proceso en consulta directa Mercado Público."),
+                    "AVAILABLE_AMOUNT": it.get("MontoEstimado", 0),
+                    "REGION": it.get("Comprador", {}).get("RegionComprador", ""),
                     "_origen": "API Oficial Mercado Público"
                 }
                 return pd.DataFrame([item_mapped])
     except Exception:
         pass
 
-    # 2. Ficha oficial con estado ADJUDICADA para La Granja (2963-26-LR26)
+    # 2. Casos específicos conocidos
     if "2963" in codigo_target or "LR26" in codigo_target.upper():
-        item_fallback = {
+        item_granja = {
             "OPPORTUNITY_CODE": codigo_target,
             "OPPORTUNITY_NAME": "Convenio de Exámenes de Laboratorio y Salud Comunitaria",
             "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA",
@@ -237,7 +240,7 @@ def buscar_codigo_en_apis_externas(codigo_target):
             "REGION": "Región Metropolitana",
             "_origen": "Ficha Oficial Adjudicada (La Granja)"
         }
-        return pd.DataFrame([item_fallback])
+        return pd.DataFrame([item_granja])
 
     return pd.DataFrame()
 
@@ -253,7 +256,7 @@ st.subheader("🔎 Buscador y Selección de Oportunidad")
 
 col_busqueda, col_filtro_tipo = st.columns([2.5, 1.5])
 
-codigo_ingresado = col_busqueda.text_input("Ingresa o busca por Código de Proceso:", value="2963-26-LR26", placeholder="Ej: 2963-26-LR26, 3904-939-COT26, 1380-5003-COT26...").strip()
+codigo_ingresado = col_busqueda.text_input("Ingresa o busca por Código de Proceso:", value="2963-26-LR26", placeholder="Ej: 2963-26-LR26, 1003473-4816-COT26, 1380-5003-COT26...").strip()
 
 df_filtrado = pd.DataFrame()
 
@@ -262,7 +265,7 @@ if not df_api.empty and codigo_ingresado:
     df_filtrado = df_api[df_api[col_code].astype(str).str.replace(" ", "").str.contains(codigo_ingresado.replace(" ", ""), case=False, na=False)]
 
 if codigo_ingresado and df_filtrado.empty:
-    with st.spinner(f"Consultando información de adjudicación para {codigo_ingresado}..."):
+    with st.spinner(f"Consultando información para {codigo_ingresado}..."):
         df_filtrado = buscar_codigo_en_apis_externas(codigo_ingresado)
 
 if not df_api.empty and not codigo_ingresado:
@@ -274,13 +277,13 @@ if df_filtrado.empty:
         item_manual = {
             "OPPORTUNITY_CODE": codigo_ingresado,
             "OPPORTUNITY_NAME": "Simulación de Cotización / Licitación",
-            "ORGANISM": "I MUNICIPALIDAD DE LA GRANJA" if "2963" in codigo_ingresado else "Institución Pública",
-            "PUBLISH_DATE": "2026-10-20",
-            "CLOSING_DATE": "2026-11-15",
-            "OPPORTUNITY_STATUS": "Adjudicada",
-            "AWARDED_PROVIDERS": "MEDICENTER UNO SPA (RUT: 76.365.706-K)",
-            "COMMENTS": "Adjudicado por cumplir con la mejor oferta económica y técnica.",
-            "AVAILABLE_AMOUNT": 1190000,
+            "ORGANISM": "Institución Compradora Publica",
+            "PUBLISH_DATE": "2026-10-21",
+            "CLOSING_DATE": "2026-10-22",
+            "OPPORTUNITY_STATUS": "Publicada",
+            "AWARDED_PROVIDERS": "En Proceso",
+            "COMMENTS": "Ficha en evaluación comercial.",
+            "AVAILABLE_AMOUNT": 500000,
             "REGION": "Región Metropolitana",
             "_origen": "Simulación Manual"
         }
@@ -317,10 +320,10 @@ if not df_filtrado.empty:
     val_code = limpiar_texto(item.get(col_code))
     val_pub = extraer_fecha_segura(item.get("PUBLISH_DATE") or item.get("CREATED_AT") or item.get("Fecha Publicación"))
     val_cierre = extraer_fecha_segura(item.get("CLOSING_DATE") or item.get("Fecha de Cierre"), fallback="N/A")
-    val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Adjudicada")
+    val_estado = limpiar_texto(item.get("OPPORTUNITY_STATUS") or item.get("MANAGED_STATUS_NAME") or item.get("Estado de la Oferta"), fallback="Publicada")
     val_tipo_proceso = clasificar_tipo_label(item.get(col_tip, ''), val_code)
 
-    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"), fallback="I MUNICIPALIDAD DE LA GRANJA" if "2963" in val_code else "Institución Pública")
+    val_comprador = limpiar_texto(item.get("ORGANISM") or item.get("organism") or item.get("Institución Compradora"), fallback="Institución Pública")
     val_region = detectar_region_por_organismo(val_comprador, item.get("REGION") or item.get("Región / Territorio"))
 
     c1, c2, c3, c4 = st.columns(4)
@@ -341,7 +344,7 @@ if not df_filtrado.empty:
         st.markdown(f'<div class="kpi-card"><div class="kpi-title">Institución Compradora</div><div class="kpi-value">{val_comprador}</div></div>', unsafe_allow_html=True)
 
     # ==========================================
-    # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN REAL
+    # 🏢 MÓDULO DE COMPETENCIA Y ADJUDICACIÓN DINÁMICA
     # ==========================================
     st.markdown("---")
     st.subheader("🏢 Análisis de Competencia e Historia de Adjudicación")
@@ -350,10 +353,12 @@ if not df_filtrado.empty:
     df_competencia = df_filtrado[df_filtrado[col_org] == val_comprador] if (col_org in df_filtrado.columns and val_comprador != "No registrado") else pd.DataFrame()
     
     tot_licitaciones = len(df_competencia) if not df_competencia.empty else 1
-    tot_ganadas = 1
-    tot_perdidas = max(0, tot_licitaciones - tot_ganadas)
-    tot_competidores = 3
-    win_rate = 100.0
+    es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper()
+    
+    tot_ganadas = 1 if es_adjudicada else 0
+    tot_perdidas = 0
+    tot_competidores = 3 if es_adjudicada else 1
+    win_rate = 100.0 if es_adjudicada else 0.0
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("# Procesos en Comprador", str(tot_licitaciones))
@@ -362,18 +367,16 @@ if not df_filtrado.empty:
     k4.metric("# Perdidas Histórico", str(tot_perdidas))
     k5.metric("Win Rate Comprador", f"{win_rate:.1f} %")
 
-    es_adjudicada = "ADJUDICAD" in val_estado.upper() or "OC EMITIDA" in val_estado.upper() or True
-
+    # Evaluación estricta por estado real del proceso
     if es_adjudicada:
         st.markdown("##### 🏆 Factor Ganador y Resultados de Adjudicación")
         
-        # Override directo para 2963-26-LR26 si el ítem no trae el proveedor actualizado
         if "2963" in val_code:
             adj_real = "MEDICENTER UNO SPA (RUT: 76.365.706-K)"
             motivo_adj = "Adjudicado a MEDICENTER UNO SPA (76.365.706-K) por obtener el mayor puntaje en la evaluación técnica y propuesta económica integral en la I. Municipalidad de La Granja."
         else:
-            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS") or item.get("Adjudicatario (Proveedor Ganador)"), fallback="MEDICENTER UNO SPA (RUT: 76.365.706-K)")
-            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME") or item.get("Comentarios"), fallback="Adjudicado por cumplir con la mejor oferta económica y técnica.")
+            adj_real = limpiar_texto(item.get("AWARDED_PROVIDERS") or item.get("Adjudicatario (Proveedor Ganador)"), fallback="Proveedor Adjudicado")
+            motivo_adj = limpiar_texto(item.get("COMMENTS") or item.get("MANAGED_STATUS_NAME") or item.get("Comentarios"), fallback="Adjudicado por cumplir con los criterios de evaluación.")
 
         st.markdown(f"""
         <div class="reason-box-green">
@@ -396,6 +399,14 @@ if not df_filtrado.empty:
                 "Puntaje Competencia (Prom.)": ["85 pts", "92.0 pts", "80 pts", "100 pts"]
             })
             st.dataframe(df_p, use_container_width=True, hide_index=True)
+    else:
+        st.markdown("##### ℹ️ Estado del Proceso Comercial")
+        st.markdown(f"""
+        <div class="reason-box-blue">
+            <b>Proceso en Curso ({val_estado}):</b> Esta oportunidad aún no cuenta con Acta de Adjudicación emitida.
+            Actualmente se encuentra abierta para presentación de ofertas o en fase de evaluación técnica.
+        </div>
+        """, unsafe_allow_html=True)
 
     # ==========================================
     # 💵 PRESUPUESTO & VALORES DE REFERENCIA
@@ -407,7 +418,7 @@ if not df_filtrado.empty:
     monto_extraido = limpiar_monto_a_float(monto_raw)
 
     if val_tipo_proceso == "Compra Ágil":
-        val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 760000
+        val_bruto_def = int(monto_extraido) if monto_extraido > 0 else 500000
     else:
         val_bruto_def = int(monto_extraido * 1.19) if monto_extraido > 0 else 1190000
 
@@ -417,7 +428,7 @@ if not df_filtrado.empty:
         "Presupuesto Estimado Total con IVA (CLP):",
         min_value=0,
         value=val_bruto_def,
-        step=50000,
+        step=25000,
         key=f"monto_bruto_user_{val_code}",
         help="En Compra Ágil, este monto corresponde al presupuesto total publicado en Mercado Público (con IVA)."
     )
@@ -429,7 +440,7 @@ if not df_filtrado.empty:
     plazo_pago = limpiar_texto(item.get("PAYMENT_TERMS"), fallback="30 a 60 días (Estándar)")
     p3.metric("Plazo Estimado de Pago", plazo_pago)
 
-    comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Proceso Adjudicado satisfactoriamente a MEDICENTER UNO SPA (76.365.706-K).")
+    comentarios_txt = limpiar_texto(item.get("COMMENTS") or item.get("Comentarios"), fallback="Sin observaciones adicionales.")
     st.info("💬 **Comentarios de Gestión & Observaciones:** " + comentarios_txt)
 
     # ==========================================
@@ -440,7 +451,7 @@ if not df_filtrado.empty:
 
     col_calc1, col_calc2 = st.columns(2)
 
-    val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 350000
+    val_eval_tec_def = int(round(monto_neto_calculado * 0.60)) if monto_neto_calculado > 0 else 250000
 
     eval_tecnica = col_calc1.number_input(
         "Evaluación Técnica (Insumos, Personal, Equipamiento) (CLP):",
@@ -463,7 +474,7 @@ if not df_filtrado.empty:
     eval_economica = col_calc1.number_input(
         "Evaluación Económica (Costos Financieros, Retenciones) (CLP):",
         min_value=0,
-        value=20000,
+        value=10000,
         step=2500,
         key=f"eval_econ_{val_code}",
         help="Gastos de financiamiento, comisiones o costos de transacción."
@@ -472,8 +483,8 @@ if not df_filtrado.empty:
     eval_territorial = col_calc1.number_input(
         "Evaluación Territorial (Logística, Traslado por Zona) (CLP):",
         min_value=0,
-        value=30000,
-        step=5000,
+        value=15000,
+        step=2500,
         key=f"eval_terr_{val_code}",
         help="Fletes, logística de zona y distribución regional."
     )
