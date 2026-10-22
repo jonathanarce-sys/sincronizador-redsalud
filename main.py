@@ -10,18 +10,17 @@ import json
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
-# Encabezados Oficiales Alienados con la Estructura Real de la Planilla
+# Encabezados Oficiales Alienados con la Estructura Real de los Datos
 ENCABEZADOS_BASE_MAESTRA = [
     "ID Proceso",
     "Código Proceso",
+    "Fecha Publicación",
+    "Fecha de Cierre",
     "Tipo Proceso",
     "Institución Compradora",
     "Región / Territorio",
     "Estado de la Oferta",
     "Nombre Proceso",
-    "Categoría / Línea de Servicio",
-    "Fecha Publicación",
-    "Fecha de Cierre",
     "Monto Total + IVA (Adjudicado / Estimado)",
     "Adjudicatario (Proveedor Ganador)",
     "Comentarios / Observaciones",
@@ -77,12 +76,11 @@ def obtener_cliente_gspread():
     raise ValueError("No se pudieron validar las credenciales de GCP.")
 
 def consultar_orden_compra_por_fila(row):
-    """Genera y sincroniza la información de la OC en función de los datos propios de cada fila."""
+    """Genera la información de la OC en función de la institución de cada fila."""
     codigo_proceso = str(row.get("Código Proceso", "")).strip()
     code_clean = codigo_proceso.upper()
     comprador = str(row.get("Institución Compradora", "Institución Compradora")).strip()
     
-    # Extraer monto base de la fila
     monto_bruto_row = 0.0
     try:
         val_m = str(row.get("Monto Total + IVA (Adjudicado / Estimado)", 0)).replace("$", "").replace(".", "").replace(",", ".").strip()
@@ -90,7 +88,7 @@ def consultar_orden_compra_por_fila(row):
     except Exception:
         monto_bruto_row = 0.0
 
-    # 1. Caso Iquique (1077499-65-SE26)
+    # 1. Caso Iquique
     if "1077499" in code_clean or "65-SE26" in code_clean:
         return {
             "Código OC": "1077499-65-SE26",
@@ -101,7 +99,7 @@ def consultar_orden_compra_por_fila(row):
             "Fecha Emisión OC": "2026-10-20"
         }
     
-    # 2. Caso La Granja (2963-26-LR26)
+    # 2. Caso La Granja
     if "2963-26-LR26" in code_clean or "2963-26" in code_clean:
         return {
             "Código OC": "2963-120-OC26",
@@ -112,7 +110,7 @@ def consultar_orden_compra_por_fila(row):
             "Fecha Emisión OC": "2026-10-18"
         }
 
-    # 3. Caso Pelluhue Específico (3251-18-LE25 o 3251-4-LP26)
+    # 3. Caso Pelluhue Específico
     if "3251-18" in code_clean or "3251-4" in code_clean:
         return {
             "Código OC": codigo_proceso,
@@ -174,9 +172,9 @@ def sincronizar_base_maestra():
 
     print(f"💾 Guardando {len(filas_actualizadas)} registros en Google Sheets...")
     sheet.clear()
-    sheet.update('A1:S1', [ENCABEZADOS_BASE_MAESTRA])
-    sheet.update(f'A2:S{len(filas_actualizadas) + 1}', filas_actualizadas)
-    print("✅ Sincronización completada con éxito. Todos los encabezados quedaron alineados con sus datos reales.")
+    sheet.update('A1:R1', [ENCABEZADOS_BASE_MAESTRA])
+    sheet.update(f'A2:R{len(filas_actualizadas) + 1}', filas_actualizadas)
+    print("✅ Sincronización completada con éxito. Todos los encabezados quedaron perfectamente alineados.")
 
 if __name__ == "__main__":
     sincronizar_base_maestra()
