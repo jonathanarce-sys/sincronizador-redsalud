@@ -34,27 +34,51 @@ ENCABEZADOS_BASE_MAESTRA = [
     "Fecha Emisión OC"
 ]
 
+def corregir_padding_base64(b64_str):
+    """Corrige automáticamente caracteres '=' de padding en cadenas Base64."""
+    b64_str = str(b64_str).strip()
+    missing_padding = len(b64_str) % 4
+    if missing_padding != 0:
+        b64_str += '=' * (4 - missing_padding)
+    return b64_str
+
 def obtener_cliente_gspread():
-    """Autentica con la API de Google Sheets usando las credenciales en Base64 o dict."""
+    """Autentica con la API de Google Sheets corrigiendo el padding de Base64 si es necesario."""
     creds_dict = None
+    
     if "GCP_JSON_BASE64" in os.environ:
-        b64_str = os.environ["GCP_JSON_BASE64"]
-        json_bytes = base64.b64decode(b64_str)
-        creds_dict = json.loads(json_bytes.decode("utf-8"))
+        b64_str = os.environ["GCP_JSON_BASE64"].strip()
+        b64_str_fixed = corregir_padding_base64(b64_str)
+        try:
+            json_bytes = base64.b64decode(b64_str_fixed)
+            creds_dict = json.loads(json_bytes.decode("utf-8"))
+        except Exception as e:
+            # Fallback si el string vino como JSON directo sin codificar en base64
+            try:
+                creds_dict = json.loads(b64_str)
+            except Exception:
+                raise e
+
     elif "gcp_service_account" in os.environ:
-        creds_dict = json.loads(os.environ["gcp_service_account"])
+        raw_val = os.environ["gcp_service_account"].strip()
+        try:
+            creds_dict = json.loads(raw_val)
+        except Exception:
+            b64_fixed = corregir_padding_base64(raw_val)
+            json_bytes = base64.b64decode(b64_fixed)
+            creds_dict = json.loads(json_bytes.decode("utf-8"))
 
     if creds_dict:
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return gspread.authorize(creds)
+        
     raise ValueError("No se encontraron credenciales de GCP configuradas.")
 
 def consultar_orden_compra_api(codigo_proceso):
-    """Consulta los detalles de la Orden de Compra asociada al proceso en Mercado Público."""
+    """Consulta los detalles de la Orden de Compra asociada al proceso."""
     code_clean = str(codigo_proceso).strip().upper()
     
-    # Caso directo conocido (Ejemplo: 1077499-65-SE26)
     if "1077499" in code_clean or "65-SE26" in code_clean or "SE26" in code_clean:
         return {
             "Código OC": "1077499-65-SE26",
@@ -75,7 +99,6 @@ def consultar_orden_compra_api(codigo_proceso):
             "Fecha Emisión OC": "2026-10-18"
         }
 
-    # Intentar consulta a la API de Mercado Público
     try:
         url_mp = f"https://api.mercadopublico.cl/servicios/v1/Publico/OrdenesDeCompra.json?codigo={codigo_proceso}&ticket={MERCADO_PUBLICO_TICKET}"
         res = requests.get(url_mp, timeout=5)
@@ -149,7 +172,6 @@ def sincronizar_base_maestra():
         codigo = str(row.get("Código Proceso", "")).strip()
         estado_oferta = str(row.get("Estado de la Oferta", "Adjudicada")).strip()
         
-        # Si está adjudicada y falta la información de la OC, se consulta dinámicamente
         if "ADJUDICAD" in estado_oferta.upper() or True:
             oc_info = consultar_orden_compra_api(codigo)
             row["Código OC"] = oc_info["Código OC"]
@@ -162,7 +184,6 @@ def sincronizar_base_maestra():
         fila_ordenada = [row.get(col, "") for col in ENCABEZADOS_BASE_MAESTRA]
         filas_actualizadas.append(fila_ordenada)
 
-    # Escribir la tabla completa en Google Sheets
     print(f"💾 Guardando {len(filas_actualizadas)} registros con Órdenes de Compra en Google Sheets...")
     sheet.clear()
     sheet.update('A1:R1', [ENCABEZADOS_BASE_MAESTRA])
