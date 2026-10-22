@@ -9,9 +9,8 @@ import re
 
 # Configuración General
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
-# Encabezados Oficiales Alienados con Claridad Financiera (Columnas A a la S)
+# Encabezados Oficiales Alineados en Posición Física (Columnas A a la S)
 ENCABEZADOS_OFICIALES = [
     "ID Proceso",                                 # A
     "Código Proceso",                             # B
@@ -78,7 +77,7 @@ def obtener_cliente_gspread():
     raise ValueError("No se pudieron validar las credenciales de GCP.")
 
 def es_codigo_proceso_valido(texto):
-    """Verifica estrictamente si el texto es un código de licitación/cotización (ej: 1003473-4816-COT26)."""
+    """Verifica estrictamente si el texto es un código de licitación/cotización."""
     t = str(texto).strip().upper()
     if any(sigla in t for sigla in ["COT", "LE", "LR", "LP", "SE", "CO", "AGILE"]):
         if any(char.isdigit() for char in t) and "-" in t:
@@ -91,7 +90,7 @@ def es_fecha(val_str):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}', val))
 
 def limpiar_monto(val_str):
-    """Convierte cadenas con $, puntos o comas a entero numérico limpio."""
+    """Convierte cadenas numéricas con $, puntos o comas a entero numérico limpio."""
     if not val_str or pd.isna(val_str):
         return 0
     try:
@@ -121,13 +120,21 @@ def detectar_region(organismo):
         return "Región de Los Lagos"
     return "Región Metropolitana"
 
+def clasificar_tipo_label(code_raw):
+    code_upper = str(code_raw).upper()
+    if "COT" in code_upper or "AGILE" in code_upper:
+        return "Compra Ágil"
+    elif "CO" in code_upper or "PRIVATE" in code_upper:
+        return "Licitación Privada"
+    return "Licitación Pública"
+
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
-    """Reconstruye con precisión matemática cada columna A-S resolviendo cruces de nombres y montos."""
+    """Reconstruye cada celda en su posición correcta A-S resolviendo cruces de nombres y montos."""
     celdas = [str(c).strip() for c in fila_raw]
     while len(celdas) < 20:
         celdas.append("")
 
-    # 1. Identificar Código Proceso exacto
+    # 1. Código Proceso
     codigo = ""
     for c in celdas:
         if es_codigo_proceso_valido(c):
@@ -136,7 +143,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     if not codigo:
         codigo = f"PROCESO-{idx}"
 
-    # 2. Identificar Nombre del Proceso
+    # 2. Nombre Proceso
     nombre_proceso = ""
     for c in celdas:
         if len(c) > 3 and c != codigo and not es_fecha(c) and not es_codigo_proceso_valido(c):
@@ -147,7 +154,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     if not nombre_proceso:
         nombre_proceso = f"Servicios Médicos / Salud {codigo}"
 
-    # 3. Categoría / Rubro
+    # 3. Categoría
     categoria = "Procedimientos, Cirugias y Salud"
     for c in celdas:
         if any(cat in c for cat in ["Procedimientos", "Dental", "Imágenes", "Salud 2.0", "Laboratorio", "Cirugias", "Consultas"]):
@@ -167,7 +174,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
             comprador = c
             break
 
-    # 6. Monto Presupuesto Real de la Fila
+    # 6. Monto Presupuesto Real
     monto_bruto = 0
     for c in celdas:
         if "$" in c or (c.isdigit() and len(c) >= 5):
@@ -206,7 +213,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         monto_neto_oc = int(round(monto_bruto_oc / 1.19))
 
     monto_iva_oc = monto_bruto_oc - monto_neto_oc
-    tipo_proceso = clasificar_tipo_label("", codigo)
+    tipo_proceso = clasificar_tipo_label(codigo)
     region = detectar_region(comprador)
 
     # Matriz Limpia Alineada A1:S1
@@ -231,6 +238,16 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         monto_iva_oc,        # R: Monto IVA OC
         monto_bruto_oc       # S: Monto Bruto Facturable OC
     ]
+
+def escribir_matriz_gspread(sheet, rango, valores):
+    """Escribe en Google Sheets garantizando compatibilidad con gspread v5 y v6."""
+    try:
+        sheet.update(range_name=rango, values=valores)
+    except Exception:
+        try:
+            sheet.update(rango, valores)
+        except Exception:
+            sheet.update(valores, rango)
 
 def sincronizar_base_maestra():
     print("🚀 Iniciando Sincronizador de Base Maestra y Calibración de Montos...")
@@ -262,16 +279,15 @@ def sincronizar_base_maestra():
                 filas_reparadas.append(reparar_y_ordenar_fila_cruda(fila, i))
 
     print(f"💾 Escribiendo matriz corregida (A1:S{len(filas_reparadas) + 1}) en Google Sheets...")
-    sheet.clear()
     
-    # Escribir Fila 1 (Encabezados Claros)
-    sheet.update('A1:S1', [ENCABEZADOS_OFICIALES])
-    
-    # Escribir Filas 2 a N (Datos limpios)
-    if filas_reparadas:
-        sheet.update(f'A2:S{len(filas_reparadas) + 1}', filas_reparadas)
-        
-    print("✅ Calibración completada con éxito. Los nombres, códigos y montos quedaron 100% ordenados.")
+    try:
+        sheet.clear()
+        escribir_matriz_gspread(sheet, 'A1:S1', [ENCABEZADOS_OFICIALES])
+        if filas_reparadas:
+            escribir_matriz_gspread(sheet, f'A2:S{len(filas_reparadas) + 1}', filas_reparadas)
+        print("✅ Sincronización completada con éxito. Todos los encabezados A-S encajaron a la perfección.")
+    except Exception as e:
+        print(f"❌ Error guardando datos en la planilla: {e}")
 
 if __name__ == "__main__":
     sincronizar_base_maestra()
