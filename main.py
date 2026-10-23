@@ -7,6 +7,7 @@ from google.oauth2.service_account import Credentials
 
 SPREADSHEET_ID = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
 TARGET_WORKSHEET = "RAW_Data_Ingesta"
+TEMPLATE_WORKSHEET = "Propuesta"  # Pestaña molde para los encabezados
 
 def clean_text(text):
     if pd.isna(text):
@@ -18,18 +19,15 @@ def procesar_archivos_raw(folder_path="data/raw"):
         print(f"La carpeta {folder_path} no existe.")
         return pd.DataFrame()
 
-    # Busca archivos .xls, .xlsx y .csv en data/raw/
     files = [f for f in os.listdir(folder_path) if f.endswith('.xls') or f.endswith('.xlsx') or f.endswith('.csv')]
     all_dfs = []
 
     for f in sorted(files):
-        # Ignorar archivos temporales o .gitkeep
         if f.startswith('.') or f == '.gitkeep':
             continue
 
         file_path = os.path.join(folder_path, f)
         try:
-            # Lectura según el tipo de archivo
             if f.endswith('.csv'):
                 try:
                     df = pd.read_csv(file_path, encoding='utf-8')
@@ -41,7 +39,6 @@ def procesar_archivos_raw(folder_path="data/raw"):
 
             filename_clean = f.replace('.xls', '').replace('.xlsx', '').replace('.csv', '')
             
-            # Clasificación automática según el nombre del archivo
             if 'GES' in filename_clean.upper():
                 tipo_reporte = 'GES_NOGES'
                 centro = filename_clean.upper().replace('GESNOGES', '').replace('GESNOGE', '').replace('GES', '').strip()
@@ -54,7 +51,6 @@ def procesar_archivos_raw(folder_path="data/raw"):
 
             centro = clean_text(centro)
 
-            # Insertar metadatos al inicio del dataframe
             df.insert(0, 'Tipo_Reporte', tipo_reporte)
             df.insert(0, 'Filial_Centro', centro)
             df.insert(0, 'Archivo_Origen', f)
@@ -66,7 +62,6 @@ def procesar_archivos_raw(folder_path="data/raw"):
 
     if all_dfs:
         master_df = pd.concat(all_dfs, ignore_index=True)
-        # Limpieza de espacios dobles en columnas de texto
         for col in master_df.select_dtypes(include='object').columns:
             master_df[col] = master_df[col].apply(clean_text)
         return master_df
@@ -94,27 +89,39 @@ def main():
     df_master = procesar_archivos_raw("data/raw")
     
     if df_master.empty:
-        print("No se encontraron archivos validos (.xls, .xlsx, .csv) en data/raw.")
+        print("No se encontraron archivos válidos en data/raw.")
         return
 
-    print(f"Consolidación exitosa con {len(df_master)} registros. Conectando a Google Sheets...")
+    print("Conectando a Google Sheets...")
     gc = obtener_cliente_gspread()
     sh = gc.open_by_key(SPREADSHEET_ID)
+
+    # Obtener la lista de encabezados exactos de la pestaña 'Propuesta'
+    try:
+        sheet_propuesta = sh.worksheet(TEMPLATE_WORKSHEET)
+        encabezados_propuesta = sheet_propuesta.row_values(1)
+        print(f"✔ Encabezados obtenidos de '{TEMPLATE_WORKSHEET}': {len(encabezados_propuesta)} columnas.")
+    except Exception as e:
+        print(f"⚠ No se pudo leer la pestaña '{TEMPLATE_WORKSHEET}', se mantendrán todas las columnas. Error: {e}")
+        encabezados_propuesta = []
+
+    # Ajustar el dataframe a los encabezados de 'Propuesta'
+    if encabezados_propuesta:
+        # Reindexar asegura conservar solo las columnas de Propuesta en su orden exacto
+        df_master = df_master.reindex(columns=encabezados_propuesta)
 
     # Buscar o crear la pestaña de destino
     try:
         worksheet = sh.worksheet(TARGET_WORKSHEET)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=TARGET_WORKSHEET, rows=100, cols=20)
+        worksheet = sh.add_worksheet(title=TARGET_WORKSHEET, rows=100, cols=len(encabezados_propuesta) or 20)
 
-    # Reemplazar valores vacíos/NaN para compatibilidad con la API de Google
     df_master = df_master.fillna("")
     data_to_upload = [df_master.columns.tolist()] + df_master.astype(str).values.tolist()
 
-    # Limpiar contenido anterior e insertar datos unificados
     worksheet.clear()
     worksheet.update("A1", data_to_upload)
-    print(f"✔ Ingesta finalizada con éxito: {len(df_master)} filas depositadas en '{TARGET_WORKSHEET}'.")
+    print(f"✔ Ingesta finalizada con éxito: {len(df_master)} filas alineadas con '{TEMPLATE_WORKSHEET}' y subidas a '{TARGET_WORKSHEET}'.")
 
 if __name__ == "__main__":
     main()
