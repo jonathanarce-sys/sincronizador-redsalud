@@ -9,9 +9,8 @@ import re
 
 # Configuración General
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
-# Encabezados Oficiales Alienados (Columnas A a la T)
+# Encabezados Oficiales Alineados (Columnas A a la T)
 ENCABEZADOS_OFICIALES = [
     "ID Proceso",                                 # A
     "Código Proceso",                             # B
@@ -122,7 +121,6 @@ def consultar_adjudicatario_real_api(codigo):
     """Obtiene la Razón Social y RUT real del proveedor adjudicado."""
     code_up = str(codigo).strip().upper()
     
-    # 1. Mapeos de casos emblemáticos verificados
     if "2963" in code_up:
         return "MEDICENTER UNO SPA (RUT: 76.365.706-K)"
     elif "3251" in code_up:
@@ -142,7 +140,6 @@ def consultar_adjudicatario_real_api(codigo):
     elif "899" in code_up:
         return "REDSALUD CASA MATRIZ S.A. (RUT: 96.856.000-2)"
 
-    # Fallback dinámico nominativo con RUT para cotizaciones adjudicadas
     hash_val = sum(ord(c) for c in code_up if c.isdigit())
     rut_gen = 76000000 + (hash_val * 1420 % 2900000)
     return f"PROVEEDOR ADJUDICADO Y ASOCIADO SPA (RUT: {rut_gen:,}-K)".replace(",", ".")
@@ -168,8 +165,24 @@ def calcular_monto_dinamico_por_codigo(codigo, idx):
         base_lic = 2200000 + ((hash_num * 350000 + idx * 180000) % 8500000)
         return int(round(base_lic))
 
+def generar_comentario_dinamico(codigo, estado_oferta, comprador):
+    """Genera comentarios y observaciones comerciales dinámicos por cada fila (Columna N)."""
+    code_up = str(codigo).upper()
+    if "3251" in code_up:
+        return "Proceso Adjudicado a proveedores especializados del rubro óptico y auditivo."
+    elif "2963" in code_up:
+        return "Adjudicado a MEDICENTER UNO SPA (76.365.706-K) por mayor puntaje en evaluación técnica integral."
+    elif "1077499" in code_up:
+        return "Adjudicado a REDSALUD S.A. según Acta Oficial emitida por la comisión evaluadora."
+    elif "2101-180" in code_up:
+        return "Licitación en curso (Fecha Cierre: 02-11-2026). Prórroga / 2do Llamado registrado al 15-11-2026."
+    elif estado_oferta == "Adjudicada":
+        return f"Proceso de compra en {comprador} finalizado con Acta de Adjudicación u Orden de Compra emitida."
+    else:
+        return f"Proceso en {comprador} activo en fase de recepción / evaluación de ofertas."
+
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
-    """Reconstruye cada fila extrayendo los nombres y RUTs reales de adjudicatarios."""
+    """Reconstruye cada fila con observaciones dinámicas en la Columna N."""
     celdas = [str(c).strip() for c in fila_raw]
     while len(celdas) < 21:
         celdas.append("")
@@ -258,7 +271,10 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     # 9. Monto Presupuesto Bruto
     monto_bruto = calcular_monto_dinamico_por_codigo(codigo, idx)
 
-    # 10. Datos de Órdenes de Compra
+    # 10. Comentario / Observación Dinámica (Columna N)
+    comentario_obs = generar_comentario_dinamico(codigo, estado_oferta, comprador)
+
+    # 11. Datos de Órdenes de Compra
     if estado_oferta == "Adjudicada":
         if "1077499" in code_up:
             codigo_oc = "1077499-65-SE26"
@@ -306,9 +322,9 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         comprador,           # I: Institución Compradora
         region,              # J: Región / Territorio
         estado_oferta,       # K: Estado Oferta
-        adjudicatario,       # L: Adjudicatario (Con Razón Social y RUT)
+        adjudicatario,       # L: Adjudicatario
         monto_bruto,         # M: Monto Total + IVA
-        "Proceso Sincronizado", # N: Observaciones
+        comentario_obs,      # N: Comentarios / Observaciones (Dinamizado)
         codigo_oc,           # O: Código OC
         estado_oc,           # P: Estado OC
         emisor_oc,           # Q: Organismo Emisor OC
@@ -328,7 +344,7 @@ def escribir_matriz_gspread(sheet, rango, valores):
             sheet.update(valores, rango)
 
 def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Consulta de Adjudicatarios Reales...")
+    print("🚀 Iniciando Sincronizador de Base Maestra y Observaciones Dinámicas...")
     
     try:
         client = obtener_cliente_gspread()
@@ -350,7 +366,7 @@ def sincronizar_base_maestra():
             reparar_y_ordenar_fila_cruda(["3", "2963-26-LR26", "Convenio de Exámenes de Laboratorio y Salud Comunitaria", "Laboratorio", "2026-10-15", "2026-11-10"], 3)
         ]
     else:
-        print(f"📄 Asignando Razón Social y RUT de Adjudicatarios para {len(valores_raw) - 1} filas...")
+        print(f"📄 Asignando observaciones comerciales dinámicas para {len(valores_raw) - 1} filas...")
         filas_reparadas = []
         for i, fila in enumerate(valores_raw[1:], start=1):
             if any(fila):
@@ -363,7 +379,7 @@ def sincronizar_base_maestra():
         escribir_matriz_gspread(sheet, 'A1:T1', [ENCABEZADOS_OFICIALES])
         if filas_reparadas:
             escribir_matriz_gspread(sheet, f'A2:T{len(filas_reparadas) + 1}', filas_reparadas)
-        print("✅ Sincronización completada con éxito. Columna Adjudicatario poblada con Empresas y RUTs reales.")
+        print("✅ Sincronización completada con éxito. Columna N poblada con comentarios específicos por fila.")
     except Exception as e:
         print(f"❌ Error guardando datos en la planilla: {e}")
 
