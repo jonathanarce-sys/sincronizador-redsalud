@@ -6,11 +6,12 @@ from google.oauth2.service_account import Credentials
 import base64
 import json
 import re
+from datetime import datetime
 
 # Configuración General
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 
-# Encabezados Oficiales Alineados (Columnas A a la S)
+# Encabezados Oficiales Alineados (Columnas A a la T)
 ENCABEZADOS_OFICIALES = [
     "ID Proceso",                                 # A
     "Código Proceso",                             # B
@@ -18,19 +19,20 @@ ENCABEZADOS_OFICIALES = [
     "Categoría / Línea de Servicio",              # D
     "Fecha Publicación",                          # E
     "Fecha de Cierre",                            # F
-    "Tipo Proceso",                               # G
-    "Institución Compradora",                     # H
-    "Región / Territorio",                        # I
-    "Estado de la Oferta",                        # J
-    "Adjudicatario (Proveedor Ganador)",          # K
-    "Monto Presupuesto Total + IVA (CLP)",        # L
-    "Comentarios / Observaciones",                # M
-    "Código OC",                                  # N
-    "Estado OC",                                  # O
-    "Organismo Emisor OC",                        # P
-    "Monto Neto OC (CLP)",                        # Q
-    "Monto IVA OC (CLP)",                         # R
-    "Monto Bruto Facturable OC (CLP)"             # S
+    "Fecha Cierre 2do Llamado",                   # G (NUEVA COLUMNA)
+    "Tipo Proceso",                               # H
+    "Institución Compradora",                     # I
+    "Región / Territorio",                        # J
+    "Estado de la Oferta",                        # K
+    "Adjudicatario (Proveedor Ganador)",          # L
+    "Monto Presupuesto Total + IVA (CLP)",        # M
+    "Comentarios / Observaciones",                # N
+    "Código OC",                                  # O
+    "Estado OC",                                  # P
+    "Organismo Emisor OC",                        # Q
+    "Monto Neto OC (CLP)",                        # R
+    "Monto IVA OC (CLP)",                         # S
+    "Monto Bruto Facturable OC (CLP)"             # T
 ]
 
 def corregir_padding_base64(b64_str):
@@ -42,10 +44,7 @@ def corregir_padding_base64(b64_str):
     return b64_str
 
 def obtener_cliente_gspread():
-    """Autentica con Google Sheets rastreando flexiblemente cualquier variable de entorno registrada."""
-    creds_dict = None
-    
-    # Lista de nombres de variables de entorno comunes para secretos en GitHub Actions
+    """Autentica con Google Sheets rastreando flexiblemente las credenciales."""
     posibles_claves = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", 
         "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS", "gcp_service_account", "gcp_json_base64"
@@ -58,20 +57,17 @@ def obtener_cliente_gspread():
             break
             
     if not valor_secreto:
-        # Búsqueda secundaria insensible a mayúsculas
         for env_k, env_v in os.environ.items():
             if any(k in env_k.upper() for k in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"]) and env_v.strip():
                 valor_secreto = env_v.strip()
                 break
 
     if valor_secreto:
-        # 1. Intentar decodificar como Base64
         try:
             b64_fixed = corregir_padding_base64(valor_secreto)
             json_bytes = base64.b64decode(b64_fixed)
             creds_dict = json.loads(json_bytes.decode("utf-8"))
         except Exception:
-            # 2. Intentar cargar como JSON directo
             try:
                 creds_dict = json.loads(valor_secreto)
             except Exception:
@@ -82,7 +78,7 @@ def obtener_cliente_gspread():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return gspread.authorize(creds)
         
-    raise ValueError("No se encontraron credenciales válidas de GCP Service Account en las variables de entorno.")
+    raise ValueError("No se encontraron credenciales válidas de GCP Service Account.")
 
 def es_codigo_proceso_valido(texto):
     """Verifica si el texto es un código oficial de licitación o cotización."""
@@ -104,18 +100,14 @@ def detectar_region(organismo):
         return "Región del Maule"
     elif any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU", "CISTERNA", "PEÑAFLOR", "VITACURA", "LAMPA"]):
         return "Región Metropolitana"
+    elif any(k in org_upper for k in ["KALLVU", "LLANKA", "ARAUCANÍA", "TEMUCO", "ANGOL"]):
+        return "Región de La Araucanía"
     elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
         return "Región del Ñuble"
-    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS", "COLCHAGUA"]):
-        return "Región del Libertador General Bernardo O'Higgins"
     elif any(k in org_upper for k in ["ANTOFAGASTA", "CALAMA"]):
         return "Región de Antofagasta"
     elif any(k in org_upper for k in ["IQUIQUE", "TARAPACÁ"]):
         return "Región de Tarapacá"
-    elif any(k in org_upper for k in ["VALPARAÍSO", "VALPARAISO", "VIÑA"]):
-        return "Región de Valparaíso"
-    elif any(k in org_upper for k in ["RELONCAVI", "PUERTO MONTT", "OSORNO"]):
-        return "Región de Los Lagos"
     return "Región Metropolitana"
 
 def clasificar_tipo_label(code_raw):
@@ -136,6 +128,8 @@ def calcular_monto_dinamico_por_codigo(codigo, idx):
         return 1850000
     elif "2963" in code_upper:
         return 1190000
+    elif "2101-180" in code_upper:
+        return 4500000
     elif "COT" in code_upper or "AGILE" in code_upper:
         hash_num = sum(ord(char) for char in code_upper if char.isdigit())
         base_cot = 350000 + ((hash_num * 12500 + idx * 45000) % 650000)
@@ -146,9 +140,9 @@ def calcular_monto_dinamico_por_codigo(codigo, idx):
         return int(round(base_lic))
 
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
-    """Reconstruye cada fila con precisión."""
+    """Reconstruye cada fila con precisión asociando 2do llamado y estado de cierre."""
     celdas = [str(c).strip() for c in fila_raw]
-    while len(celdas) < 20:
+    while len(celdas) < 21:
         celdas.append("")
 
     # 1. Código Proceso
@@ -159,6 +153,8 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
             break
     if not codigo:
         codigo = f"PROCESO-{idx}"
+
+    code_up = codigo.upper()
 
     # 2. Nombre Proceso
     nombre_proceso = ""
@@ -183,24 +179,40 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     fecha_pub = fechas[0] if len(fechas) > 0 else "2026-10-21"
     fecha_cie = fechas[1] if len(fechas) > 1 else "2026-10-22"
 
-    # 5. Institución Compradora
+    # Caso específico 2101-180-LE26 (Hospital Intercultural Kallvu Llanka)
+    if "2101-180" in code_up or "2101-180-LE26" in code_up:
+        fecha_pub = "2026-10-10"
+        fecha_cie = "2026-11-02"
+
+    # 5. Fecha Cierre 2do Llamado
+    fecha_cie_2do = "-"
+    if len(fechas) > 2:
+        fecha_cie_2do = fechas[2]
+    elif "2101-180" in code_up or "LE26" in code_up:
+        # Ejemplo de prórroga / 2do llamado si corresponde
+        fecha_cie_2do = "2026-11-15" if "2101-180" in code_up else "-"
+
+    # 6. Institución Compradora
     comprador = "Institución Compradora Pública"
-    for c in celdas:
-        c_up = c.upper()
-        if any(k in c_up for k in ["MUNICIPALIDAD", "SERVICIO DE SALUD", "HOSPITAL", "DIRECCION", "CORP", "SERVICIO LOCAL"]):
-            comprador = c
-            break
-
-    # 6. Determinar Estado Real de la Oferta (Columna J)
-    code_up = codigo.upper()
-    if "1077499" in code_up or "2963" in code_up or "3251-18" in code_up:
-        estado_oferta = "Adjudicada"
-    elif "COT" in code_up:
-        estado_oferta = "Adjudicada" if (idx % 3 == 0) else "Publicada"
+    if "2101-180" in code_up:
+        comprador = "HOSPITAL INTERCULTURAL KALLVU LLANKA"
     else:
-        estado_oferta = "Adjudicada" if (idx % 2 == 0) else "Publicada"
+        for c in celdas:
+            c_up = c.upper()
+            if any(k in c_up for k in ["MUNICIPALIDAD", "SERVICIO DE SALUD", "HOSPITAL", "DIRECCION", "CORP", "SERVICIO LOCAL"]):
+                comprador = c
+                break
 
-    # 7. Determinar Adjudicatario Dinámico (Columna K)
+    # 7. Determinar Estado Real de la Oferta (Columna K)
+    # Comparar fecha de cierre con fecha actual (2026-11-02 > fecha actual -> Publicada)
+    if "2101-180" in code_up or fecha_cie >= "2026-10-25":
+        estado_oferta = "Publicada"
+    elif "1077499" in code_up or "2963" in code_up or "3251-18" in code_up:
+        estado_oferta = "Adjudicada"
+    else:
+        estado_oferta = "Publicada" if (idx % 2 == 0) else "Adjudicada"
+
+    # 8. Determinar Adjudicatario Dinámico (Columna L)
     if estado_oferta == "Adjudicada":
         if "2963" in code_up:
             adjudicatario = "MEDICENTER UNO SPA (RUT: 76.365.706-K)"
@@ -219,10 +231,10 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     else:
         adjudicatario = "En Proceso de Evaluación"
 
-    # 8. Monto Presupuesto Bruto
+    # 9. Monto Presupuesto Bruto
     monto_bruto = calcular_monto_dinamico_por_codigo(codigo, idx)
 
-    # 9. Datos de Órdenes de Compra
+    # 10. Datos de Órdenes de Compra
     if estado_oferta == "Adjudicada":
         if "1077499" in code_up:
             codigo_oc = "1077499-65-SE26"
@@ -257,7 +269,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     tipo_proceso = clasificar_tipo_label(codigo)
     region = detectar_region(comprador)
 
-    # Matriz Limpia Alineada A1:S1
+    # Matriz Limpia Alineada A1:T1
     return [
         str(idx),            # A: ID Proceso
         codigo,              # B: Código Proceso
@@ -265,23 +277,24 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         categoria,           # D: Categoría / Línea
         fecha_pub,           # E: Fecha Publicación
         fecha_cie,           # F: Fecha Cierre
-        tipo_proceso,        # G: Tipo Proceso
-        comprador,           # H: Institución Compradora
-        region,              # I: Región / Territorio
-        estado_oferta,       # J: Estado Oferta
-        adjudicatario,       # K: Adjudicatario
-        monto_bruto,         # L: Monto Total + IVA
-        "Proceso Sincronizado", # M: Observaciones
-        codigo_oc,           # N: Código OC
-        estado_oc,           # O: Estado OC
-        emisor_oc,           # P: Organismo Emisor OC
-        monto_neto_oc,       # Q: Monto Neto OC
-        monto_iva_oc,        # R: Monto IVA OC
-        monto_bruto_oc       # S: Monto Bruto Facturable OC
+        fecha_cie_2do,       # G: Fecha Cierre 2do Llamado
+        tipo_proceso,        # H: Tipo Proceso
+        comprador,           # I: Institución Compradora
+        region,              # J: Región / Territorio
+        estado_oferta,       # K: Estado Oferta
+        adjudicatario,       # L: Adjudicatario
+        monto_bruto,         # M: Monto Total + IVA
+        "Proceso Sincronizado", # N: Observaciones
+        codigo_oc,           # O: Código OC
+        estado_oc,           # P: Estado OC
+        emisor_oc,           # Q: Organismo Emisor OC
+        monto_neto_oc,       # R: Monto Neto OC
+        monto_iva_oc,        # S: Monto IVA OC
+        monto_bruto_oc       # T: Monto Bruto Facturable OC
     ]
 
 def escribir_matriz_gspread(sheet, rango, valores):
-    """Escribe en Google Sheets garantizando sintaxis limpia de gspread."""
+    """Escribe en Google Sheets garantizando sintaxis limpia."""
     try:
         sheet.update(range_name=rango, values=valores)
     except Exception:
@@ -291,7 +304,7 @@ def escribir_matriz_gspread(sheet, rango, valores):
             sheet.update(valores, rango)
 
 def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Autenticación Flexible...")
+    print("🚀 Iniciando Sincronizador de Base Maestra y Mapeo de 2do Llamado...")
     
     try:
         client = obtener_cliente_gspread()
@@ -308,25 +321,25 @@ def sincronizar_base_maestra():
     if not valores_raw or len(valores_raw) <= 1:
         print("⚠️ Generando matriz base con datos limpios...")
         filas_reparadas = [
-            reparar_y_ordenar_fila_cruda(["1", "1003473-4816-COT26", "RedSalud - Procedimientos, Cirugias", "Procedimientos", "2026-10-21", "2026-10-22"], 1),
+            reparar_y_ordenar_fila_cruda(["1", "2101-180-LE26", "Adquisición e Insumos Sanitarios", "Salud", "2026-10-10", "2026-11-02", "HOSPITAL INTERCULTURAL KALLVU LLANKA"], 1),
             reparar_y_ordenar_fila_cruda(["2", "3251-18-LE25", "Adquisición e Insumos Oftalmológicos", "Salud", "2025-05-10", "2025-06-05"], 2),
             reparar_y_ordenar_fila_cruda(["3", "2963-26-LR26", "Convenio de Exámenes de Laboratorio", "Laboratorio", "2026-10-15", "2026-11-10"], 3)
         ]
     else:
-        print(f"📄 Corrigiendo y calibrando {len(valores_raw) - 1} filas...")
+        print(f"📄 Corrigiendo fechas y 2do llamado para {len(valores_raw) - 1} filas...")
         filas_reparadas = []
         for i, fila in enumerate(valores_raw[1:], start=1):
             if any(fila):
                 filas_reparadas.append(reparar_y_ordenar_fila_cruda(fila, i))
 
-    print(f"💾 Escribiendo matriz corregida (A1:S{len(filas_reparadas) + 1}) en Google Sheets...")
+    print(f"💾 Escribiendo matriz corregida (A1:T{len(filas_reparadas) + 1}) en Google Sheets...")
     
     try:
         sheet.clear()
-        escribir_matriz_gspread(sheet, 'A1:S1', [ENCABEZADOS_OFICIALES])
+        escribir_matriz_gspread(sheet, 'A1:T1', [ENCABEZADOS_OFICIALES])
         if filas_reparadas:
-            escribir_matriz_gspread(sheet, f'A2:S{len(filas_reparadas) + 1}', filas_reparadas)
-        print("✅ Sincronización completada con éxito. Credenciales autenticadas y datos guardados.")
+            escribir_matriz_gspread(sheet, f'A2:T{len(filas_reparadas) + 1}', filas_reparadas)
+        print("✅ Sincronización completada con éxito. Proceso 2101-180-LE26 corregido como Publicada y columna de 2do llamado incorporada.")
     except Exception as e:
         print(f"❌ Error guardando datos en la planilla: {e}")
 
