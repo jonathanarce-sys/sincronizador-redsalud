@@ -96,21 +96,29 @@ def main():
     gc = obtener_cliente_gspread()
     sh = gc.open_by_key(SPREADSHEET_ID)
 
-    # Obtener la lista de encabezados exactos de la pestaña 'Propuesta'
+    # Búsqueda insensible a mayúsculas y espacios para la pestaña 'Propuesta'
+    encabezados_propuesta = []
     try:
-        sheet_propuesta = sh.worksheet(TEMPLATE_WORKSHEET)
-        encabezados_propuesta = sheet_propuesta.row_values(1)
-        print(f"✔ Encabezados obtenidos de '{TEMPLATE_WORKSHEET}': {len(encabezados_propuesta)} columnas.")
-    except Exception as e:
-        print(f"⚠ No se pudo leer la pestaña '{TEMPLATE_WORKSHEET}', se mantendrán todas las columnas. Error: {e}")
-        encabezados_propuesta = []
+        all_worksheets = sh.worksheets()
+        target_sheet = None
+        for ws in all_worksheets:
+            if ws.title.strip().lower() == TEMPLATE_WORKSHEET.lower():
+                target_sheet = ws
+                break
 
-    # Ajustar el dataframe a los encabezados de 'Propuesta'
+        if target_sheet:
+            encabezados_propuesta = target_sheet.row_values(1)
+            print(f"✔ Encabezados obtenidos de '{target_sheet.title}': {len(encabezados_propuesta)} columnas.")
+        else:
+            print(f"⚠ No se encontró la pestaña '{TEMPLATE_WORKSHEET}'. Pestañas disponibles: {[ws.title for ws in all_worksheets]}")
+    except Exception as e:
+        print(f"⚠ Error leyendo encabezados de '{TEMPLATE_WORKSHEET}': {e}")
+
+    # Filtrar y reordenar columnas si se obtuvieron encabezados
     if encabezados_propuesta:
-        # Reindexar asegura conservar solo las columnas de Propuesta en su orden exacto
         df_master = df_master.reindex(columns=encabezados_propuesta)
 
-    # Buscar o crear la pestaña de destino
+    # Buscar o crear pestaña RAW_Data_Ingesta
     try:
         worksheet = sh.worksheet(TARGET_WORKSHEET)
     except gspread.exceptions.WorksheetNotFound:
@@ -120,8 +128,9 @@ def main():
     data_to_upload = [df_master.columns.tolist()] + df_master.astype(str).values.tolist()
 
     worksheet.clear()
-    worksheet.update("A1", data_to_upload)
-    print(f"✔ Ingesta finalizada con éxito: {len(df_master)} filas alineadas con '{TEMPLATE_WORKSHEET}' y subidas a '{TARGET_WORKSHEET}'.")
+    # Sintaxis actualizada para evitar DeprecationWarning
+    worksheet.update(range_name="A1", values=data_to_upload)
+    print(f"✔ Ingesta finalizada con éxito: {len(df_master)} filas alineadas y subidas a '{TARGET_WORKSHEET}'.")
 
 if __name__ == "__main__":
     main()
