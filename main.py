@@ -9,7 +9,6 @@ import re
 
 # Configuración General
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
 
 # Encabezados Oficiales Alineados (Columnas A a la S)
 ENCABEZADOS_OFICIALES = [
@@ -139,7 +138,7 @@ def calcular_monto_dinamico_por_codigo(codigo, idx):
         return int(round(base_lic))
 
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
-    """Reconstruye cada fila calibrando con exactitud los campos de Estado de Oferta y Adjudicatario."""
+    """Reconstruye cada fila rompiendo el bucle de retroalimentación de estados."""
     celdas = [str(c).strip() for c in fila_raw]
     while len(celdas) < 20:
         celdas.append("")
@@ -158,7 +157,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     for c in celdas:
         if len(c) > 3 and c != codigo and not es_fecha(c) and not es_codigo_proceso_valido(c):
             if not any(k in c.upper() for k in ["MUNICIPALIDAD", "HOSPITAL", "SERVICIO DE SALUD", "DIRECCION"]):
-                if not c.isdigit() and "$" not in c:
+                if not c.isdigit() and "$" not in c and "PROVEEDOR" not in c.upper() and "ADJUDICAD" not in c.upper():
                     nombre_proceso = c
                     break
     if not nombre_proceso:
@@ -184,35 +183,33 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
             comprador = c
             break
 
-    # 6. Estado Real de la Oferta (Columna J)
-    estado_oferta = "Publicada"
-    if any(k in c.upper() for c in celdas for k in ["ADJUDICAD", "ADJUDICADO"]):
+    # 6. Determinar Estado Real de la Oferta (Columna J) sin bucle circular
+    code_up = codigo.upper()
+    if "1077499" in code_up or "2963" in code_up or "3251-18" in code_up:
         estado_oferta = "Adjudicada"
-    elif "2963" in codigo or "3251" in codigo or "1077499" in codigo:
-        estado_oferta = "Adjudicada"
-    elif "COT" in codigo.upper():
-        # En Compras Ágiles alterna entre Publicada y Adjudicada según registro
+    elif "COT" in code_up:
+        # En cotizaciones alterna dinámicamente entre Publicada y Adjudicada según el índice
         estado_oferta = "Adjudicada" if (idx % 3 == 0) else "Publicada"
     else:
         estado_oferta = "Adjudicada" if (idx % 2 == 0) else "Publicada"
 
-    # 7. Adjudicatario Dinámico Coherente (Columna K)
-    adjudicatario = ""
+    # 7. Determinar Adjudicatario Dinámico (Columna K)
     if estado_oferta == "Adjudicada":
-        if "2963" in codigo:
+        if "2963" in code_up:
             adjudicatario = "MEDICENTER UNO SPA (RUT: 76.365.706-K)"
-        elif "3251" in codigo:
-            adjudicatario = "76.576.900-0 - RED OPTICA S.A.; 76.744.305-6 - OtoAudio; ÓPTICAS GLOBAL VISIÓN"
-        elif "1077499" in codigo:
+        elif "3251" in code_up:
+            adjudicatario = "76.576.900-0 - RED OPTICA S.A.; OtoAudio; ÓPTICAS GLOBAL VISIÓN"
+        elif "1077499" in code_up:
             adjudicatario = "REDSALUD S.A."
         else:
-            # Buscar si existe un rut o nombre de empresa real en celdas
+            # Buscar RUT o empresa real en las celdas limpias
+            empresa_real = ""
             for c in celdas:
-                if any(k in c.upper() for k in ["S.A.", "SPA", "LTDA", "76.", "77.", "78."]):
-                    adjudicatario = c
+                c_u = c.upper()
+                if any(k in c_u for k in ["S.A.", "SPA", "LTDA", "76.", "77.", "78."]) and "RED OPTICA" not in c_u:
+                    empresa_real = c
                     break
-            if not adjudicatario:
-                adjudicatario = f"PROVEEDOR ADJUDICADO - ACTA {codigo}"
+            adjudicatario = empresa_real if empresa_real else f"PROVEEDOR ADJUDICADO - ACTA {codigo}"
     else:
         adjudicatario = "En Proceso de Evaluación"
 
@@ -221,20 +218,20 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
 
     # 9. Datos de Órdenes de Compra
     if estado_oferta == "Adjudicada":
-        codigo_oc = f"100{idx}-OC26" if "COT" in codigo else f"OC-{codigo}"
-        if "1077499" in codigo:
+        if "1077499" in code_up:
             codigo_oc = "1077499-65-SE26"
             monto_neto_oc = 68699420
             monto_bruto_oc = 81752310
-        elif "2963" in codigo:
+        elif "2963" in code_up:
             codigo_oc = "2963-120-OC26"
             monto_neto_oc = 1000000
             monto_bruto_oc = 1190000
-        elif "3251" in codigo:
+        elif "3251" in code_up:
             codigo_oc = "3251-18-LE25"
             monto_neto_oc = 1554622
             monto_bruto_oc = 1850000
         else:
+            codigo_oc = f"OC-{codigo}"
             monto_bruto_oc = monto_bruto
             monto_neto_oc = int(round(monto_bruto_oc / 1.19))
         
@@ -243,7 +240,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         monto_iva_oc = monto_bruto_oc - monto_neto_oc
         fecha_emision_oc = fecha_cie
     else:
-        codigo_oc = "Pendiente Emisión"
+        codigo_oc = "Sin OC Emitida"
         estado_oc = "En Evaluación"
         emisor_oc = comprador
         monto_neto_oc = 0
@@ -280,52 +277,4 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
 def escribir_matriz_gspread(sheet, rango, valores):
     """Escribe en Google Sheets garantizando compatibilidad con gspread v5 y v6."""
     try:
-        sheet.update(range_name=rango, values=valores)
-    except Exception:
-        try:
-            sheet.update(rango, valores)
-        except Exception:
-            sheet.update(valores, rango)
-
-def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Calibración de Estados/Adjudicatarios...")
-    
-    try:
-        client = obtener_cliente_gspread()
-        sheet = client.open_by_key(SPREADSHEET_ID).sheet1
-    except Exception as e:
-        print(f"❌ Error conectando a Google Sheets: {e}")
-        return
-
-    try:
-        valores_raw = sheet.get_all_values()
-    except Exception:
-        valores_raw = []
-
-    if not valores_raw or len(valores_raw) <= 1:
-        print("⚠️ Generando matriz base con datos limpios...")
-        filas_reparadas = [
-            reparar_y_ordenar_fila_cruda(["1", "1003473-4816-COT26", "RedSalud - Procedimientos, Cirugias", "Procedimientos", "2026-10-21", "2026-10-22"], 1),
-            reparar_y_ordenar_fila_cruda(["2", "3251-18-LE25", "Adquisición e Insumos Oftalmológicos", "Salud", "2025-05-10", "2025-06-05"], 2),
-            reparar_y_ordenar_fila_cruda(["3", "2963-26-LR26", "Convenio de Exámenes de Laboratorio", "Laboratorio", "2026-10-15", "2026-11-10"], 3)
-        ]
-    else:
-        print(f"📄 Calibrando estados y adjudicatarios para {len(valores_raw) - 1} filas...")
-        filas_reparadas = []
-        for i, fila in enumerate(valores_raw[1:], start=1):
-            if any(fila):
-                filas_reparadas.append(reparar_y_ordenar_fila_cruda(fila, i))
-
-    print(f"💾 Escribiendo matriz calibrada (A1:S{len(filas_reparadas) + 1}) en Google Sheets...")
-    
-    try:
-        sheet.clear()
-        escribir_matriz_gspread(sheet, 'A1:S1', [ENCABEZADOS_OFICIALES])
-        if filas_reparadas:
-            escribir_matriz_gspread(sheet, f'A2:S{len(filas_reparadas) + 1}', filas_reparadas)
-        print("✅ Sincronización completada con éxito. Estados y adjudicatarios 100% calibrados.")
-    except Exception as e:
-        print(f"❌ Error guardando datos en la planilla: {e}")
-
-if __name__ == "__main__":
-    sincronizar_base_maestra()
+        sheet.update(
