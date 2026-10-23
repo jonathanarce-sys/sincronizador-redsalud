@@ -42,39 +42,47 @@ def corregir_padding_base64(b64_str):
     return b64_str
 
 def obtener_cliente_gspread():
-    """Autentica con la API de Google Sheets administrando Base64."""
+    """Autentica con Google Sheets rastreando flexiblemente cualquier variable de entorno registrada."""
     creds_dict = None
     
-    if "GCP_JSON_BASE64" in os.environ:
-        b64_str = os.environ["GCP_JSON_BASE64"].strip()
-        b64_fixed = corregir_padding_base64(b64_str)
+    # Lista de nombres de variables de entorno comunes para secretos en GitHub Actions
+    posibles_claves = [
+        "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", 
+        "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS", "gcp_service_account", "gcp_json_base64"
+    ]
+    
+    valor_secreto = None
+    for clave in posibles_claves:
+        if clave in os.environ and os.environ[clave].strip():
+            valor_secreto = os.environ[clave].strip()
+            break
+            
+    if not valor_secreto:
+        # Búsqueda secundaria insensible a mayúsculas
+        for env_k, env_v in os.environ.items():
+            if any(k in env_k.upper() for k in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"]) and env_v.strip():
+                valor_secreto = env_v.strip()
+                break
+
+    if valor_secreto:
+        # 1. Intentar decodificar como Base64
         try:
+            b64_fixed = corregir_padding_base64(valor_secreto)
             json_bytes = base64.b64decode(b64_fixed)
             creds_dict = json.loads(json_bytes.decode("utf-8"))
         except Exception:
+            # 2. Intentar cargar como JSON directo
             try:
-                creds_dict = json.loads(b64_str)
+                creds_dict = json.loads(valor_secreto)
             except Exception:
                 pass
 
-    elif "gcp_service_account" in os.environ:
-        raw_val = os.environ["gcp_service_account"].strip()
-        try:
-            creds_dict = json.loads(raw_val)
-        except Exception:
-            try:
-                b64_fixed = corregir_padding_base64(raw_val)
-                json_bytes = base64.b64decode(b64_fixed)
-                creds_dict = json.loads(json_bytes.decode("utf-8"))
-            except Exception:
-                pass
-
-    if creds_dict:
+    if creds_dict and isinstance(creds_dict, dict) and "private_key" in creds_dict:
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return gspread.authorize(creds)
         
-    raise ValueError("No se pudieron validar las credenciales de GCP.")
+    raise ValueError("No se encontraron credenciales válidas de GCP Service Account en las variables de entorno.")
 
 def es_codigo_proceso_valido(texto):
     """Verifica si el texto es un código oficial de licitación o cotización."""
@@ -138,7 +146,7 @@ def calcular_monto_dinamico_por_codigo(codigo, idx):
         return int(round(base_lic))
 
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
-    """Reconstruye cada fila rompiendo el bucle de retroalimentación de estados."""
+    """Reconstruye cada fila con precisión."""
     celdas = [str(c).strip() for c in fila_raw]
     while len(celdas) < 20:
         celdas.append("")
@@ -183,7 +191,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
             comprador = c
             break
 
-    # 6. Determinar Estado Real de la Oferta (Columna J) sin bucle circular
+    # 6. Determinar Estado Real de la Oferta (Columna J)
     code_up = codigo.upper()
     if "1077499" in code_up or "2963" in code_up or "3251-18" in code_up:
         estado_oferta = "Adjudicada"
@@ -283,7 +291,7 @@ def escribir_matriz_gspread(sheet, rango, valores):
             sheet.update(valores, rango)
 
 def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Corrección de Sintaxis...")
+    print("🚀 Iniciando Sincronizador de Base Maestra y Autenticación Flexible...")
     
     try:
         client = obtener_cliente_gspread()
@@ -318,7 +326,7 @@ def sincronizar_base_maestra():
         escribir_matriz_gspread(sheet, 'A1:S1', [ENCABEZADOS_OFICIALES])
         if filas_reparadas:
             escribir_matriz_gspread(sheet, f'A2:S{len(filas_reparadas) + 1}', filas_reparadas)
-        print("✅ Sincronización completada con éxito. Todos los paréntesis y funciones quedaron perfectamente cerrados.")
+        print("✅ Sincronización completada con éxito. Credenciales autenticadas y datos guardados.")
     except Exception as e:
         print(f"❌ Error guardando datos en la planilla: {e}")
 
