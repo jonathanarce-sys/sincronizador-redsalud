@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 # Configuración General
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+SPREADSHEET_ID_CONTRATOS = os.environ.get("SPREADSHEET_ID_CONTRATOS", SPREADSHEET_ID_MAESTRA).strip()
 NOMBRE_HOJA_CONTRATOS = "Base Contratos"
 
 # Encabezados Oficiales Base Maestra (Columnas A a la T)
@@ -135,20 +136,3 @@ def clasificar_tipo_label(code_raw):
         return "Compra Ágil"
     elif "CO" in code_upper or "PRIVATE" in code_upper:
         return "Licitación Privada"
-    return "Licitación Pública"
-
-def consultar_adjudicatario_real_api(codigo):
-    code_up = str(codigo).strip().upper()
-    if "2963" in code_up:
-        return "MEDICENTER UNO SPA (RUT: 76.365.706-K)"
-    elif "3251" in code_up:
-        return "76.576.900-0 - RED OPTICA S.A.; OtoAudio; ÓPTICAS GLOBAL VISIÓN"
-    elif "1077499" in code_up:
-        return "REDSALUD S.A. (RUT: 96.856.000-2)"
-    elif "1003473" in code_up:
-        return "SOCIEDAD COMERCIAL E INVERSIONES MEDISAN SPA (RUT: 76.892.110-5)"
-    elif "1126920" in code_up:
-        return "LABORATORIOS BIOMEDIC S.A. (RUT: 77.102.340-K)"
-    elif "5350" in code_up:
-        return "INSUMOS Y SERVICIOS MÉDICOS CHILE SPA (RUT: 76.412.890-8)"
-    elif "1375757" in code_up:
