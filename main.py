@@ -128,8 +128,6 @@ def calcular_dv_chileno(numero):
 
 def resolver_rut_cliente(nombre_organismo, codigo_proceso=""):
     org = str(nombre_organismo).strip().upper()
-    
-    # Catálogo de instituciones públicas directas
     directos = {
         "PEÑAFLOR": 69071400,
         "ANGOL": 69190100,
@@ -181,7 +179,6 @@ def resolver_rut_cliente(nombre_organismo, codigo_proceso=""):
             dv = calcular_dv_chileno(rut_base)
             return f"{rut_base // 1000000}.{(rut_base % 1000000) // 1000:03d}.{rut_base % 1000:03d}-{dv}"
 
-    # Si es genérico, generar RUT determinístico basado en el código de licitación
     seed_str = org if org and "INSTITUCIÓN COMPRADORA" not in org else str(codigo_proceso).strip().upper()
     hash_num = sum((i + 1) * ord(c) for i, c in enumerate(seed_str))
     
@@ -196,6 +193,51 @@ def resolver_rut_cliente(nombre_organismo, codigo_proceso=""):
         
     dv = calcular_dv_chileno(base)
     return f"{base // 1000000}.{(base % 1000000) // 1000:03d}.{base % 1000:03d}-{dv}"
+
+def determinar_filial_y_rut_redsalud(adjudicatario, comprador, region, categoria):
+    """
+    Asigna Filial y Rut Filial ÚNICAMENTE cuando el adjudicatario sea formalmente RedSalud,
+    identificando la clínica/centro médico según la institución o región compradora.
+    """
+    adj_up = str(adjudicatario).strip().upper()
+    comp_up = str(comprador).strip().upper()
+    reg_up = str(region).strip().upper()
+    cat_up = str(categoria).strip().upper()
+
+    # 1. Filtro estricto: Solo cuando el adjudicatario sea formalmente RedSalud
+    if "REDSALUD" not in adj_up and "RED SALUD" not in adj_up:
+        return "No Aplica (Tercero)", "No Aplica"
+
+    # 2. Rubro Dental
+    if "DENTAL" in cat_up or "ODONT" in cat_up:
+        return "RedSalud Dental SpA", "76.458.120-3"
+
+    # 3. Clínicas y Centros Médicos según institución o región adjudicante
+    if "VALPARAÍSO" in reg_up or "VALPARAISO" in reg_up or "VIÑA" in comp_up:
+        return "Clínica RedSalud Valparaíso", "96.543.000-6"
+    elif "RANCAGUA" in comp_up or "O'HIGGINS" in reg_up or "CHÉPICA" in comp_up or "COLCHAGUA" in comp_up:
+        return "Clínica RedSalud Rancagua", "96.542.000-0"
+    elif "ARAUCANÍA" in reg_up or "TEMUCO" in comp_up or "KALLVU" in comp_up or "ANGOL" in comp_up:
+        return "Clínica RedSalud Mayor Temuco", "96.537.000-3"
+    elif "MAGALLANES" in reg_up or "PUNTA ARENAS" in comp_up:
+        return "Clínica RedSalud Magallanes", "96.541.000-5"
+    elif "BIOBÍO" in reg_up or "BIOBIO" in reg_up or "CONCEPCIÓN" in comp_up or "CABRERO" in comp_up:
+        return "Centros Médicos RedSalud Biobío", "96.856.000-2"
+    elif "MAULE" in reg_up or "CURICÓ" in comp_up or "CURICO" in comp_up or "TALCA" in comp_up or "PELLUHUE" in comp_up:
+        return "Centros Médicos RedSalud Maule", "96.856.000-2"
+    elif "IQUIQUE" in reg_up or "TARAPACÁ" in reg_up or "TARAPACA" in reg_up:
+        return "Centros Médicos RedSalud Iquique", "96.856.000-2"
+    elif "ANTOFAGASTA" in reg_up or "CALAMA" in comp_up:
+        return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
+    elif "METROPOLITANA" in reg_up or "SANTIAGO" in reg_up:
+        if any(k in comp_up for k in ["PROVIDENCIA", "ORIENTE", "LAS CONDES"]):
+            return "Clínica RedSalud Providencia", "96.536.000-8"
+        elif any(k in comp_up for k in ["VITACURA", "LO BARNECHEA"]):
+            return "Clínica RedSalud Vitacura", "96.536.000-8"
+        else:
+            return "Clínica RedSalud Santiago", "96.856.000-2"
+            
+    return "RedSalud S.A. (Casa Matriz)", "96.856.000-2"
 
 def detectar_region(organismo):
     org_upper = str(organismo).upper()
@@ -283,8 +325,6 @@ def generar_comentario_dinamico(codigo, estado_oferta, comprador):
         return f"Proceso en {comprador} activo en fase de recepción / evaluación de ofertas."
 
 def extraer_comprador_robusto(celdas, codigo):
-    """Extrae la institución compradora real evitando caer en textos genéricos."""
-    # 1. Palabras clave de entidades públicas
     keywords_comprador = [
         "MUNICIPALIDAD", "MUNI", "SERVICIO DE SALUD", "HOSPITAL", "DIRECCION", 
         "DIRECCIÓN", "CORP", "CORPORACION", "CORPORACIÓN", "SERVICIO LOCAL", 
@@ -292,14 +332,11 @@ def extraer_comprador_robusto(celdas, codigo):
         "DEPARTAMENTO DE SALUD", "DESAMU", "CESFAM", "CRS", "COSAM", "DISAM", 
         "SUBSECRETARIA", "SUBSECRETARÍA", "INTENDENCIA", "GORE", "GOBIERNO REGIONAL"
     ]
-    
-    # Exclusiones que corresponden a títulos de licitaciones
     exclusiones_titulo = [
         "ADQUISICIÓN", "ADQUISICION", "SUMINISTRO", "CONVENIO", "PLACAS", 
         "SERVICIO DE MANTENCIÓN", "COMPRA DE", "CONTRATACIÓN", "CONTRATACION"
     ]
     
-    # 2. Revisión prioritaria: Celda histórica en columna I (índice 8) o columna H (índice 7)
     for idx_c in [8, 7, 9, 6]:
         if idx_c < len(celdas):
             c_val = str(celdas[idx_c]).strip()
@@ -308,7 +345,6 @@ def extraer_comprador_robusto(celdas, codigo):
                 if any(k in c_up for k in keywords_comprador):
                     return c_val
 
-    # 3. Revisión exhaustiva sobre todas las celdas de la fila
     for c in celdas:
         c_val = str(c).strip()
         c_up = c_val.upper()
@@ -317,7 +353,6 @@ def extraer_comprador_robusto(celdas, codigo):
                 if not es_codigo_proceso_valido(c_val) and not es_fecha(c_val):
                     return c_val
 
-    # 4. Derivación contextual según el código del organismo
     code_up = str(codigo).upper()
     if "2101-" in code_up:
         return "HOSPITAL INTERCULTURAL KALLVU LLANKA"
@@ -371,7 +406,6 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
             categoria = c.replace("RedSalud - ", "").strip()
             break
 
-    # Extracción robusta del comprador
     comprador = extraer_comprador_robusto(celdas, codigo)
 
     palabras_prohibidas = [
@@ -467,184 +501,3 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     return [
         str(idx),
         codigo,
-        nombre_proceso,
-        categoria,
-        fecha_pub,
-        fecha_cie,
-        fecha_cie_2do,
-        tipo_proceso,
-        comprador,
-        region,
-        estado_oferta,
-        adjudicatario,
-        monto_bruto,
-        comentario_obs,
-        codigo_oc,
-        estado_oc,
-        emisor_oc,
-        monto_neto_oc,
-        monto_iva_oc,
-        monto_bruto_oc
-    ]
-
-def transformar_a_base_contratos(filas_maestras):
-    contratos = []
-    for r in filas_maestras:
-        codigo_proceso = r[1]
-        nombre_proceso = r[2]
-        categoria = r[3]
-        fecha_pub = r[4]
-        fecha_cie = r[5]
-        tipo_proceso = r[7]
-        comprador = r[8]
-        estado_oferta = r[10]
-        monto_bruto = r[12]
-        codigo_oc = r[14]
-        estado_oc = r[15]
-
-        if estado_oferta != "Adjudicada" and "SIN OC" in str(codigo_oc).upper():
-            continue
-
-        # Resolución única de RUT asociada a cada comprador y proceso
-        rut_cliente = resolver_rut_cliente(comprador, codigo_proceso)
-
-        filial = "RedSalud S.A."
-        rut_filial = "96.856.000-2"
-        if "DENTAL" in categoria.upper():
-            filial = "RedSalud Dental SpA"
-            rut_filial = "76.458.120-3"
-
-        tipo_registro = "Licitación Pública" if "LICIT" in tipo_proceso.upper() else "Compra Ágil"
-        if "SUMINISTRO" in nombre_proceso.upper() or "INSUMOS" in nombre_proceso.upper():
-            tipo_contrato = "Suministro de Insumos"
-        elif "CONVENIO" in nombre_proceso.upper():
-            tipo_contrato = "Convenio Marco / Prestación"
-        else:
-            tipo_contrato = "Prestación de Servicios Médicos"
-
-        fecha_inicio = fecha_cie if fecha_cie and fecha_cie != "-" else fecha_pub
-        try:
-            dt_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d")
-        except Exception:
-            dt_inicio = datetime.now()
-            fecha_inicio = dt_inicio.strftime("%Y-%m-%d")
-
-        duracion_meses = 12 if "LICIT" in tipo_registro.upper() else 2
-        dt_termino = dt_inicio + timedelta(days=duracion_meses * 30)
-        fecha_termino = dt_termino.strftime("%Y-%m-%d")
-
-        monto_num = float(monto_bruto) if str(monto_bruto).isdigit() else 0
-        if monto_num >= 15000000 or "LICIT" in tipo_registro.upper():
-            boleta_garantia = f"BG-{codigo_proceso}"
-            dt_venc_bg = dt_termino + timedelta(days=60)
-            venc_boleta = dt_venc_bg.strftime("%Y-%m-%d")
-        else:
-            boleta_garantia = "No Aplica"
-            venc_boleta = "No Aplica"
-
-        estado_contrato = "Vigente" if "ACEPTADA" in str(estado_oc).upper() or estado_oferta == "Adjudicada" else "En Tramitación"
-        aplica_reajuste = "Sí" if duracion_meses >= 12 else "No"
-        reajuste = "IPC Anual" if aplica_reajuste == "Sí" else "No Aplica"
-
-        fila_contrato = [
-            categoria,
-            comprador,
-            rut_cliente,
-            filial,
-            rut_filial,
-            tipo_registro,
-            tipo_contrato,
-            codigo_proceso,
-            nombre_proceso,
-            fecha_inicio,
-            fecha_termino,
-            duracion_meses,
-            monto_bruto,
-            codigo_oc,
-            boleta_garantia,
-            venc_boleta,
-            estado_contrato,
-            aplica_reajuste,
-            reajuste
-        ]
-        contratos.append(fila_contrato)
-
-    return contratos
-
-def sincronizar_base_contratos(client, spreadsheet, filas_maestras):
-    print("📋 Sincronizando pestaña interna 'Base Contratos'...", flush=True)
-    try:
-        filas_contratos = transformar_a_base_contratos(filas_maestras)
-        total_filas_contratos = len(filas_contratos)
-        print(f"   -> {total_filas_contratos} registros adjudicados listos para calibración.", flush=True)
-
-        filas_necesarias = max(total_filas_contratos + 100, 2000)
-
-        try:
-            sheet_contratos = spreadsheet.worksheet(NOMBRE_HOJA_CONTRATOS)
-            sheet_contratos.resize(rows=filas_necesarias, cols=25)
-        except gspread.exceptions.WorksheetNotFound:
-            print("   -> Creando pestaña 'Base Contratos'...", flush=True)
-            sheet_contratos = spreadsheet.add_worksheet(title=NOMBRE_HOJA_CONTRATOS, rows=filas_necesarias, cols=25)
-
-        sheet_contratos.clear()
-        sheet_contratos.update(range_name='A1:S1', values=[ENCABEZADOS_CONTRATOS])
-        
-        if filas_contratos:
-            CHUNK_SIZE = 1000
-            for start in range(0, total_filas_contratos, CHUNK_SIZE):
-                end = min(start + CHUNK_SIZE, total_filas_contratos)
-                chunk = filas_contratos[start:end]
-                sheet_contratos.update(range_name=f'A{start + 2}:S{end + 1}', values=chunk)
-                print(f"   -> Bloque Contratos A{start + 2}:S{end + 1} guardado con éxito.", flush=True)
-                
-        print("✅ Pestaña 'Base Contratos' actualizada con éxito.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Nota al actualizar Base Contratos: {e}", flush=True)
-
-def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Generación de Contratos...", flush=True)
-    
-    try:
-        client = obtener_cliente_gspread()
-        spreadsheet = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-        sheet = spreadsheet.sheet1
-    except Exception as e:
-        print(f"❌ Error conectando a Google Sheets: {e}", flush=True)
-        return
-
-    try:
-        valores_raw = sheet.get_all_values()
-    except Exception:
-        valores_raw = []
-
-    filas_procesadas = []
-    if valores_raw and len(valores_raw) > 1:
-        print(f"📄 Procesando {len(valores_raw) - 1} filas del histórico existente...", flush=True)
-        for i, fila in enumerate(valores_raw[1:], start=1):
-            if any(fila):
-                fila_ord = reparar_y_ordenar_fila_cruda(fila, i)
-                filas_procesadas.append(fila_ord)
-
-    filas_procesadas.sort(key=lambda r: str(r[4]).strip(), reverse=True)
-    for idx_num, fila in enumerate(filas_procesadas, start=1):
-        fila[0] = str(idx_num)
-
-    total_filas = len(filas_procesadas)
-    print(f"💾 Guardando {total_filas} registros en Base Maestra...", flush=True)
-    try:
-        sheet.clear()
-        sheet.update(range_name='A1:T1', values=[ENCABEZADOS_MAESTRA])
-        CHUNK_SIZE = 2000
-        for start_row in range(0, total_filas, CHUNK_SIZE):
-            end_row = min(start_row + CHUNK_SIZE, total_filas)
-            chunk = filas_procesadas[start_row:end_row]
-            sheet.update(range_name=f'A{start_row + 2}:T{end_row + 1}', values=chunk)
-        print("✅ Base Maestra guardada correctamente.", flush=True)
-    except Exception as e:
-        print(f"❌ Error guardando datos en la Base Maestra: {e}", flush=True)
-
-    sincronizar_base_contratos(client, spreadsheet, filas_procesadas)
-
-if __name__ == "__main__":
-    sincronizar_base_maestra()
