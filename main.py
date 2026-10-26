@@ -450,7 +450,6 @@ def sincronizar_base_contratos(client, spreadsheet, filas_maestras):
 
         try:
             sheet_contratos = spreadsheet.worksheet(NOMBRE_HOJA_CONTRATOS)
-            # Redimensionar la hoja para que quepan todos los registros sin error de grid limits
             sheet_contratos.resize(rows=filas_necesarias, cols=25)
         except gspread.exceptions.WorksheetNotFound:
             print("   -> Creando pestaña 'Base Contratos'...", flush=True)
@@ -461,4 +460,59 @@ def sincronizar_base_contratos(client, spreadsheet, filas_maestras):
         
         if filas_contratos:
             CHUNK_SIZE = 1000
-            for start in range(0, total_filas_contratos
+            for start in range(0, total_filas_contratos, CHUNK_SIZE):
+                end = min(start + CHUNK_SIZE, total_filas_contratos)
+                chunk = filas_contratos[start:end]
+                sheet_contratos.update(range_name=f'A{start + 2}:S{end + 1}', values=chunk)
+                print(f"   -> Bloque Contratos A{start + 2}:S{end + 1} guardado con éxito.", flush=True)
+                
+        print("✅ Pestaña 'Base Contratos' actualizada con éxito.", flush=True)
+    except Exception as e:
+        print(f"⚠️ Nota al actualizar Base Contratos: {e}", flush=True)
+
+def sincronizar_base_maestra():
+    print("🚀 Iniciando Sincronizador de Base Maestra y Generación de Contratos...", flush=True)
+    
+    try:
+        client = obtener_cliente_gspread()
+        spreadsheet = client.open_by_key(SPREADSHEET_ID_MAESTRA)
+        sheet = spreadsheet.sheet1
+    except Exception as e:
+        print(f"❌ Error conectando a Google Sheets: {e}", flush=True)
+        return
+
+    try:
+        valores_raw = sheet.get_all_values()
+    except Exception:
+        valores_raw = []
+
+    filas_procesadas = []
+    if valores_raw and len(valores_raw) > 1:
+        print(f"📄 Procesando {len(valores_raw) - 1} filas del histórico existente...", flush=True)
+        for i, fila in enumerate(valores_raw[1:], start=1):
+            if any(fila):
+                fila_ord = reparar_y_ordenar_fila_cruda(fila, i)
+                filas_procesadas.append(fila_ord)
+
+    filas_procesadas.sort(key=lambda r: str(r[4]).strip(), reverse=True)
+    for idx_num, fila in enumerate(filas_procesadas, start=1):
+        fila[0] = str(idx_num)
+
+    total_filas = len(filas_procesadas)
+    print(f"💾 Guardando {total_filas} registros en Base Maestra...", flush=True)
+    try:
+        sheet.clear()
+        sheet.update(range_name='A1:T1', values=[ENCABEZADOS_MAESTRA])
+        CHUNK_SIZE = 2000
+        for start_row in range(0, total_filas, CHUNK_SIZE):
+            end_row = min(start_row + CHUNK_SIZE, total_filas)
+            chunk = filas_procesadas[start_row:end_row]
+            sheet.update(range_name=f'A{start_row + 2}:T{end_row + 1}', values=chunk)
+        print("✅ Base Maestra guardada correctamente.", flush=True)
+    except Exception as e:
+        print(f"❌ Error guardando datos en la Base Maestra: {e}", flush=True)
+
+    sincronizar_base_contratos(client, spreadsheet, filas_procesadas)
+
+if __name__ == "__main__":
+    sincronizar_base_maestra()
