@@ -57,8 +57,20 @@ def obtener_cliente_gspread():
 
 def es_codigo_proceso_valido(t):
     u = str(t).strip().upper()
-    siglas = ["COT", "LE", "LR", "LP", "SE", "CO", "AGILE"]
-    return any(s in u for s in siglas) and any(c.isdigit() for c in u) and ("-" in u)
+    palabras_invalidas = [
+        "REDSALUD", "RED SALUD", "SALUD", "CONSULTAS",
+        "LABORATORIO", "CIRUGIAS", "COMEX", "PROCEDIMIENTOS"
+    ]
+    if any(p in u for p in palabras_invalidas):
+        return False
+    if " " in u or "," in u:
+        return False
+    if re.match(r"^\d+-\d+-[A-Z0-9]+$", u):
+        return True
+    if re.match(r"^[A-Z0-9]+-\d+$", u) or re.match(r"^\d+-[A-Z0-9]+$", u):
+        return True
+    siglas_oficiales = ["-LP", "-LE", "-LR", "-L1", "-E2", "-CO", "-B2", "-SE", "COT-", "-COT", "AGILE"]
+    return any(s in u for s in siglas_oficiales) and any(c.isdigit() for c in u) and ("-" in u)
 
 def es_fecha(val):
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}", str(val).strip()))
@@ -75,27 +87,8 @@ def formatear_rut(num):
     u = num % 1000
     return f"{m}.{k:03d}.{u:03d}-{dv}"
 
-MAPA_RUT = {
-    "PEÑAFLOR": 69071400, "ANGOL": 69190100, "VALLENAR": 69030100,
-    "EL MONTE": 69070800, "CABRERO": 69170800, "CURARREHUE": 69191700,
-    "CATEMU": 69050500, "PUDAHUEL": 69070700, "LA GRANJA": 69070300,
-    "PELLUHUE": 69130800, "LAMPA": 70955900, "SANTIAGO": 69070100,
-    "PROVIDENCIA": 69070200, "MAIPU": 69070600, "MAIPÚ": 69070600,
-    "CARABINEROS": 61101000, "HOSPITAL NAVAL": 61104000, "ARMADA": 61104000,
-    "CURICO": 61605000, "CURICÓ": 61605000, "MAULE": 61605000,
-    "COQUIMBO": 61604000, "KALLVU": 61608402, "POSTA CENTRAL": 61606300,
-    "URGENCIAS": 61606300, "SUR ORIENTE": 61602200, "OCCIDENTE": 61602300,
-    "IQUIQUE": 61602100, "ANTOFAGASTA": 69020100, "CHILLAN": 69140100,
-    "CHILLÁN": 69140100, "CONCEPCION": 69150100, "CONCEPCIÓN": 69150100,
-    "VALPARAISO": 69040100, "VALPARAÍSO": 69040100, "VIÑA": 69040200,
-    "RANCAGUA": 69080100, "TALCA": 69100100, "TEMUCO": 69190200
-}
-
 def resolver_rut_cliente(nombre, codigo=""):
     org = str(nombre).strip().upper()
-    for k, num in MAPA_RUT.items():
-        if k in org:
-            return formatear_rut(num)
     seed = org if (org and "COMPRADORA" not in org) else str(codigo).strip().upper()
     h = sum((i + 1) * ord(c) for i, c in enumerate(seed))
     if any(m in org for m in ["MUNICIPALIDAD", "MUNI", "ALCALDÍA"]):
@@ -180,24 +173,39 @@ def extraer_comprador_robusto(celdas, codigo):
 def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     celdas = [str(c).strip() for c in fila_raw] + [""] * 21
     celdas = celdas[:21]
-    codigo = f"PROCESO-{idx}"
-    for c in celdas:
-        if es_codigo_proceso_valido(c):
-            codigo = c
+
+    # 1. Búsqueda prioritaria de Código Proceso (evita tomar celdas descriptivas de categoría)
+    codigo = ""
+    for idx_c in [1, 0, 2, 7]:
+        if idx_c < len(celdas) and es_codigo_proceso_valido(celdas[idx_c]):
+            codigo = celdas[idx_c]
             break
+    if not codigo:
+        for c in celdas:
+            if es_codigo_proceso_valido(c):
+                codigo = c
+                break
+    if not codigo:
+        codigo = f"PROCESO-{idx}"
     cu = codigo.upper()
+
+    # 2. Búsqueda de Categoría / Línea de Servicio
     categoria = "Salud General y Procedimientos"
     for c in celdas:
-        if any(cat in c for cat in ["Dental", "Laboratorio", "Cirugias", "Consultas", "Procedimientos", "Imágenes"]):
+        if any(cat in c for cat in ["Dental", "Laboratorio", "Cirugias", "Consultas", "Procedimientos", "Imágenes", "COMEX", "Salud 2.0"]):
             categoria = c.replace("RedSalud - ", "").strip()
             break
+
+    # 3. Comprador
     comprador = extraer_comprador_robusto(celdas, codigo)
+
+    # 4. Nombre Proceso
     nombre = ""
     for c in celdas:
         u = c.upper()
         if len(c) > 12 and c != codigo and not es_fecha(c) and not es_codigo_proceso_valido(c):
             if not any(p in u for p in ["REGIÓN", "MUNICIPALIDAD", "HOSPITAL", "SERVICIO", "LICITACIÓN"]):
-                if not c.isdigit() and "$" not in c and c != categoria:
+                if not c.isdigit() and "$" not in c and c != categoria and "REDSALUD" not in u:
                     nombre = c
                     break
     if not nombre:
@@ -216,7 +224,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     adjudicatario = ""
     for c in celdas:
         c_str = str(c).strip().upper()
-        if "REDSALUD" in c_str or "RED SALUD" in c_str:
+        if ("REDSALUD" in c_str or "RED SALUD" in c_str) and not any(x in c_str for x in ["CONSULTAS", "LABORATORIO", "COMEX", "CIRUGIAS"]):
             adjudicatario = c
             break
 
@@ -288,99 +296,4 @@ def transformar_a_base_contratos(filas_maestras):
         rut_cliente = resolver_rut_cliente(comprador, codigo)
         filial, rut_filial = determinar_filial_y_rut_redsalud(comprador, region, categoria)
 
-        tipo_registro = "Licitación Pública" if "LICIT" in str(tipo_proceso).upper() else "Compra Ágil"
-        tipo_contrato = "Suministro de Insumos" if any(x in str(nombre).upper() for x in ["SUMINISTRO", "INSUMOS"]) else "Prestación de Servicios Médicos"
-
-        fecha_inicio = fecha_cie if (fecha_cie and fecha_cie != "-") else fecha_pub
-        try:
-            dt_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d")
-        except Exception:
-            dt_inicio = datetime.now()
-            fecha_inicio = dt_inicio.strftime("%Y-%m-%d")
-
-        duracion_meses = 12 if "LICIT" in tipo_registro.upper() else 2
-        dt_termino = dt_inicio + timedelta(days=duracion_meses * 30)
-        fecha_termino = dt_termino.strftime("%Y-%m-%d")
-
-        monto_num = float(monto_bruto) if str(monto_bruto).isdigit() else 0
-        if monto_num >= 15000000 or "LICIT" in tipo_registro.upper():
-            boleta = f"BG-{codigo}"
-            venc_boleta = (dt_termino + timedelta(days=60)).strftime("%Y-%m-%d")
-        else:
-            boleta, venc_boleta = "No Aplica", "No Aplica"
-
-        estado_contrato = "Vigente" if "ACEPTADA" in str(estado_oc).upper() else "En Tramitación"
-        aplica_reajuste = "Sí" if duracion_meses >= 12 else "No"
-        reajuste = "IPC Anual" if duracion_meses >= 12 else "No Aplica"
-
-        contratos.append([
-            categoria, comprador, rut_cliente, filial, rut_filial, tipo_registro,
-            tipo_contrato, codigo, nombre, fecha_inicio, fecha_termino, duracion_meses,
-            monto_bruto, codigo_oc, boleta, venc_boleta, estado_contrato, aplica_reajuste, reajuste
-        ])
-    return contratos
-
-def sincronizar_base_contratos(client, spreadsheet, filas):
-    print("📋 Sincronizando 'Base Contratos'...", flush=True)
-    try:
-        filas_c = transformar_a_base_contratos(filas)
-        total = len(filas_c)
-        print(f"   -> {total} contratos de RedSalud.", flush=True)
-        req_rows = max(total + 100, 500)
-        try:
-            ws = spreadsheet.worksheet(NOMBRE_HOJA_CONTRATOS)
-            ws.resize(rows=req_rows, cols=25)
-        except gspread.exceptions.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=NOMBRE_HOJA_CONTRATOS, rows=req_rows, cols=25)
-        ws.clear()
-        ws.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
-        if filas_c:
-            for s in range(0, total, 1000):
-                e = min(s + 1000, total)
-                ws.update(range_name=f"A{s + 2}:S{e + 1}", values=filas_c[s:e])
-        print("✅ Base Contratos OK.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Error en Contratos: {e}", flush=True)
-
-def sincronizar_base_maestra():
-    print("🚀 Sincronizando RedSalud...", flush=True)
-    try:
-        client = obtener_cliente_gspread()
-        spreadsheet = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-        sheet = spreadsheet.sheet1
-    except Exception as e:
-        print(f"❌ Error Sheets: {e}", flush=True)
-        return
-
-    try:
-        raw = sheet.get_all_values()
-    except Exception:
-        raw = []
-
-    filas = []
-    if raw and len(raw) > 1:
-        print(f"📄 Procesando {len(raw) - 1} filas...", flush=True)
-        for i, f in enumerate(raw[1:], start=1):
-            if any(f):
-                filas.append(reparar_y_ordenar_fila_cruda(f, i))
-
-    filas.sort(key=lambda r: str(r[4]).strip(), reverse=True)
-    for idx_num, fila in enumerate(filas, start=1):
-        fila[0] = str(idx_num)
-
-    total = len(filas)
-    print(f"💾 Guardando {total} en Base Maestra...", flush=True)
-    try:
-        sheet.clear()
-        sheet.update(range_name="A1:T1", values=[ENCABEZADOS_MAESTRA])
-        for s in range(0, total, 2000):
-            e = min(s + 2000, total)
-            sheet.update(range_name=f"A{s + 2}:T{e + 1}", values=filas[s:e])
-        print("✅ Base Maestra OK.", flush=True)
-    except Exception as e:
-        print(f"❌ Error Maestra: {e}", flush=True)
-
-    sincronizar_base_contratos(client, spreadsheet, filas)
-
-if __name__ == "__main__":
-    sincronizar_base_maestra()
+        tipo_registro = "Licitación Pública" if "LICIT" in str(tipo_proceso).upper() else "Compra
