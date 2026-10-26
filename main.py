@@ -493,4 +493,20 @@ def sincronizar_base_maestra():
         fila[0] = str(idx_num)
 
     total_filas = len(filas_procesadas)
-    print(f"💾 Guardando {total_filas} registros en Base Maestra...", flush=
+    print(f"💾 Guardando {total_filas} registros en Base Maestra...", flush=True)
+    try:
+        sheet.clear()
+        sheet.update(range_name='A1:T1', values=[ENCABEZADOS_MAESTRA])
+        CHUNK_SIZE = 2000
+        for start_row in range(0, total_filas, CHUNK_SIZE):
+            end_row = min(start_row + CHUNK_SIZE, total_filas)
+            chunk = filas_procesadas[start_row:end_row]
+            sheet.update(range_name=f'A{start_row + 2}:T{end_row + 1}', values=chunk)
+        print("✅ Base Maestra guardada correctamente.", flush=True)
+    except Exception as e:
+        print(f"❌ Error guardando datos en la Base Maestra: {e}", flush=True)
+
+    sincronizar_base_contratos(client, spreadsheet, filas_procesadas)
+
+if __name__ == "__main__":
+    sincronizar_base_maestra()
