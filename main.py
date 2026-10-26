@@ -8,15 +8,15 @@ import json
 import re
 from datetime import datetime, timedelta
 
-# Configuración General
-SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+SPREADSHEET_ID_MAESTRA = (
+    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+)
 SPREADSHEET_ID_CONTRATOS = os.environ.get(
     "SPREADSHEET_ID_CONTRATOS",
     SPREADSHEET_ID_MAESTRA
 ).strip()
 NOMBRE_HOJA_CONTRATOS = "Base Contratos"
 
-# Encabezados Oficiales Base Maestra (Columnas A a la T)
 ENCABEZADOS_MAESTRA = [
     "ID Proceso",
     "Código Proceso",
@@ -40,7 +40,6 @@ ENCABEZADOS_MAESTRA = [
     "Monto Bruto Facturable OC (CLP)"
 ]
 
-# Encabezados Oficiales Base de Contratos (19 Columnas)
 ENCABEZADOS_CONTRATOS = [
     "Categoría",
     "Cliente",
@@ -86,7 +85,7 @@ def obtener_cliente_gspread():
                 val = ev.strip()
                 break
     if not val:
-        raise ValueError("No se encontraron credenciales GCP.")
+        raise ValueError("No credenciales GCP.")
     try:
         pad = len(val) % 4
         b64 = val + ("=" * (4 - pad) if pad else "")
@@ -178,7 +177,6 @@ def sincronizar():
         print(f"❌ Error conectando a Google Sheets: {e}", flush=True)
         return
 
-    # 1. Leer Base Maestra
     sheet_maestra = spreadsheet.sheet1
     try:
         valores_raw = sheet_maestra.get_all_values()
@@ -187,7 +185,6 @@ def sincronizar():
 
     print(f"📄 Filas leídas en Base Maestra: {len(valores_raw)}", flush=True)
 
-    # 2. Generar o actualizar pestaña 'Base Contratos'
     try:
         sheet_contratos = spreadsheet.worksheet(NOMBRE_HOJA_CONTRATOS)
     except gspread.exceptions.WorksheetNotFound:
@@ -198,7 +195,6 @@ def sincronizar():
             cols=25
         )
 
-    # 3. Procesar datos para Base Contratos
     filas_contratos = []
     if len(valores_raw) > 1:
         for r in valores_raw[1:]:
@@ -220,7 +216,6 @@ def sincronizar():
             if not codigo:
                 continue
 
-            # Regla inicial: solo incluir si está adjudicada o tiene OC
             if estado != "Adjudicada" and "SIN OC" in codigo_oc.upper():
                 continue
 
@@ -246,4 +241,72 @@ def sincronizar():
                 dt_inicio = datetime.now()
                 fecha_inicio = dt_inicio.strftime("%Y-%m-%d")
 
-            dt_termino =
+            dias_delta = duracion_meses * 30
+            dt_termino = dt_inicio + timedelta(days=dias_delta)
+            fecha_termino = dt_termino.strftime("%Y-%m-%d")
+
+            try:
+                monto_val = float(monto)
+            except Exception:
+                monto_val = 0
+
+            if monto_val >= 15000000 or "LICIT" in tipo_registro.upper():
+                boleta = f"BG-{codigo}"
+                venc_boleta = (dt_termino + timedelta(days=60)).strftime("%Y-%m-%d")
+            else:
+                boleta = "No Aplica"
+                venc_boleta = "No Aplica"
+
+            if "ACEPTADA" in estado_oc.upper() or estado == "Adjudicada":
+                estado_contrato = "Vigente"
+            else:
+                estado_contrato = "En Tramitación"
+
+            aplica_reajuste = "Sí" if duracion_meses >= 12 else "No"
+            reajuste = "IPC Anual" if duracion_meses >= 12 else "No Aplica"
+
+            filas_contratos.append([
+                categoria,
+                comprador,
+                rut_cliente,
+                filial,
+                rut_filial,
+                tipo_registro,
+                tipo_contrato,
+                codigo,
+                nombre,
+                fecha_inicio,
+                fecha_termino,
+                duracion_meses,
+                monto,
+                codigo_oc,
+                boleta,
+                venc_boleta,
+                estado_contrato,
+                aplica_reajuste,
+                reajuste
+            ])
+
+    total_c = len(filas_contratos)
+    print(f"💾 Guardando {total_c} filas en '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
+
+    filas_req = max(total_c + 50, 100)
+    sheet_contratos.resize(rows=filas_req, cols=25)
+    sheet_contratos.clear()
+    sheet_contratos.update(
+        range_name="A1:S1",
+        values=[ENCABEZADOS_CONTRATOS]
+    )
+
+    if filas_contratos:
+        for s in range(0, total_c, 1000):
+            e = min(s + 1000, total_c)
+            sheet_contratos.update(
+                range_name=f"A{s + 2}:S{e + 1}",
+                values=filas_contratos[s:e]
+            )
+
+    print("✅ Sincronización completada exitosamente.", flush=True)
+
+if __name__ == "__main__":
+    sincronizar()
