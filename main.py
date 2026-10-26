@@ -84,6 +84,7 @@ def obtener_cliente_gspread():
                 valor_secreto = env_v.strip()
                 break
 
+    creds_dict = None
     if valor_secreto:
         try:
             b64_fixed = corregir_padding_base64(valor_secreto)
@@ -127,9 +128,11 @@ def calcular_dv_chileno(numero):
 def resolver_rut_cliente(nombre_organismo, codigo_proceso=""):
     org = str(nombre_organismo).strip().upper()
     directos = {
-        "PEÑAFLOR": 69071400,
-        "ANGOL": 69190100,
-        "VALLENAR": 69030100,
-        "EL MONTE": 69070800,
-        "CABRERO": 69170800,
-        "CURARREH
+        "PEÑAFLOR": 69071400, "ANGOL": 69190100, "VALLENAR": 69030100,
+        "EL MONTE": 69070800, "CABRERO": 69170800, "CURARREHUE": 69191700,
+        "CATEMU": 69050500, "PUDAHUEL": 69070700, "LA GRANJA": 69070300,
+        "PELLUHUE": 69130800, "LAMPA": 70955900, "SANTIAGO": 69070100,
+        "PROVIDENCIA": 69070200, "MAIPU": 69070600, "MAIPÚ": 69070600,
+        "CARABINEROS": 61101000, "HOSPITAL NAVAL": 61104000, "ARMADA": 61104000,
+        "CURICO": 61605000, "CURICÓ": 61605000, "SALUD DEL MAULE": 61605000,
+        "CO
