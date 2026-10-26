@@ -8,6 +8,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
+# Configuración General
 SPREADSHEET_ID_MAESTRA = (
     "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 )
@@ -17,29 +18,7 @@ SPREADSHEET_ID_CONTRATOS = os.environ.get(
 ).strip()
 NOMBRE_HOJA_CONTRATOS = "Base Contratos"
 
-ENCABEZADOS_MAESTRA = [
-    "ID Proceso",
-    "Código Proceso",
-    "Nombre Proceso",
-    "Categoría / Línea de Servicio",
-    "Fecha Publicación",
-    "Fecha de Cierre",
-    "Fecha Cierre 2do Llamado",
-    "Tipo Proceso",
-    "Institución Compradora",
-    "Región / Territorio",
-    "Estado de la Oferta",
-    "Adjudicatario (Proveedor Ganador)",
-    "Monto Presupuesto Total + IVA (CLP)",
-    "Comentarios / Observaciones",
-    "Código OC",
-    "Estado OC",
-    "Organismo Emisor OC",
-    "Monto Neto OC (CLP)",
-    "Monto IVA OC (CLP)",
-    "Monto Bruto Facturable OC (CLP)"
-]
-
+# Encabezados Oficiales Base de Contratos (19 Columnas)
 ENCABEZADOS_CONTRATOS = [
     "Categoría",
     "Cliente",
@@ -169,7 +148,7 @@ def determinar_filial(categoria, region, comprador):
     return "RedSalud S.A.", "96.856.000-2"
 
 def sincronizar():
-    print("🚀 Iniciando Sincronización desde cero...", flush=True)
+    print("🚀 Iniciando Sincronización de Base Contratos...", flush=True)
     try:
         client = obtener_cliente_gspread()
         spreadsheet = client.open_by_key(SPREADSHEET_ID_MAESTRA)
@@ -177,6 +156,7 @@ def sincronizar():
         print(f"❌ Error conectando a Google Sheets: {e}", flush=True)
         return
 
+    # 1. Leer Base Maestra como FUENTE ÚNICA (Solo Lectura)
     sheet_maestra = spreadsheet.sheet1
     try:
         valores_raw = sheet_maestra.get_all_values()
@@ -185,6 +165,7 @@ def sincronizar():
 
     print(f"📄 Filas leídas en Base Maestra: {len(valores_raw)}", flush=True)
 
+    # 2. Crear o resetear la pestaña 'Base Contratos'
     try:
         sheet_contratos = spreadsheet.worksheet(NOMBRE_HOJA_CONTRATOS)
     except gspread.exceptions.WorksheetNotFound:
@@ -195,32 +176,42 @@ def sincronizar():
             cols=25
         )
 
+    # 3. Procesar datos tomando directamente las columnas reales de Base Maestra
     filas_contratos = []
     if len(valores_raw) > 1:
         for r in valores_raw[1:]:
             fila = list(r) + [""] * (20 - len(r))
-            codigo = fila[1].strip()
-            nombre = fila[2].strip()
-            categoria = fila[3].strip()
-            fecha_pub = fila[4].strip()
-            fecha_cie = fila[5].strip()
-            tipo_proc = fila[7].strip()
-            comprador = fila[8].strip()
-            region = fila[9].strip()
-            estado = fila[10].strip()
-            adjudicatario = fila[11].strip()
-            monto = fila[12].strip()
-            codigo_oc = fila[14].strip()
-            estado_oc = fila[15].strip()
+            
+            # Mapeo posicional exacto de la Base Maestra
+            id_proceso = fila[0].strip()
+            codigo = fila[1].strip()          # Col B: Código Proceso
+            nombre = fila[2].strip()          # Col C: Nombre Proceso
+            categoria = fila[3].strip()       # Col D: Categoría / Línea de Servicio
+            fecha_pub = fila[4].strip()       # Col E: Fecha Publicación
+            fecha_cie = fila[5].strip()       # Col F: Fecha de Cierre
+            tipo_proc = fila[7].strip()       # Col H: Tipo Proceso
+            comprador = fila[8].strip()       # Col I: Institución Compradora
+            region = fila[9].strip()          # Col J: Región / Territorio
+            estado = fila[10].strip()         # Col K: Estado de la Oferta
+            adjudicatario = fila[11].strip()  # Col L: Adjudicatario
+            monto = fila[12].strip()          # Col M: Monto Presupuesto Total
+            codigo_oc = fila[14].strip()      # Col O: Código OC
+            estado_oc = fila[15].strip()      # Col P: Estado OC
 
             if not codigo:
                 continue
 
+            # Filtro: Solo contratos formalizados o adjudicados
             if estado != "Adjudicada" and "SIN OC" in codigo_oc.upper():
                 continue
 
+            # Limpiar nombre de categoría si viene con el prefijo "RedSalud - "
+            cat_limpia = categoria.replace("RedSalud - ", "").strip()
+            if not cat_limpia:
+                cat_limpia = "Salud General y Procedimientos"
+
             rut_cliente = resolver_rut_cliente(comprador, codigo)
-            filial, rut_filial = determinar_filial(categoria, region, comprador)
+            filial, rut_filial = determinar_filial(cat_limpia, region, comprador)
 
             if "LICIT" in tipo_proc.upper():
                 tipo_registro = "Licitación Pública"
@@ -266,15 +257,15 @@ def sincronizar():
             reajuste = "IPC Anual" if duracion_meses >= 12 else "No Aplica"
 
             filas_contratos.append([
-                categoria,
+                cat_limpia,
                 comprador,
                 rut_cliente,
                 filial,
                 rut_filial,
                 tipo_registro,
                 tipo_contrato,
-                codigo,
-                nombre,
+                codigo,            # Col H: ID licitación (Toma EXACTAMENTE el de Base Maestra)
+                nombre,            # Col I: Prestaciones (Nombre Proceso real)
                 fecha_inicio,
                 fecha_termino,
                 duracion_meses,
@@ -287,6 +278,7 @@ def sincronizar():
                 reajuste
             ])
 
+    # 4. Escribir únicamente en Base Contratos
     total_c = len(filas_contratos)
     print(f"💾 Guardando {total_c} filas en '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
 
@@ -306,7 +298,7 @@ def sincronizar():
                 values=filas_contratos[s:e]
             )
 
-    print("✅ Sincronización completada exitosamente.", flush=True)
+    print("✅ Base Contratos generada con éxito respetando los códigos reales.", flush=True)
 
 if __name__ == "__main__":
     sincronizar()
