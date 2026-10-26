@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from datetime import timedelta
 
+# Archivos
 SPREADSHEET_ID_MAESTRA = (
     "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 )
@@ -85,12 +86,14 @@ def obtener_cliente_gspread():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    return gspread.authorize(
+    sa_email = creds_dict.get("client_email", "Email no encontrado")
+    client = gspread.authorize(
         Credentials.from_service_account_info(
             creds_dict,
             scopes=scopes
         )
     )
+    return client, sa_email
 
 def calcular_dv_chileno(num):
     mults = [2, 3, 4, 5, 6, 7]
@@ -262,11 +265,24 @@ def determinar_filial(cat, reg, comp):
         "96.856.000-2"
     )
 
+def es_agosto_2026_en_adelante(fecha_pub, fecha_cie):
+    for f in [fecha_pub, fecha_cie]:
+        m = re.search(r"2026-(08|09|10|11|12)", str(f))
+        if m:
+            return True
+    return False
+
 def sincronizar_contratos():
     print("Iniciando sincronización...", flush=True)
     try:
-        client = obtener_cliente_gspread()
-        # 1. Base Madre (Solo Lectura)
+        client, sa_email = obtener_cliente_gspread()
+        print(f"Autenticado como: {sa_email}", flush=True)
+    except Exception as e:
+        print(f"Error autenticando: {e}", flush=True)
+        return
+
+    # 1. Base Madre (Solo Lectura)
+    try:
         ss_maestra = client.open_by_key(
             SPREADSHEET_ID_MAESTRA
         )
@@ -277,31 +293,33 @@ def sincronizar_contratos():
         print(f"Error Base Madre: {e}", flush=True)
         return
 
+    # 2. Archivo de Gestión de Contratos
     try:
-        # 2. Archivo de Gestión de Contratos
         ss_contratos = client.open_by_key(
             SPREADSHEET_ID_CONTRATOS
         )
-        try:
-            ws_contratos = ss_contratos.worksheet(
-                NOMBRE_HOJA_CONTRATOS
-            )
-        except gspread.exceptions.WorksheetNotFound:
-            print("Creando hoja 'Base Contratos'...", flush=True)
-            ws_contratos = ss_contratos.add_worksheet(
-                title=NOMBRE_HOJA_CONTRATOS,
-                rows=1000,
-                cols=25
-            )
-            ws_contratos.update(
-                range_name="A1:S1",
-                values=[ENCABEZADOS_CONTRATOS]
-            )
     except Exception as e:
-        print(f"Error Archivo Contratos: {e}", flush=True)
+        print(f"Error abriendo Archivo Contratos: {e}", flush=True)
+        print(f"IMPORTANTE: Asegúrate de compartir el archivo {SPREADSHEET_ID_CONTRATOS} con el correo de servicio: {sa_email} dándole permiso de Editor.", flush=True)
         return
 
-    # 3. Leer contratos existentes (evita duplicar o borrar trabajo manual)
+    try:
+        ws_contratos = ss_contratos.worksheet(
+            NOMBRE_HOJA_CONTRATOS
+        )
+    except gspread.exceptions.WorksheetNotFound:
+        print(f"Creando hoja '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
+        ws_contratos = ss_contratos.add_worksheet(
+            title=NOMBRE_HOJA_CONTRATOS,
+            rows=1000,
+            cols=25
+        )
+        ws_contratos.update(
+            range_name="A1:S1",
+            values=[ENCABEZADOS_CONTRATOS]
+        )
+
+    # 3. Leer contratos existentes (evita duplicar)
     datos_existentes = ws_contratos.get_all_values()
     if not datos_existentes:
         ws_contratos.update(
@@ -315,9 +333,9 @@ def sincronizar_contratos():
         if len(row) > 7 and row[7].strip():
             ids_registrados.add(row[7].strip())
 
-    print(f"Registrados previos: {len(ids_registrados)}", flush=True)
+    print(f"Registrados previos en destino: {len(ids_registrados)}", flush=True)
 
-    # 4. Procesar filas: SOLO ADJUDICADAS Y AÑO 2026
+    # 4. Procesar filas: SOLO ADJUDICADAS Y DESDE AGOSTO 2026 EN ADELANTE
     filas_nuevas = []
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
@@ -338,17 +356,12 @@ def sincronizar_contratos():
             if not codigo:
                 continue
 
-            # REGLA ESTRICTA 1: SOLO LO ADJUDICADO
+            # REGLA 1: SOLO LO ADJUDICADO
             if estado.upper() != "ADJUDICADA":
                 continue
 
-            # REGLA ESTRICTA 2: SOLO AÑO 2026
-            es_2026 = (
-                "26" in codigo
-                or "2026" in fecha_pub
-                or "2026" in fecha_cie
-            )
-            if not es_2026:
+            # REGLA 2: SOLO AGOSTO 2026 EN ADELANTE
+            if not es_agosto_2026_en_adelante(fecha_pub, fecha_cie):
                 continue
 
             # REGLA 3: No duplicar si ya existe
@@ -431,7 +444,7 @@ def sincronizar_contratos():
             ids_registrados.add(codigo)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Contratos adjudicados 2026 encontrados: {tot_nuevas}", flush=True)
+    print(f"Contratos adjudicados desde Agosto 2026 encontrados: {tot_nuevas}", flush=True)
 
     if tot_nuevas > 0:
         f_ini = len(datos_existentes) + 1
@@ -449,7 +462,7 @@ def sincronizar_contratos():
             )
         print(f"Se agregaron {tot_nuevas} registros exitosamente.", flush=True)
     else:
-        print("No hay adjudicaciones 2026 nuevas pendientes.", flush=True)
+        print("No hay adjudicaciones desde agosto 2026 nuevas pendientes.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
