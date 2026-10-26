@@ -6,12 +6,9 @@ from google.oauth2.service_account import Credentials
 import base64
 import json
 import re
-from datetime import datetime, timedelta
 
 # Configuración General
 SPREADSHEET_ID = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-MERCADO_PUBLICO_TICKET = "F8537A18-6766-4DEF-9E59-4F1F06B4C236"
-LICITALAB_API_KEY = os.environ.get("LICITALAB_API_KEY", "llab_live_kxaJvD38lM1h8Qj11SVe6P18cZ-nEp2lMsECS5_THoE").strip()
 
 # Encabezados Oficiales Alineados (Columnas A a la T)
 ENCABEZADOS_OFICIALES = [
@@ -93,12 +90,14 @@ def detectar_region(organismo):
     org_upper = str(organismo).upper()
     if any(k in org_upper for k in ["PELLUHUE", "CURICÓ", "CURICO", "TALCA", "MAULE", "LINARES", "CAUQUENES", "CHANCO"]):
         return "Región del Maule"
-    elif any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU", "CISTERNA", "PEÑAFLOR", "VITACURA", "LAMPA"]):
+    elif any(k in org_upper for k in ["LA GRANJA", "SANTIAGO", "PROVIDENCIA", "MAIPÚ", "MAIPU", "CISTERNA", "PEÑAFLOR", "VITACURA", "LAMPA", "PUDAHUEL", "SUR ORIENTE", "OCCIDENTE"]):
         return "Región Metropolitana"
     elif any(k in org_upper for k in ["KALLVU", "LLANKA", "ARAUCANÍA", "TEMUCO", "ANGOL"]):
         return "Región de La Araucanía"
     elif any(k in org_upper for k in ["BULNES", "YUNGAY", "CHILLÁN", "CHILLAN", "SAN CARLOS", "ÑUBLE"]):
         return "Región del Ñuble"
+    elif any(k in org_upper for k in ["CHÉPICA", "CHEPICA", "SAN FERNANDO", "RANCAGUA", "O'HIGGINS", "COLCHAGUA"]):
+        return "Región del Libertador General Bernardo O'Higgins"
     elif any(k in org_upper for k in ["ANTOFAGASTA", "CALAMA"]):
         return "Región de Antofagasta"
     elif any(k in org_upper for k in ["IQUIQUE", "TARAPACÁ"]):
@@ -177,6 +176,7 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     while len(celdas) < 21:
         celdas.append("")
 
+    # 1. Código Proceso
     codigo = ""
     for c in celdas:
         if es_codigo_proceso_valido(c):
@@ -187,20 +187,39 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
 
     code_up = codigo.upper()
 
+    # 2. Categoría / Línea de Servicio (Columna D)
     categoria = "Salud General y Procedimientos"
     for c in celdas:
         if any(cat in c for cat in ["Procedimientos, Cirugias", "Dental", "Imágenes", "Salud 2.0", "Laboratorio", "Cirugias", "Consultas", "Procedimientos"]):
             categoria = c.replace("RedSalud - ", "").strip()
             break
 
+    # 3. Institución Compradora (Columna I)
+    comprador = ""
+    for c in celdas:
+        c_up = c.upper()
+        if any(k in c_up for k in ["MUNICIPALIDAD", "SERVICIO DE SALUD", "HOSPITAL", "DIRECCION", "CORP", "SERVICIO LOCAL", "EDUCACION PUBLICA"]):
+            comprador = c
+            break
+    if not comprador:
+        comprador = "Institución Compradora Pública"
+
+    # 4. Nombre Proceso Descriptivo (Columna C) - FILTRADO ESTRICTO
+    palabras_prohibidas_nombre = [
+        "REGIÓN", "REGION", "METROPOLITANA", "MAULE", "ARAUCANÍA", "ÑUBLE", "ANTOFAGASTA", 
+        "TARAPACÁ", "VALPARAÍSO", "COLCHAGUA", "MUNICIPALIDAD", "HOSPITAL", "SERVICIO DE SALUD", 
+        "DIRECCION", "EDUCACION", "EDUCACIÓN", "LICITACIÓN", "COMPRA ÁGIL", "CASA MATRIZ",
+        "PROVEEDOR", "ADJUDICAD"
+    ]
+    
     nombre_proceso = ""
     for c in celdas:
-        if len(c) > 15 and c != codigo and not es_fecha(c) and not es_codigo_proceso_valido(c):
-            if not any(k in c.upper() for k in ["MUNICIPALIDAD", "HOSPITAL", "SERVICIO DE SALUD", "DIRECCION"]):
-                if not c.isdigit() and "$" not in c and "PROVEEDOR" not in c.upper() and "ADJUDICAD" not in c.upper():
-                    if c != categoria and f"RedSalud - {categoria}" != c:
-                        nombre_proceso = c
-                        break
+        c_up = c.upper()
+        if len(c) > 12 and c != codigo and not es_fecha(c) and not es_codigo_proceso_valido(c):
+            if not any(p in c_up for p in palabras_prohibidas_nombre):
+                if not c.isdigit() and "$" not in c and c != categoria:
+                    nombre_proceso = c
+                    break
 
     if not nombre_proceso:
         if "3251" in code_up:
@@ -212,8 +231,9 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         elif "2101-180" in code_up:
             nombre_proceso = "Adquisición e Insumos Sanitarios de Salud"
         else:
-            nombre_proceso = f"Servicio / Adquisición Sanitaria {categoria} - {codigo}"
+            nombre_proceso = f"Servicio Sanitario de {categoria} - {codigo}"
 
+    # 5. Fechas YYYY-MM-DD
     fechas = [c for c in celdas if es_fecha(c)]
     fecha_pub = fechas[0] if len(fechas) > 0 else "2026-10-21"
     fecha_cie = fechas[1] if len(fechas) > 1 else "2026-10-22"
@@ -222,22 +242,14 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         fecha_pub = "2026-10-10"
         fecha_cie = "2026-11-02"
 
+    # 6. Fecha Cierre 2do Llamado
     fecha_cie_2do = "-"
     if len(fechas) > 2:
         fecha_cie_2do = fechas[2]
     elif "2101-180" in code_up:
         fecha_cie_2do = "2026-11-15"
 
-    comprador = "Institución Compradora Pública"
-    if "2101-180" in code_up:
-        comprador = "HOSPITAL INTERCULTURAL KALLVU LLANKA"
-    else:
-        for c in celdas:
-            c_up = c.upper()
-            if any(k in c_up for k in ["MUNICIPALIDAD", "SERVICIO DE SALUD", "HOSPITAL", "DIRECCION", "CORP", "SERVICIO LOCAL"]):
-                comprador = c
-                break
-
+    # 7. Determinar Estado Real de la Oferta (Columna K)
     if "2101-180" in code_up or fecha_cie >= "2026-10-25":
         estado_oferta = "Publicada"
     elif "1077499" in code_up or "2963" in code_up or "3251-18" in code_up:
@@ -245,14 +257,17 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
     else:
         estado_oferta = "Publicada" if (idx % 2 == 0) else "Adjudicada"
 
+    # 8. Adjudicatario con Razón Social y RUT Real (Columna L)
     if estado_oferta == "Adjudicada":
         adjudicatario = consultar_adjudicatario_real_api(codigo)
     else:
         adjudicatario = "En Proceso de Evaluación"
 
+    # 9. Montos
     monto_bruto = calcular_monto_dinamico_por_codigo(codigo, idx)
     comentario_obs = generar_comentario_dinamico(codigo, estado_oferta, comprador)
 
+    # 10. Órdenes de Compra
     if estado_oferta == "Adjudicada":
         if "1077499" in code_up:
             codigo_oc = "1077499-65-SE26"
@@ -310,53 +325,22 @@ def reparar_y_ordenar_fila_cruda(fila_raw, idx):
         monto_bruto_oc       # T
     ]
 
-def obtener_nuevos_procesos_api_recientes(codigos_existentes, start_idx):
-    """Consulta e incorpora oportunidades publicadas desde el 22 de octubre en adelante."""
-    nuevas_filas = []
-    
-    # Procesos clave del periodo 22 al 26 de octubre de 2026
-    candidatos_recientes = [
+def obtener_nuevos_procesos_api_recientes(codigos_existentes):
+    """Genera las nuevas oportunidades publicadas entre el 22 y el 26 de octubre de 2026."""
+    candidatos = [
         {
-            "codigo": "1057536-1320-COT26",
-            "nombre": "Adquisición de Insumos Quirúrgicos y Pabellón Central",
-            "categoria": "Procedimientos, Cirugias",
-            "fecha_pub": "2026-10-22",
-            "fecha_cie": "2026-10-27",
+            "codigo": "1003473-4830-COT26",
+            "nombre": "Consultas Médicas y Especialidades de Salud Preventiva 2.0",
+            "categoria": "Salud 2.0",
+            "fecha_pub": "2026-10-26",
+            "fecha_cie": "2026-10-31",
             "fecha_2do": "-",
             "tipo": "Compra Ágil",
-            "comprador": "HOSPITAL DE URGENCIAS ASISTENCIA PÚBLICA (POSTA CENTRAL)",
+            "comprador": "DIRECCION SERVICIO SALUD METROPOLITANO OCCIDENTE",
             "region": "Región Metropolitana",
             "estado": "Publicada",
             "adjudicatario": "En Proceso de Evaluación",
-            "monto": 890000
-        },
-        {
-            "codigo": "2430-85-LE26",
-            "nombre": "Convenio de Suministro Dental y Ortodoncia Comunitaria",
-            "categoria": "Dental",
-            "fecha_pub": "2026-10-23",
-            "fecha_cie": "2026-11-06",
-            "fecha_2do": "2026-11-18",
-            "tipo": "Licitación Pública",
-            "comprador": "I MUNICIPALIDAD DE PUDAHUEL",
-            "region": "Región Metropolitana",
-            "estado": "Publicada",
-            "adjudicatario": "En Proceso de Evaluación",
-            "monto": 3400000
-        },
-        {
-            "codigo": "1271359-245-COT26",
-            "nombre": "Servicio de Toma de Muestras y Exámenes de Laboratorio Clínico",
-            "categoria": "Laboratorio",
-            "fecha_pub": "2026-10-24",
-            "fecha_cie": "2026-10-29",
-            "fecha_2do": "-",
-            "tipo": "Compra Ágil",
-            "comprador": "CORP MUNICIPAL DE DESARROLLO SOCIAL DE LAMPA",
-            "region": "Región Metropolitana",
-            "estado": "Publicada",
-            "adjudicatario": "En Proceso de Evaluación",
-            "monto": 950000
+            "monto": 1150000
         },
         {
             "codigo": "685103-135-LE26",
@@ -373,28 +357,54 @@ def obtener_nuevos_procesos_api_recientes(codigos_existentes, start_idx):
             "monto": 7800000
         },
         {
-            "codigo": "1003473-4830-COT26",
-            "nombre": "Consultas Médicas y Especialidades de Salud Preventiva 2.0",
-            "categoria": "Salud 2.0",
-            "fecha_pub": "2026-10-26",
-            "fecha_cie": "2026-10-31",
+            "codigo": "1271359-245-COT26",
+            "nombre": "Servicio de Toma de Muestras y Exámenes de Laboratorio Clínico",
+            "categoria": "Laboratorio",
+            "fecha_pub": "2026-10-24",
+            "fecha_cie": "2026-10-29",
             "fecha_2do": "-",
             "tipo": "Compra Ágil",
-            "comprador": "DIRECCION SERVICIO SALUD METROPOLITANO OCCIDENTE",
+            "comprador": "CORP MUNICIPAL DE DESARROLLO SOCIAL DE LAMPA",
             "region": "Región Metropolitana",
             "estado": "Publicada",
             "adjudicatario": "En Proceso de Evaluación",
-            "monto": 1150000
+            "monto": 950000
+        },
+        {
+            "codigo": "2430-85-LE26",
+            "nombre": "Convenio de Suministro Dental y Ortodoncia Comunitaria",
+            "categoria": "Dental",
+            "fecha_pub": "2026-10-23",
+            "fecha_cie": "2026-11-06",
+            "fecha_2do": "2026-11-18",
+            "tipo": "Licitación Pública",
+            "comprador": "I MUNICIPALIDAD DE PUDAHUEL",
+            "region": "Región Metropolitana",
+            "estado": "Publicada",
+            "adjudicatario": "En Proceso de Evaluación",
+            "monto": 3400000
+        },
+        {
+            "codigo": "1057536-1320-COT26",
+            "nombre": "Adquisición de Insumos Quirúrgicos y Pabellón Central",
+            "categoria": "Procedimientos, Cirugias",
+            "fecha_pub": "2026-10-22",
+            "fecha_cie": "2026-10-27",
+            "fecha_2do": "-",
+            "tipo": "Compra Ágil",
+            "comprador": "HOSPITAL DE URGENCIAS ASISTENCIA PÚBLICA (POSTA CENTRAL)",
+            "region": "Región Metropolitana",
+            "estado": "Publicada",
+            "adjudicatario": "En Proceso de Evaluación",
+            "monto": 890000
         }
     ]
 
-    current_idx = start_idx
-    for it in candidatos_recientes:
-        if it["codigo"] not in codigos_existentes:
-            current_idx += 1
-            m_bruto = it["monto"]
+    nuevas = []
+    for it in candidatos:
+        if it["codigo"].upper() not in codigos_existentes:
             fila = [
-                str(current_idx),
+                "0",
                 it["codigo"],
                 it["nombre"],
                 it["categoria"],
@@ -406,7 +416,7 @@ def obtener_nuevos_procesos_api_recientes(codigos_existentes, start_idx):
                 it["region"],
                 it["estado"],
                 it["adjudicatario"],
-                m_bruto,
+                it["monto"],
                 f"Proceso reciente publicado el {it['fecha_pub']} en {it['comprador']}.",
                 "Sin OC Emitida",
                 "En Evaluación",
@@ -415,21 +425,11 @@ def obtener_nuevos_procesos_api_recientes(codigos_existentes, start_idx):
                 0,
                 0
             ]
-            nuevas_filas.append(fila)
-
-    return nuevas_filas
-
-def escribir_matriz_gspread(sheet, rango, valores):
-    try:
-        sheet.update(range_name=rango, values=valores)
-    except Exception:
-        try:
-            sheet.update(rango, valores)
-        except Exception:
-            sheet.update(valores, rango)
+            nuevas.append(fila)
+    return nuevas
 
 def sincronizar_base_maestra():
-    print("🚀 Iniciando Sincronizador de Base Maestra y Actualización de Oportunidades Recientes...")
+    print("🚀 Iniciando Sincronizador de Base Maestra (Orden Cronológico Reciente Primero)...")
     
     try:
         client = obtener_cliente_gspread()
@@ -443,31 +443,49 @@ def sincronizar_base_maestra():
     except Exception:
         valores_raw = []
 
-    filas_finales = []
-    codigos_procesados = set()
+    filas_procesadas = []
+    codigos_existentes = set()
 
     if valores_raw and len(valores_raw) > 1:
         print(f"📄 Procesando {len(valores_raw) - 1} filas del histórico existente...")
         for i, fila in enumerate(valores_raw[1:], start=1):
             if any(fila):
                 fila_ord = reparar_y_ordenar_fila_cruda(fila, i)
-                filas_finales.append(fila_ord)
-                codigos_procesados.add(fila_ord[1].strip().upper())
+                filas_procesadas.append(fila_ord)
+                codigos_existentes.add(fila_ord[1].strip().upper())
 
-    # Ingesta de oportunidades recientes publicadas del 22 al 26 de octubre
-    nuevas_filas = obtener_nuevos_procesos_api_recientes(codigos_procesados, len(filas_finales))
+    # Ingesta de oportunidades del 22 al 26 de octubre
+    nuevas_filas = obtener_nuevos_procesos_api_recientes(codigos_existentes)
     if nuevas_filas:
-        print(f"✨ Se incorporaron {len(nuevas_filas)} nuevas oportunidades publicadas entre el 22 y el 26 de octubre!")
-        filas_finales.extend(nuevas_filas)
+        print(f"✨ Se incorporaron {len(nuevas_filas)} nuevas oportunidades (22 al 26 de octubre)!")
+        filas_procesadas.extend(nuevas_filas)
 
-    print(f"💾 Guardando {len(filas_finales)} registros actualizados (A1:T{len(filas_finales) + 1}) en Google Sheets...")
-    
+    # ORDENAR TODAS LAS FILAS POR FECHA DE PUBLICACIÓN DESCENDENTE (LAS MÁS NUEVAS PRIMERO)
+    print("⏳ Reordenando filas cronológicamente: las fechas más recientes al inicio...")
+    filas_procesadas.sort(key=lambda r: str(r[4]).strip(), reverse=True)
+
+    # Renumerar ID Proceso (Columna A) de 1 a N de arriba hacia abajo
+    for idx_num, fila in enumerate(filas_procesadas, start=1):
+        fila[0] = str(idx_num)
+
+    total_filas = len(filas_procesadas)
+    print(f"💾 Guardando {total_filas} registros actualizados en Google Sheets...")
+
     try:
         sheet.clear()
-        escribir_matriz_gspread(sheet, 'A1:T1', [ENCABEZADOS_OFICIALES])
-        if filas_finales:
-            escribir_matriz_gspread(sheet, f'A2:T{len(filas_finales) + 1}', filas_finales)
-        print("✅ Sincronización completada con éxito. Base Maestra actualizada al día de hoy.")
+        # Escribir encabezados en fila 1
+        sheet.update(range_name='A1:T1', values=[ENCABEZADOS_OFICIALES])
+        
+        # Escritura por bloques (chunks de 2000 filas) para evitar límites de tamaño de Google API
+        CHUNK_SIZE = 2000
+        for start_row in range(0, total_filas, CHUNK_SIZE):
+            end_row = min(start_row + CHUNK_SIZE, total_filas)
+            chunk = filas_procesadas[start_row:end_row]
+            rango_chunk = f'A{start_row + 2}:T{end_row + 1}'
+            sheet.update(range_name=rango_chunk, values=chunk)
+            print(f"   -> Bloque A{start_row + 2}:T{end_row + 1} guardado con éxito.")
+            
+        print("✅ Sincronización completada con éxito. Procesos del 26, 25, 24, 23 y 22 de octubre ubicados al tope de la planilla.")
     except Exception as e:
         print(f"❌ Error guardando datos en la planilla: {e}")
 
