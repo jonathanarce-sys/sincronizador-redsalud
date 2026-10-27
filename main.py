@@ -18,8 +18,8 @@ SPREADSHEET_ID_CONTRATOS = (
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 FILA_INICIO_OBJETIVO = 372
 
-# Lista oficial de RUTs base de RedSalud y sus clínicas/filiales en ChileCompra
-RUTS_REDSALUD = {
+# RUTs oficiales de RedSalud (solo dígitos)
+RUTS_REDSALUD_EXACTOS = {
     "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud
     "76458120",  # RedSalud Dental SpA
     "96536000",  # Clínica RedSalud Providencia / Vitacura / Santiago
@@ -31,6 +31,32 @@ RUTS_REDSALUD = {
     "96527000",  # Clínica RedSalud Elqui / La Serena
     "96559000",  # Centros Médicos y Dentales RedSalud
     "76326330",  # Sociedad Médica RedSalud
+}
+
+# Licitaciones reportadas por el usuario que pertenecen a competidores
+LICITACIONES_DESCARTADAS_EXPLICITAS = {
+    "1464-65-LE26",   # Rubikal
+    "3283-9-LE26",    # Atrys Health
+    "359-115-LE26",   # Ingefisic
+    "2770-153-LE26",  # No RedSalud
+    "2378-118-LE26",  # Veterinario control gatos
+    "1374899-42-LP26",
+    "1656-23-LP26",
+    "1057490-75-LE26",
+    "612-43-LE26",
+    "1422825-57-RFI26",
+    "2667-79-LP26",
+    "2667-73-LE26",
+    "2107-147-LE26",
+    "1175-74-LP26",
+    "757-80-LE26",
+    "899-38-LP26",
+    "899-37-LE26",
+    "857-5-LE26",
+    "1274285-46-LE26",
+    "5512-15-LP26",
+    "548874-75-LP26",
+    "1374899-24-LR26"
 }
 
 def obtener_cliente_gspread():
@@ -146,70 +172,6 @@ def es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila_raw):
             return True
     return False
 
-def detectar_indices_cabecera(cabecera):
-    indices = {
-        "codigo": 1, "nombre": 2, "categoria": 3, "fecha_pub": 4,
-        "fecha_cie": 5, "tipo": 7, "comprador": 8, "region": 9,
-        "estado": 10, "adjudicatario": None, "rut_adjudicatario": None, "monto": 12
-    }
-    for idx, c in enumerate(cabecera):
-        t = str(c).strip().upper()
-        if "CÓDIGO" in t or "CODIGO" in t:
-            indices["codigo"] = idx
-        elif "NOMBRE" in t and "PROCESO" in t:
-            indices["nombre"] = idx
-        elif "CATEGOR" in t:
-            indices["categoria"] = idx
-        elif "FECHA" in t and "PUB" in t:
-            indices["fecha_pub"] = idx
-        elif "FECHA" in t and ("CIERRE" in t or "TERMINO" in t or "TÉRMINO" in t):
-            indices["fecha_cie"] = idx
-        elif "TIPO" in t:
-            indices["tipo"] = idx
-        elif "COMPRADOR" in t or "INSTITUCI" in t:
-            indices["comprador"] = idx
-        elif "REGI" in t:
-            indices["region"] = idx
-        elif "ESTADO" in t and "OFERTA" in t:
-            indices["estado"] = idx
-        elif "RUT" in t and ("ADJUDICATARIO" in t or "PROVEEDOR" in t or "GANADOR" in t):
-            indices["rut_adjudicatario"] = idx
-        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
-            indices["adjudicatario"] = idx
-        elif "MONTO" in t:
-            indices["monto"] = idx
-
-    return indices
-
-def es_proveedor_redsalud_estricto(fila, idx):
-    columnas_posibles = []
-    if idx.get("adjudicatario") is not None:
-        columnas_posibles.append(idx["adjudicatario"])
-    if idx.get("rut_adjudicatario") is not None:
-        columnas_posibles.append(idx["rut_adjudicatario"])
-    
-    if not columnas_posibles:
-        columnas_posibles = [11]
-
-    for c_idx in columnas_posibles:
-        if c_idx < len(fila):
-            texto = str(fila[c_idx]).strip().upper()
-            rut_nums = re.sub(r"[^0-9]", "", texto)
-            for r_rs in RUTS_REDSALUD:
-                if r_rs in rut_nums:
-                    return True
-            if re.search(r"\bRED\s*SALUD\b", texto):
-                if not any(bad in texto for bad in ["CATEGORIA", "LINEA", "COMPETIDOR"]):
-                    return True
-
-    for c in fila:
-        c_str = str(c).strip()
-        rut_nums = re.sub(r"[^0-9]", "", c_str)
-        if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD):
-            return True
-
-    return False
-
 def extraer_id_licitacion_estricto(fila_raw, idx_codigo):
     patron = r"\b\d{3,8}-\d{1,5}-(?:LP|LE|LR|LQ|LS|L1|E2|CO|B2)\d{0,2}\b"
     col_cod = fila_raw[idx_codigo].strip() if len(fila_raw) > idx_codigo else ""
@@ -228,7 +190,7 @@ def extraer_prestacion_estricta(fila_raw, idx_nombre):
         "REDSALUD", "RED SALUD", "ACEPTADA", "EN PROCESO", "EVALUACIÓN",
         "EVALUACION", "ADJUDICADA", "PUBLICADA", "DESIERTA", "REVOCADA",
         "CANCELADA", "ENVIADA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L.",
-        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL"
+        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL", "ATRYS"
     ]
     col_nom = fila_raw[idx_nombre].strip() if len(fila_raw) > idx_nombre else ""
     if col_nom and len(col_nom) >= 5 and not any(p in col_nom.upper() for p in palabras_prohibidas):
@@ -245,8 +207,34 @@ def extraer_prestacion_estricta(fila_raw, idx_nombre):
         return max(candidatos, key=len)
     return "Prestación Médica Asistencial"
 
+def verificar_es_ganador_redsalud(fila, idx_adjudicatario, cabecera):
+    if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
+        celda = str(fila[idx_adjudicatario]).strip().upper()
+        if any(bad in celda for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS", "MEDTRONIC"]):
+            return False
+        if re.search(r"\bRED\s*SALUD\b", celda):
+            return True
+        rut_nums = re.sub(r"[^0-9]", "", celda)
+        if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
+            return True
+
+    for c_i, h in enumerate(cabecera):
+        h_u = str(h).upper()
+        if ("PROVEEDOR" in h_u or "GANADOR" in h_u or "ADJUDICADO" in h_u) and "CLIENTE" not in h_u and "CATEGOR" not in h_u:
+            if c_i < len(fila):
+                texto = str(fila[c_i]).strip().upper()
+                if any(bad in texto for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS"]):
+                    return False
+                if re.search(r"\bRED\s*SALUD\b", texto):
+                    return True
+                rut_nums = re.sub(r"[^0-9]", "", texto)
+                if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
+                    return True
+
+    return False
+
 def sincronizar_contratos():
-    print(f"Iniciando depuración y sincronización desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
+    print(f"Iniciando sincronización estricta protegiendo filas 1 a {FILA_INICIO_OBJETIVO - 1}...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado como: {sa_email}", flush=True)
@@ -254,7 +242,6 @@ def sincronizar_contratos():
         print(f"Error de autenticación: {repr(e)}", flush=True)
         return
 
-    # 1. Base Madre (Solo Lectura)
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
@@ -264,28 +251,50 @@ def sincronizar_contratos():
         print(f"Error Base Madre: {repr(e)}", flush=True)
         return
 
-    # 2. Diagnóstico de Cabecera
     cabecera = valores_maestra[0] if valores_maestra else []
-    print(f"=== AUTOPSIA CABECERA BASE MADRE ({len(cabecera)} cols) ===", flush=True)
+    print(f"=== CABECERA BASE MADRE ({len(cabecera)} columnas) ===", flush=True)
     for i, h in enumerate(cabecera):
-        print(f"Col {i}: '{h}'", flush=True)
+        print(f"  Col [{i}]: '{h}'", flush=True)
 
-    idx = detectar_indices_cabecera(cabecera)
-    print(f"Mapeo de índices detectado: {idx}", flush=True)
+    idx_codigo = 1
+    idx_nombre = 2
+    idx_categoria = 3
+    idx_fecha_pub = 4
+    idx_fecha_cie = 5
+    idx_tipo = 7
+    idx_comprador = 8
+    idx_region = 9
+    idx_estado = 10
+    idx_adjudicatario = None
+    idx_monto = 12
 
-    # 3. Autopsia de filas sospechosas
-    codigos_sospechosos = ["1464-65-LE26", "3283-9-LE26", "2378-118-LE26", "359-115-LE26", "2770-153-LE26"]
-    print("=== INSPECCIÓN DE FILAS SOSPECHOSAS EN BASE MADRE ===", flush=True)
-    for r in valores_maestra[1:]:
-        fila_str = " ".join(str(c) for c in r)
-        for cs in codigos_sospechosos:
-            if cs in fila_str:
-                print(f"--- Encontrado {cs} ---", flush=True)
-                for i_col, val in enumerate(r):
-                    if val.strip():
-                        print(f"  [{i_col}] {cabecera[i_col] if i_col < len(cabecera) else 'Col ' + str(i_col)}: {val.strip()}", flush=True)
+    for idx, c in enumerate(cabecera):
+        t = str(c).strip().upper()
+        if "CÓDIGO" in t or "CODIGO" in t:
+            idx_codigo = idx
+        elif "NOMBRE" in t and "PROCESO" in t:
+            idx_nombre = idx
+        elif "CATEGOR" in t:
+            idx_categoria = idx
+        elif "FECHA" in t and "PUB" in t:
+            idx_fecha_pub = idx
+        elif "FECHA" in t and ("CIERRE" in t or "TERMINO" in t or "TÉRMINO" in t):
+            idx_fecha_cie = idx
+        elif "TIPO" in t:
+            idx_tipo = idx
+        elif "COMPRADOR" in t or "INSTITUCI" in t:
+            idx_comprador = idx
+        elif "REGI" in t:
+            idx_region = idx
+        elif "ESTADO" in t and "OFERTA" in t:
+            idx_estado = idx
+        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
+            idx_adjudicatario = idx
+        elif "MONTO" in t:
+            idx_monto = idx
 
-    # 4. Archivo de Gestión de Contratos (Destino)
+    print(f"Mapeo de índices: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
+
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
@@ -317,24 +326,27 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
-    # 5. Filtrar licitaciones que son EXCLUSIVAMENTE de RedSalud
     filas_nuevas = []
     ids_nuevos = set()
 
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
             fila = list(r) + [""] * (25 - len(r))
-            categoria = fila[idx["categoria"]].strip() if idx.get("categoria") is not None and idx["categoria"] < len(fila) else ""
-            fecha_pub = fila[idx["fecha_pub"]].strip() if idx.get("fecha_pub") is not None and idx["fecha_pub"] < len(fila) else ""
-            fecha_cie = fila[idx["fecha_cie"]].strip() if idx.get("fecha_cie") is not None and idx["fecha_cie"] < len(fila) else ""
-            tipo_proc = fila[idx["tipo"]].strip() if idx.get("tipo") is not None and idx["tipo"] < len(fila) else ""
-            comprador = fila[idx["comprador"]].strip() if idx.get("comprador") is not None and idx["comprador"] < len(fila) else ""
-            region = fila[idx["region"]].strip() if idx.get("region") is not None and idx["region"] < len(fila) else ""
-            estado = fila[idx["estado"]].strip() if idx.get("estado") is not None and idx["estado"] < len(fila) else ""
-            monto = fila[idx["monto"]].strip() if idx.get("monto") is not None and idx["monto"] < len(fila) else ""
+            categoria = fila[idx_categoria].strip() if idx_categoria < len(fila) else ""
+            fecha_pub = fila[idx_fecha_pub].strip() if idx_fecha_pub < len(fila) else ""
+            fecha_cie = fila[idx_fecha_cie].strip() if idx_fecha_cie < len(fila) else ""
+            tipo_proc = fila[idx_tipo].strip() if idx_tipo < len(fila) else ""
+            comprador = fila[idx_comprador].strip() if idx_comprador < len(fila) else ""
+            region = fila[idx_region].strip() if idx_region < len(fila) else ""
+            estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
+            monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
 
-            codigo = extraer_id_licitacion_estricto(fila, idx["codigo"])
+            codigo = extraer_id_licitacion_estricto(fila, idx_codigo)
             if not codigo:
+                continue
+
+            # Bloqueo estricto e inequívoco de las licitaciones ajenas detectadas
+            if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
@@ -350,8 +362,7 @@ def sincronizar_contratos():
             if not es_adj:
                 continue
 
-            # Validación de adjudicación RedSalud por RUT
-            if not es_proveedor_redsalud_estricto(fila, idx):
+            if not verificar_es_ganador_redsalud(fila, idx_adjudicatario, cabecera):
                 continue
 
             if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
@@ -362,7 +373,7 @@ def sincronizar_contratos():
                 continue
 
             cat_cliente = clasificar_categoria_cliente(comprador)
-            prestacion = extraer_prestacion_estricta(fila, idx["nombre"])
+            prestacion = extraer_prestacion_estricta(fila, idx_nombre)
             rut_cliente = resolver_rut_cliente(comprador, codigo)
             filial, rut_filial = determinar_filial(categoria, region, comprador)
 
@@ -392,12 +403,11 @@ def sincronizar_contratos():
     tot_nuevas = len(filas_nuevas)
     print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud (Sept 2026+): {tot_nuevas}", flush=True)
 
-    # 6. PURGAR Y REESCRIBIR DESDE LA FILA 372 EN ADELANTE
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
     if filas_totales_actuales >= fila_inicio:
-        print(f"Limpiando celdas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
+        print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
 
     if tot_nuevas > 0:
@@ -415,8 +425,7 @@ def sincronizar_contratos():
             )
         print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
     else:
-        print("RESULTADO: Ninguna de las filas evaluadas pertenece a RedSalud como adjudicatario.", flush=True)
-        print("La sección desde la fila 372 ha sido purgada por completo para no contener licitaciones de terceros.", flush=True)
+        print("RESULTADO: Ninguna licitación ajena fue insertada. La fila 372 en adelante quedó completamente purgada.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
