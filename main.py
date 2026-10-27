@@ -33,14 +33,6 @@ RUTS_REDSALUD = {
     "76326330",  # Sociedad Médica RedSalud
 }
 
-# Competidores y empresas ajenas a RedSalud que deben ser descartadas sin excepción
-COMPETIDORES_PROHIBIDOS = [
-    "RUBIKAL", "ATRYS", "BIOMEDIC", "FRESENIUS", "FALCK", "B.BRAUN",
-    "MEDTRONIC", "SIEMENS", "INDISA", "ALEMANA", "SAN JOSE", "LAS CONDES",
-    "SAN CARLOS", "UNIVERSIDAD CATOLICA", "UC CHRISTUS", "INTERCLINICA",
-    "INGENIERIA", "CONSTRUCCION", "MONTAJES", "PHARMA", "DROGUERIA"
-]
-
 def obtener_cliente_gspread():
     posibles = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
@@ -158,8 +150,7 @@ def detectar_indices_cabecera(cabecera):
     indices = {
         "codigo": 1, "nombre": 2, "categoria": 3, "fecha_pub": 4,
         "fecha_cie": 5, "tipo": 7, "comprador": 8, "region": 9,
-        "estado": 10, "adjudicatario": 11, "monto": 12,
-        "columnas_proveedor": []
+        "estado": 10, "adjudicatario": None, "rut_adjudicatario": None, "monto": 12
     }
     for idx, c in enumerate(cabecera):
         t = str(c).strip().upper()
@@ -181,45 +172,45 @@ def detectar_indices_cabecera(cabecera):
             indices["region"] = idx
         elif "ESTADO" in t and "OFERTA" in t:
             indices["estado"] = idx
-        elif "ADJUDICATARIO" in t or "PROVEEDOR" in t or "GANADOR" in t or "OFERENTE" in t or "RAZÓN SOCIAL" in t or "RAZON SOCIAL" in t:
-            indices["columnas_proveedor"].append(idx)
-            if "ADJUDICATARIO" in t or "GANADOR" in t:
-                indices["adjudicatario"] = idx
+        elif "RUT" in t and ("ADJUDICATARIO" in t or "PROVEEDOR" in t or "GANADOR" in t):
+            indices["rut_adjudicatario"] = idx
+        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
+            indices["adjudicatario"] = idx
         elif "MONTO" in t:
             indices["monto"] = idx
 
-    if not indices["columnas_proveedor"]:
-        indices["columnas_proveedor"] = [11]
     return indices
 
-def es_adjudicatario_redsalud_estricto(fila, idx_adjudicatario, columnas_proveedor):
-    # Evaluar celdas designadas para el adjudicatario
-    celdas_a_revisar = set([idx_adjudicatario] + columnas_proveedor)
+def es_proveedor_redsalud_estricto(fila, idx):
+    columnas_posibles = []
+    if idx.get("adjudicatario") is not None:
+        columnas_posibles.append(idx["adjudicatario"])
+    if idx.get("rut_adjudicatario") is not None:
+        columnas_posibles.append(idx["rut_adjudicatario"])
     
-    # 1. Comprobar si algún competidor conocido figura en esas columnas
-    for c_idx in celdas_a_revisar:
-        if c_idx < len(fila):
-            texto_celda = str(fila[c_idx]).strip().upper()
-            if any(no_es in texto_celda for no_es in COMPETIDORES_PROHIBIDOS):
-                return False
+    if not columnas_posibles:
+        columnas_posibles = [11]
 
-    # 2. Verificar coincidencia explícita con RedSalud en las columnas de proveedor
-    tiene_redsalud = False
-    for c_idx in celdas_a_revisar:
+    for c_idx in columnas_posibles:
         if c_idx < len(fila):
-            texto_celda = str(fila[c_idx]).strip().upper()
-            if re.search(r"RED\s*SALUD", texto_celda):
-                tiene_redsalud = True
-                break
-            rut_limpio = re.sub(r"[^0-9]", "", texto_celda)
-            if any(r in rut_limpio for r in RUTS_REDSALUD):
-                tiene_redsalud = True
-                break
+            texto = str(fila[c_idx]).strip().upper()
+            rut_nums = re.sub(r"[^0-9]", "", texto)
+            for r_rs in RUTS_REDSALUD:
+                if r_rs in rut_nums:
+                    return True
+            if re.search(r"\bRED\s*SALUD\b", texto):
+                if not any(bad in texto for bad in ["CATEGORIA", "LINEA", "COMPETIDOR"]):
+                    return True
 
-    return tiene_redsalud
+    for c in fila:
+        c_str = str(c).strip()
+        rut_nums = re.sub(r"[^0-9]", "", c_str)
+        if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD):
+            return True
+
+    return False
 
 def extraer_id_licitacion_estricto(fila_raw, idx_codigo):
-    # Patrón estricto de Mercado Público: excluye RFI, RFP, CM
     patron = r"\b\d{3,8}-\d{1,5}-(?:LP|LE|LR|LQ|LS|L1|E2|CO|B2)\d{0,2}\b"
     col_cod = fila_raw[idx_codigo].strip() if len(fila_raw) > idx_codigo else ""
     m = re.search(patron, col_cod, re.IGNORECASE)
@@ -273,7 +264,28 @@ def sincronizar_contratos():
         print(f"Error Base Madre: {repr(e)}", flush=True)
         return
 
-    # 2. Archivo de Gestión de Contratos (Destino)
+    # 2. Diagnóstico de Cabecera
+    cabecera = valores_maestra[0] if valores_maestra else []
+    print(f"=== AUTOPSIA CABECERA BASE MADRE ({len(cabecera)} cols) ===", flush=True)
+    for i, h in enumerate(cabecera):
+        print(f"Col {i}: '{h}'", flush=True)
+
+    idx = detectar_indices_cabecera(cabecera)
+    print(f"Mapeo de índices detectado: {idx}", flush=True)
+
+    # 3. Autopsia de filas sospechosas
+    codigos_sospechosos = ["1464-65-LE26", "3283-9-LE26", "2378-118-LE26", "359-115-LE26", "2770-153-LE26"]
+    print("=== INSPECCIÓN DE FILAS SOSPECHOSAS EN BASE MADRE ===", flush=True)
+    for r in valores_maestra[1:]:
+        fila_str = " ".join(str(c) for c in r)
+        for cs in codigos_sospechosos:
+            if cs in fila_str:
+                print(f"--- Encontrado {cs} ---", flush=True)
+                for i_col, val in enumerate(r):
+                    if val.strip():
+                        print(f"  [{i_col}] {cabecera[i_col] if i_col < len(cabecera) else 'Col ' + str(i_col)}: {val.strip()}", flush=True)
+
+    # 4. Archivo de Gestión de Contratos (Destino)
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
@@ -285,7 +297,6 @@ def sincronizar_contratos():
             print(f"Error Archivo Contratos: {repr(e)}", flush=True)
             return
 
-    # 3. Localizar hoja 'consolidado'
     ws_contratos = None
     for ws in ss_contratos.worksheets():
         if ws.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower():
@@ -295,7 +306,6 @@ def sincronizar_contratos():
         print(f"Error: No se encontró la hoja '{NOMBRE_HOJA_CONTRATOS}'.", flush=True)
         return
 
-    # 4. Proteger estrictamente filas 1 a 371
     datos_existentes = ws_contratos.get_all_values()
     print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
 
@@ -307,34 +317,26 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
-    print(f"IDs históricos protegidos (filas 1 a {limite_historico}): {len(ids_historicos)}", flush=True)
-
-    # 5. Mapeo dinámico de cabeceras en Base Madre
-    idx = detectar_indices_cabecera(valores_maestra[0])
-    print(f"Columnas detectadas en Base Madre: {idx}", flush=True)
-
-    # 6. Filtrar licitaciones verdaderas de RedSalud
+    # 5. Filtrar licitaciones que son EXCLUSIVAMENTE de RedSalud
     filas_nuevas = []
     ids_nuevos = set()
 
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
             fila = list(r) + [""] * (25 - len(r))
-            categoria = fila[idx["categoria"]].strip()
-            fecha_pub = fila[idx["fecha_pub"]].strip()
-            fecha_cie = fila[idx["fecha_cie"]].strip()
-            tipo_proc = fila[idx["tipo"]].strip()
-            comprador = fila[idx["comprador"]].strip()
-            region = fila[idx["region"]].strip()
-            estado = fila[idx["estado"]].strip()
-            monto = fila[idx["monto"]].strip()
+            categoria = fila[idx["categoria"]].strip() if idx.get("categoria") is not None and idx["categoria"] < len(fila) else ""
+            fecha_pub = fila[idx["fecha_pub"]].strip() if idx.get("fecha_pub") is not None and idx["fecha_pub"] < len(fila) else ""
+            fecha_cie = fila[idx["fecha_cie"]].strip() if idx.get("fecha_cie") is not None and idx["fecha_cie"] < len(fila) else ""
+            tipo_proc = fila[idx["tipo"]].strip() if idx.get("tipo") is not None and idx["tipo"] < len(fila) else ""
+            comprador = fila[idx["comprador"]].strip() if idx.get("comprador") is not None and idx["comprador"] < len(fila) else ""
+            region = fila[idx["region"]].strip() if idx.get("region") is not None and idx["region"] < len(fila) else ""
+            estado = fila[idx["estado"]].strip() if idx.get("estado") is not None and idx["estado"] < len(fila) else ""
+            monto = fila[idx["monto"]].strip() if idx.get("monto") is not None and idx["monto"] < len(fila) else ""
 
-            # FILTRO 1: Código oficial de Mercado Público (descarta PROCESO-XXX y consultas RFI)
             codigo = extraer_id_licitacion_estricto(fila, idx["codigo"])
             if not codigo:
                 continue
 
-            # FILTRO 2: Solo licitaciones
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                 continue
             es_lic = (
@@ -344,21 +346,17 @@ def sincronizar_contratos():
             if not es_lic:
                 continue
 
-            # FILTRO 3: Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
-            # FILTRO 4: VERIFICACIÓN INEQUÍVOCA DE REDSALUD COMO GANADOR
-            # Si el adjudicatario es Rubikal, Atrys o cualquier competidor, SE DESCARTA
-            if not es_adjudicatario_redsalud_estricto(fila, idx["adjudicatario"], idx["columnas_proveedor"]):
+            # Validación de adjudicación RedSalud por RUT
+            if not es_proveedor_redsalud_estricto(fila, idx):
                 continue
 
-            # FILTRO 5: Desde Septiembre de 2026 en adelante
             if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
                 continue
 
-            # FILTRO 6: No duplicar con los IDs históricos de las filas 1 a 371
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -392,14 +390,14 @@ def sincronizar_contratos():
             ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones REALMENTE adjudicadas a RedSalud (Sept 2026+): {tot_nuevas}", flush=True)
+    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud (Sept 2026+): {tot_nuevas}", flush=True)
 
-    # 7. PURGAR Y REESCRIBIR DESDE LA FILA 372 EN ADELANTE
+    # 6. PURGAR Y REESCRIBIR DESDE LA FILA 372 EN ADELANTE
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
-    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
+        print(f"Limpiando celdas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
 
     if tot_nuevas > 0:
@@ -417,7 +415,8 @@ def sincronizar_contratos():
             )
         print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
     else:
-        print("No se encontraron licitaciones nuevas adjudicadas a RedSalud desde Septiembre 2026.", flush=True)
+        print("RESULTADO: Ninguna de las filas evaluadas pertenece a RedSalud como adjudicatario.", flush=True)
+        print("La sección desde la fila 372 ha sido purgada por completo para no contener licitaciones de terceros.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
