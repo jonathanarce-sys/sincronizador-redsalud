@@ -1,4 +1,4 @@
-import os
+ import os
 import requests
 import pandas as pd
 import gspread
@@ -15,7 +15,9 @@ SPREADSHEET_ID_MAESTRA = (
 SPREADSHEET_ID_CONTRATOS = (
     "18HKuttayv6-MLIr5feByUaV0GEzvyRfr1E1DVaofbbY"
 ).strip()
-NOMBRE_HOJA_CONTRATOS = "Base Contratos"
+NOMBRE_HOJA_CONTRATOS = (
+    "Base Contratos"
+)
 
 ENCABEZADOS_CONTRATOS = [
     "Categoría",
@@ -41,42 +43,70 @@ ENCABEZADOS_CONTRATOS = [
 
 def obtener_cliente_gspread():
     posibles = [
-        "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
-        "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS"
+        "GCP_JSON_BASE64",
+        "GCP_SERVICE_ACCOUNT",
+        "GOOGLE_CREDENTIALS",
+        "GCP_JSON",
+        "GCP_SA_KEY",
+        "GCP_CREDENTIALS"
     ]
     val = None
     for k in posibles:
-        if k in os.environ and os.environ[k].strip():
-            val = os.environ[k].strip()
-            break
+        if k in os.environ:
+            if os.environ[k].strip():
+                val = os.environ[k].strip()
+                break
     if not val:
         for ek, ev in os.environ.items():
-            cond_k = any(x in ek.upper() for x in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"])
+            cond_k = any(
+                x in ek.upper()
+                for x in [
+                    "GCP",
+                    "GOOGLE_CRED",
+                    "SERVICE_ACCOUNT"
+                ]
+            )
             if cond_k and ev.strip():
                 val = ev.strip()
                 break
     if not val:
-        raise ValueError("Sin credenciales GCP en variables de entorno.")
+        raise ValueError("Sin GCP.")
     try:
         pad = len(val) % 4
         if pad:
             val += "=" * (4 - pad)
         dec = base64.b64decode(val)
-        creds_dict = json.loads(dec.decode("utf-8"))
+        creds_dict = json.loads(
+            dec.decode("utf-8")
+        )
     except Exception:
         creds_dict = json.loads(val)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    sa_email = creds_dict.get("client_email", "Email no identificado")
-    client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
+    sa_email = creds_dict.get(
+        "client_email",
+        "Email no identificado"
+    )
+    client = gspread.authorize(
+        Credentials.from_service_account_info(
+            creds_dict,
+            scopes=scopes
+        )
+    )
     return client, sa_email
 
 def calcular_dv_chileno(num):
     mults = [2, 3, 4, 5, 6, 7]
-    s = sum(int(d) * mults[i % 6] for i, d in enumerate(str(num)[::-1]))
-    tabla = ("0", "K", "9", "8", "7", "6", "5", "4", "3", "2", "1")
+    s = 0
+    num_inv = str(num)[::-1]
+    for i, d in enumerate(num_inv):
+        s += int(d) * mults[i % 6]
+    tabla = (
+        "0", "K", "9", "8", "7",
+        "6", "5", "4", "3", "2", "1"
+    )
     return tabla[s % 11]
 
 def formatear_rut(num):
@@ -89,10 +119,30 @@ def formatear_rut(num):
 def resolver_rut_cliente(nombre, cod=""):
     org = str(nombre).strip().upper()
     seed = org if org else str(cod).strip().upper()
-    h = sum((i + 1) * ord(c) for i, c in enumerate(seed))
-    if any(m in org for m in ["MUNICIPALIDAD", "MUNI", "ALCALDÍA"]):
+    h = 0
+    for i, c in enumerate(seed):
+        h += (i + 1) * ord(c)
+    es_muni = any(
+        m in org
+        for m in [
+            "MUNICIPALIDAD",
+            "MUNI",
+            "ALCALDÍA"
+        ]
+    )
+    es_salud = any(
+        s in org
+        for s in [
+            "SALUD",
+            "HOSPITAL",
+            "CLINIC",
+            "CESFAM",
+            "POSTA"
+        ]
+    )
+    if es_muni:
         base = 69000000 + (h * 179) % 990000
-    elif any(s in org for s in ["SALUD", "HOSPITAL", "CLINIC", "CESFAM", "POSTA"]):
+    elif es_salud:
         base = 61600000 + (h * 149) % 390000
     else:
         base = 61100000 + (h * 131) % 890000
@@ -104,30 +154,118 @@ def determinar_filial(cat, reg, comp):
     comp_u = str(comp).upper()
 
     if "DENTAL" in cat_u:
-        return "RedSalud Dental SpA", "76.458.120-3"
-    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u:
-        return "Clínica RedSalud Valparaíso", "96.543.000-6"
-    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u:
-        return "Clínica RedSalud Rancagua", "96.542.000-0"
-    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u:
-        return "Clínica RedSalud Mayor Temuco", "96.537.000-3"
-    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u:
-        return "Clínica RedSalud Magallanes", "96.541.000-5"
-    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u:
-        return "Centros Médicos RedSalud Biobío", "96.856.000-2"
-    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u:
-        return "Centros Médicos RedSalud Maule", "96.856.000-2"
-    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u:
-        return "Centros Médicos RedSalud Iquique", "96.856.000-2"
-    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u:
-        return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
-    if "METROPOLITANA" in reg_u or "SANTIAGO" in reg_u:
-        if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]):
-            return "Clínica RedSalud Providencia", "96.536.000-8"
-        if any(x in comp_u for x in ["VITACURA", "LO BARNECHEA"]):
-            return "Clínica RedSalud Vitacura", "96.536.000-8"
-        return "Clínica RedSalud Santiago", "96.856.000-2"
-    return "RedSalud S.A.", "96.856.000-2"
+        return (
+            "RedSalud Dental SpA",
+            "76.458.120-3"
+        )
+    valpo = (
+        "VALPARAÍSO" in reg_u
+        or "VALPARAISO" in reg_u
+        or "VIÑA" in comp_u
+    )
+    if valpo:
+        return (
+            "Clínica RedSalud Valparaíso",
+            "96.543.000-6"
+        )
+    ranc = (
+        "RANCAGUA" in comp_u
+        or "HIGGIN" in reg_u
+        or "COLCHAGUA" in comp_u
+    )
+    if ranc:
+        return (
+            "Clínica RedSalud Rancagua",
+            "96.542.000-0"
+        )
+    temu = (
+        "ARAUCANÍA" in reg_u
+        or "TEMUCO" in comp_u
+        or "KALLVU" in comp_u
+    )
+    if temu:
+        return (
+            "Clínica RedSalud Mayor Temuco",
+            "96.537.000-3"
+        )
+    mag = (
+        "MAGALLANES" in reg_u
+        or "PUNTA ARENAS" in comp_u
+    )
+    if mag:
+        return (
+            "Clínica RedSalud Magallanes",
+            "96.541.000-5"
+        )
+    bio = (
+        "BIOBÍO" in reg_u
+        or "BIOBIO" in reg_u
+        or "CONCEPCIÓN" in comp_u
+    )
+    if bio:
+        return (
+            "Centros Médicos RedSalud Biobío",
+            "96.856.000-2"
+        )
+    mau = (
+        "MAULE" in reg_u
+        or "CURICÓ" in comp_u
+        or "TALCA" in comp_u
+    )
+    if mau:
+        return (
+            "Centros Médicos RedSalud Maule",
+            "96.856.000-2"
+        )
+    iqi = (
+        "IQUIQUE" in reg_u
+        or "TARAPACÁ" in reg_u
+    )
+    if iqi:
+        return (
+            "Centros Médicos RedSalud Iquique",
+            "96.856.000-2"
+        )
+    ant = (
+        "ANTOFAGASTA" in reg_u
+        or "CALAMA" in comp_u
+    )
+    if ant:
+        return (
+            "Centros Médicos RedSalud Antofagasta",
+            "96.856.000-2"
+        )
+    rm = (
+        "METROPOLITANA" in reg_u
+        or "SANTIAGO" in reg_u
+    )
+    if rm:
+        prov = (
+            "PROVIDENCIA" in comp_u
+            or "ORIENTE" in comp_u
+        )
+        if prov:
+            return (
+                "Clínica RedSalud Providencia",
+                "96.536.000-8"
+            )
+        vit = (
+            "VITACURA" in comp_u
+            or "LO BARNECHEA" in comp_u
+        )
+        if vit:
+            return (
+                "Clínica RedSalud Vitacura",
+                "96.536.000-8"
+            )
+        return (
+            "Clínica RedSalud Santiago",
+            "96.856.000-2"
+        )
+    return (
+        "RedSalud S.A.",
+        "96.856.000-2"
+    )
 
 def es_agosto_2026_en_adelante(fecha_pub, fecha_cie):
     for f in [fecha_pub, fecha_cie]:
@@ -151,20 +289,19 @@ def sincronizar_contratos():
         valores_maestra = sheet_maestra.get_all_values()
         print(f"Base Madre leida: {len(valores_maestra)} filas encontradas.", flush=True)
     except Exception as e:
-        print(f"Error abriendo Base Madre ({SPREADSHEET_ID_MAESTRA}): {repr(e)}", flush=True)
+        print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
         return
 
     # 2. Archivo de Gestión de Contratos (Destino)
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
-    except Exception as e1:
+    except Exception:
         try:
             url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
             ss_contratos = client.open_by_url(url)
-        except Exception as e2:
-            print(f"Error abriendo Archivo Contratos: {repr(e1)} / {repr(e2)}", flush=True)
-            print(f"Verifica permiso de Editor a {sa_email} en {SPREADSHEET_ID_CONTRATOS}.", flush=True)
+        except Exception as e:
+            print(f"Error abriendo Archivo Contratos: {repr(e)}", flush=True)
             return
 
     try:
@@ -285,22 +422,22 @@ def sincronizar_contratos():
     print(f"Contratos adjudicados desde Agosto 2026 encontrados: {tot_nuevas}", flush=True)
 
     if tot_nuevas > 0:
-        f_ini = len(datos_existentes) + 1
-        f_fin = f_ini + tot_nuevas - 1
-        f_nec = max(f_fin + 50, 500)
-        ws_contratos.resize(rows=f_nec, cols=25)
+        fila_inicio = len(datos_existentes) + 1
+        fila_fin = fila_inicio + tot_nuevas - 1
+        filas_necesarias = max(fila_fin + 50, 500)
+        ws_contratos.resize(rows=filas_necesarias, cols=25)
 
         for s in range(0, tot_nuevas, 1000):
             e = min(s + 1000, tot_nuevas)
-            r1 = f_ini + s
-            r2 = f_ini + e - 1
+            r_ini = fila_inicio + s
+            r_fin = fila_inicio + e - 1
             ws_contratos.update(
-                range_name=f"A{r1}:S{r2}",
+                range_name=f"A{r_ini}:S{r_fin}",
                 values=filas_nuevas[s:e]
             )
-        print(f"Se agregaron {tot_nuevas} registros exitosamente en 'Base Contratos'.", flush=True)
+        print(f"Se agregaron exitosamente {tot_nuevas} registros en 'Base Contratos'.", flush=True)
     else:
-        print("No hay adjudicaciones desde agosto 2026 pendientes de sincronizar.", flush=True)
+        print("No hay adjudicaciones desde agosto 2026 nuevas pendientes.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
