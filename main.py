@@ -173,15 +173,24 @@ def es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila_raw):
     return False
 
 def extraer_id_licitacion_estricto(fila_raw, idx_codigo):
-    patron = r"\b\d{3,8}-\d{1,5}-(?:LP|LE|LR|LQ|LS|L1|E2|CO|B2)\d{0,2}\b"
-    col_cod = fila_raw[idx_codigo].strip() if len(fila_raw) > idx_codigo else ""
-    m = re.search(patron, col_cod, re.IGNORECASE)
-    if m:
-        return m.group(0).upper()
-    for c in fila_raw:
-        m = re.search(patron, str(c).strip(), re.IGNORECASE)
-        if m:
-            return m.group(0).upper()
+    valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "L1", "E2", "CO", "B2")
+    
+    if idx_codigo is not None and idx_codigo < len(fila_raw):
+        celda = str(fila_raw[idx_codigo]).strip()
+        codes = re.findall(r"\d{3,8}-\d{1,5}-[A-Za-z0-9]+", celda)
+        for code in codes:
+            parts = code.split("-")
+            if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
+                return code.upper()
+
+    for c in fila_raw[:5]:
+        celda = str(c).strip()
+        codes = re.findall(r"\d{3,8}-\d{1,5}-[A-Za-z0-9]+", celda)
+        for code in codes:
+            parts = code.split("-")
+            if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
+                return code.upper()
+
     return ""
 
 def extraer_prestacion_estricta(fila_raw, idx_nombre):
@@ -192,7 +201,7 @@ def extraer_prestacion_estricta(fila_raw, idx_nombre):
         "CANCELADA", "ENVIADA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L.",
         "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL", "ATRYS"
     ]
-    col_nom = fila_raw[idx_nombre].strip() if len(fila_raw) > idx_nombre else ""
+    col_nom = fila_raw[idx_nombre].strip() if idx_nombre is not None and idx_nombre < len(fila_raw) else ""
     if col_nom and len(col_nom) >= 5 and not any(p in col_nom.upper() for p in palabras_prohibidas):
         return col_nom
 
@@ -207,34 +216,21 @@ def extraer_prestacion_estricta(fila_raw, idx_nombre):
         return max(candidatos, key=len)
     return "Prestación Médica Asistencial"
 
-def verificar_es_ganador_redsalud(fila, idx_adjudicatario, cabecera):
+def verificar_es_ganador_redsalud(fila, idx_adjudicatario):
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda = str(fila[idx_adjudicatario]).strip().upper()
         if any(bad in celda for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS", "MEDTRONIC"]):
             return False
-        if re.search(r"\bRED\s*SALUD\b", celda):
+        if re.search(r"RED\s*SALUD", celda):
             return True
         rut_nums = re.sub(r"[^0-9]", "", celda)
         if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
             return True
 
-    for c_i, h in enumerate(cabecera):
-        h_u = str(h).upper()
-        if ("PROVEEDOR" in h_u or "GANADOR" in h_u or "ADJUDICADO" in h_u) and "CLIENTE" not in h_u and "CATEGOR" not in h_u:
-            if c_i < len(fila):
-                texto = str(fila[c_i]).strip().upper()
-                if any(bad in texto for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS"]):
-                    return False
-                if re.search(r"\bRED\s*SALUD\b", texto):
-                    return True
-                rut_nums = re.sub(r"[^0-9]", "", texto)
-                if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
-                    return True
-
     return False
 
 def sincronizar_contratos():
-    print(f"Iniciando sincronización estricta protegiendo filas 1 a {FILA_INICIO_OBJETIVO - 1}...", flush=True)
+    print(f"Iniciando calibración estricta desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado como: {sa_email}", flush=True)
@@ -252,9 +248,6 @@ def sincronizar_contratos():
         return
 
     cabecera = valores_maestra[0] if valores_maestra else []
-    print(f"=== CABECERA BASE MADRE ({len(cabecera)} columnas) ===", flush=True)
-    for i, h in enumerate(cabecera):
-        print(f"  Col [{i}]: '{h}'", flush=True)
 
     idx_codigo = 1
     idx_nombre = 2
@@ -265,12 +258,12 @@ def sincronizar_contratos():
     idx_comprador = 8
     idx_region = 9
     idx_estado = 10
-    idx_adjudicatario = None
+    idx_adjudicatario = 11
     idx_monto = 12
 
     for idx, c in enumerate(cabecera):
         t = str(c).strip().upper()
-        if "CÓDIGO" in t or "CODIGO" in t:
+        if ("CÓDIGO" in t or "CODIGO" in t or "ID" in t) and not any(x in t for x in ["OC", "ORDEN", "FACTURABLE", "COMPRA"]):
             idx_codigo = idx
         elif "NOMBRE" in t and "PROCESO" in t:
             idx_nombre = idx
@@ -293,7 +286,7 @@ def sincronizar_contratos():
         elif "MONTO" in t:
             idx_monto = idx
 
-    print(f"Mapeo de índices: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
+    print(f"Mapeo verificado: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
 
     ss_contratos = None
     try:
@@ -345,24 +338,17 @@ def sincronizar_contratos():
             if not codigo:
                 continue
 
-            # Bloqueo estricto e inequívoco de las licitaciones ajenas detectadas
             if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
-                continue
-            es_lic = (
-                "LICIT" in tipo_proc.upper()
-                or any(sig in codigo.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2", "-LQ", "-LS"])
-            )
-            if not es_lic:
                 continue
 
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
-            if not verificar_es_ganador_redsalud(fila, idx_adjudicatario, cabecera):
+            if not verificar_es_ganador_redsalud(fila, idx_adjudicatario):
                 continue
 
             if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
@@ -425,7 +411,7 @@ def sincronizar_contratos():
             )
         print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
     else:
-        print("RESULTADO: Ninguna licitación ajena fue insertada. La fila 372 en adelante quedó completamente purgada.", flush=True)
+        print("RESULTADO: Ninguna licitación ajena fue insertada. La fila 372 en adelante quedó purgada.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
