@@ -20,7 +20,7 @@ FILA_INICIO_OBJETIVO = 372
 
 # RUTs oficiales de RedSalud (solo dígitos)
 RUTS_REDSALUD_EXACTOS = {
-    "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud
+    "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud / Casa Matriz
     "76458120",  # RedSalud Dental SpA
     "96536000",  # Clínica RedSalud Providencia / Vitacura / Santiago
     "96543000",  # Clínica RedSalud Valparaíso
@@ -33,13 +33,13 @@ RUTS_REDSALUD_EXACTOS = {
     "76326330",  # Sociedad Médica RedSalud
 }
 
-# Licitaciones descartadas de terceros confirmadas
+# Licitaciones descartadas explícitas de competidores
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1464-65-LE26",   # Rubikal
     "3283-9-LE26",    # Atrys Health
     "359-115-LE26",   # Ingefisic
-    "2770-153-LE26",
-    "2378-118-LE26",  # Veterinario gatos
+    "2770-153-LE26",  # No RedSalud
+    "2378-118-LE26",  # Veterinario control gatos
     "1374899-42-LP26",
     "1656-23-LP26",
     "1057490-75-LE26",
@@ -180,6 +180,8 @@ def es_septiembre_2026_en_adelante(fila_raw):
 
 def extraer_id_licitacion(fila_raw, idx_codigo):
     valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "L1", "E2", "CO", "B2")
+    
+    # 1. Celda oficial de código
     if idx_codigo is not None and idx_codigo < len(fila_raw):
         celda = str(fila_raw[idx_codigo]).strip()
         codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
@@ -188,6 +190,7 @@ def extraer_id_licitacion(fila_raw, idx_codigo):
             if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
                 return code.upper()
 
+    # 2. Buscar en las primeras 5 columnas
     for c in fila_raw[:5]:
         celda = str(c).strip()
         codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
@@ -195,6 +198,7 @@ def extraer_id_licitacion(fila_raw, idx_codigo):
             parts = code.split("-")
             if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
                 return code.upper()
+
     return ""
 
 def extraer_prestacion(fila_raw, idx_nombre):
@@ -220,7 +224,7 @@ def extraer_prestacion(fila_raw, idx_nombre):
         return max(candidatos, key=len)
     return "Prestación Médica Asistencial"
 
-def es_adjudicatario_redsalud_verificado(fila, idx_adjudicatario, cabecera):
+def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda = str(fila[idx_adjudicatario]).strip().upper()
         if any(bad in celda for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS", "MEDTRONIC"]):
@@ -299,27 +303,56 @@ def sincronizar_contratos():
 
     print(f"Mapeo verificado: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
 
-    # Diagnóstico de conteo de filas en Base Madre
-    conteo_redsalud = 0
-    conteo_adjudicadas = 0
-    conteo_fechas_sept = 0
-    muestras_redsalud = []
+    # Diagnóstico detallado de las filas de RedSalud en Base Madre
+    filas_redsalud_licitacion = []
+    filas_redsalud_compra_agil = []
+    filas_redsalud_otras = []
 
     for r in valores_maestra[1:]:
-        fila_str = " ".join(str(c) for c in r).upper()
-        if "REDSALUD" in fila_str or "RED SALUD" in fila_str:
-            conteo_redsalud += 1
-            if len(muestras_redsalud) < 3:
-                muestras_redsalud.append(r[:14])
-        if "ADJUDICADA" in fila_str:
-            conteo_adjudicadas += 1
-        if es_septiembre_2026_en_adelante(r):
-            conteo_fechas_sept += 1
+        es_rs = False
+        if idx_adjudicatario is not None and idx_adjudicatario < len(r):
+            adj_txt = str(r[idx_adjudicatario]).upper()
+            if "REDSALUD" in adj_txt or "RED SALUD" in adj_txt or any(r_rs in re.sub(r"[^0-9]", "", adj_txt) for r_rs in RUTS_REDSALUD_EXACTOS):
+                es_rs = True
 
-    print(f"Diagnóstico Base Madre -> Filas con RedSalud: {conteo_redsalud} | Con 'Adjudicada': {conteo_adjudicadas} | Fechas Sept 2026+: {conteo_fechas_sept}", flush=True)
-    if muestras_redsalud:
-        print("Muestra 1ra fila RedSalud en Base Madre:", muestras_redsalud[0], flush=True)
+        if es_rs:
+            cod = str(r[idx_codigo]).strip() if idx_codigo < len(r) else ""
+            tipo = str(r[idx_tipo]).strip() if idx_tipo < len(r) else ""
+            estado = str(r[idx_estado]).strip() if idx_estado < len(r) else ""
+            es_sept = es_septiembre_2026_en_adelante(r)
 
+            info = {
+                "codigo": cod,
+                "tipo": tipo,
+                "estado": estado,
+                "sept_2026": es_sept,
+                "comprador": str(r[idx_comprador]).strip() if idx_comprador < len(r) else "",
+                "nombre": str(r[idx_nombre]).strip() if idx_nombre < len(r) else ""
+            }
+
+            if "AGIL" in tipo.upper() or "COT" in cod.upper():
+                filas_redsalud_compra_agil.append(info)
+            elif any(sig in cod.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2", "-LQ", "-LS"]) or "LICIT" in tipo.upper():
+                filas_redsalud_licitacion.append(info)
+            else:
+                filas_redsalud_otras.append(info)
+
+    print(f"=== ANÁLISIS EXHAUSTIVO REDSALUD EN BASE MADRE ===", flush=True)
+    print(f"Total Compras Ágiles RedSalud: {len(filas_redsalud_compra_agil)}", flush=True)
+    print(f"Total Licitaciones RedSalud: {len(filas_redsalud_licitacion)}", flush=True)
+    print(f"Total Otras RedSalud: {len(filas_redsalud_otras)}", flush=True)
+
+    if filas_redsalud_licitacion:
+        print("Licitaciones de RedSalud encontradas:", flush=True)
+        for f_lic in filas_redsalud_licitacion:
+            print(f"  -> Codigo: {f_lic['codigo']} | Estado: {f_lic['estado']} | Sept2026+: {f_lic['sept_2026']} | Cliente: {f_lic['comprador']}", flush=True)
+    else:
+        print("AVISO: En las 12.177 filas de la Base Madre NO hay Licitaciones asignadas a RedSalud en la columna Adjudicatario.", flush=True)
+        print("Muestra de Compras Ágiles RedSalud encontradas (primeras 5):", flush=True)
+        for f_ca in filas_redsalud_compra_agil[:5]:
+            print(f"  -> Codigo: {f_ca['codigo']} | Estado: {f_ca['estado']} | Sept2026+: {f_ca['sept_2026']} | Cliente: {f_ca['comprador']}", flush=True)
+
+    # 3. Conectar a archivo de Contratos (Destino)
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
@@ -351,6 +384,7 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
+    # 4. Filtrar licitaciones verdaderas
     filas_nuevas = []
     ids_nuevos = set()
 
@@ -378,7 +412,7 @@ def sincronizar_contratos():
             if not es_adj:
                 continue
 
-            if not es_adjudicatario_redsalud_verificado(fila, idx_adjudicatario, cabecera):
+            if not verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
                 continue
 
             if not es_septiembre_2026_en_adelante(fila):
