@@ -17,8 +17,9 @@ SPREADSHEET_ID_CONTRATOS = (
 ).strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 
+# Encabezados Oficiales con "Categoría Cliente"
 ENCABEZADOS_CONTRATOS = [
-    "Categoría",
+    "Categoría Cliente",
     "Cliente",
     "Rut Cliente",
     "Filial",
@@ -327,6 +328,10 @@ def sincronizar_contratos():
     if not datos_existentes:
         ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
         datos_existentes = [ENCABEZADOS_CONTRATOS]
+    else:
+        # Asegurar que el encabezado en A1 sea 'Categoría Cliente'
+        if datos_existentes[0] and datos_existentes[0][0] != "Categoría Cliente":
+            ws_contratos.update(range_name="A1", values=[["Categoría Cliente"]])
 
     ids_registrados = set()
     for row in datos_existentes[1:]:
@@ -335,116 +340,11 @@ def sincronizar_contratos():
 
     print(f"Registrados previos en destino: {len(ids_registrados)}", flush=True)
 
-    # 4. Procesar filas: SOLO ADJUDICADAS Y DESDE AGOSTO 2026 EN ADELANTE
+    # 4. Procesar filas: SOLO LICITACIONES, SOLO ADJUDICADAS Y DESDE AGOSTO 2026
     filas_nuevas = []
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
             fila = list(r) + [""] * (20 - len(r))
             codigo = fila[1].strip()          # Col B: Código Proceso
             nombre = fila[2].strip()          # Col C: Nombre Proceso
-            categoria = fila[3].strip()       # Col D: Categoría / Línea
-            fecha_pub = fila[4].strip()       # Col E: Fecha Pub
-            fecha_cie = fila[5].strip()       # Col F: Fecha Cierre
-            tipo_proc = fila[7].strip()       # Col H: Tipo Proceso
-            comprador = fila[8].strip()       # Col I: Comprador
-            region = fila[9].strip()          # Col J: Región
-            estado = fila[10].strip()         # Col K: Estado Oferta
-            adjudicatario = fila[11].strip()  # Col L: Adjudicatario
-            monto = fila[12].strip()          # Col M: Monto Total
-            codigo_oc = fila[14].strip()      # Col O: Código OC
-
-            if not codigo:
-                continue
-
-            # REGLA 1: SOLO LO ADJUDICADO
-            if estado.upper() != "ADJUDICADA":
-                continue
-
-            # REGLA 2: SOLO AGOSTO 2026 EN ADELANTE
-            if not es_agosto_2026_en_adelante(fecha_pub, fecha_cie):
-                continue
-
-            # REGLA 3: No duplicar si ya existe
-            if codigo in ids_registrados:
-                continue
-
-            cat_limpia = categoria.replace("RedSalud - ", "").strip()
-            if not cat_limpia:
-                cat_limpia = "Salud General y Procedimientos"
-
-            rut_cliente = resolver_rut_cliente(comprador, codigo)
-            filial, rut_filial = determinar_filial(cat_limpia, region, comprador)
-
-            if "LICIT" in tipo_proc.upper():
-                tipo_registro = "Licitación Pública"
-                duracion_meses = 12
-            else:
-                tipo_registro = "Compra Ágil"
-                duracion_meses = 2
-
-            es_sum = any(x in nombre.upper() for x in ["SUMINISTRO", "INSUMOS"])
-            tipo_contrato = "Suministro de Insumos" if es_sum else "Prestación de Servicios Médicos"
-
-            fecha_inicio = ""
-            fecha_termino = ""
-
-            try:
-                monto_val = float(monto)
-            except Exception:
-                monto_val = 0
-
-            es_lic = "LICIT" in tipo_registro.upper()
-            boleta = f"BG-{codigo}" if (monto_val >= 15000000 or es_lic) else "No Aplica"
-            venc_boleta = ""
-
-            estado_contrato = "En gestión"
-
-            aplica_reajuste = "Sí" if duracion_meses >= 12 else "No"
-            reajuste = "IPC Anual" if duracion_meses >= 12 else "No Aplica"
-
-            filas_nuevas.append([
-                cat_limpia,
-                comprador,
-                rut_cliente,
-                filial,
-                rut_filial,
-                tipo_registro,
-                tipo_contrato,
-                codigo,
-                nombre,
-                fecha_inicio,
-                fecha_termino,
-                duracion_meses,
-                monto,
-                codigo_oc,
-                boleta,
-                venc_boleta,
-                estado_contrato,
-                aplica_reajuste,
-                reajuste
-            ])
-            ids_registrados.add(codigo)
-
-    tot_nuevas = len(filas_nuevas)
-    print(f"Contratos adjudicados desde Agosto 2026 encontrados: {tot_nuevas}", flush=True)
-
-    if tot_nuevas > 0:
-        fila_inicio = len(datos_existentes) + 1
-        fila_fin = fila_inicio + tot_nuevas - 1
-        filas_necesarias = max(fila_fin + 50, 500)
-        ws_contratos.resize(rows=filas_necesarias, cols=25)
-
-        for s in range(0, tot_nuevas, 1000):
-            e = min(s + 1000, tot_nuevas)
-            r_ini = fila_inicio + s
-            r_fin = fila_inicio + e - 1
-            ws_contratos.update(
-                range_name=f"A{r_ini}:S{r_fin}",
-                values=filas_nuevas[s:e]
-            )
-        print(f"Se agregaron exitosamente {tot_nuevas} registros en '{ws_contratos.title}'.", flush=True)
-    else:
-        print("No hay adjudicaciones desde agosto 2026 nuevas pendientes.", flush=True)
-
-if __name__ == "__main__":
-    sincronizar_contratos()
+            categoria = fila[3].strip()       # Col D: Categor
