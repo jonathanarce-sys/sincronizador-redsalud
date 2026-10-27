@@ -98,6 +98,22 @@ def resolver_rut_cliente(nombre, cod=""):
         base = 61100000 + (h * 131) % 890000
     return formatear_rut(base)
 
+def clasificar_categoria_cliente(comprador):
+    c = str(comprador).upper()
+    if any(k in c for k in ["FFAA", "ARMADA", "EJERCITO", "EJÉRCITO", "FACH", "AEREA", "AÉREA", "CARABINERO", "DIPRECA", "CAPREDENA", "MILITAR", "NAVAL"]):
+        return "FFAA"
+    if "ISL" in c or "SEGURIDAD LABORAL" in c:
+        return "ISL"
+    if "FONASA" in c or "FONDO NACIONAL DE SALUD" in c:
+        return "Fonasa"
+    if any(k in c for k in ["MUNICIPAL", "MUNI", "ALCALD", "CORP. MUNICIPAL", "CORMU"]):
+        return "Municipalidades"
+    if any(k in c for k in ["SERVICIO DE SALUD", "SS ", "S.S."]):
+        return "Servicio de Salud"
+    if any(k in c for k in ["HOSPITAL", "INSTITUTO", "COMPLEJO ASISTENCIAL", "POSTA", "CESFAM"]):
+        return "Hospitales"
+    return "Otros"
+
 def determinar_filial(cat, reg, comp):
     cat_u = str(cat).upper()
     reg_u = str(reg).upper()
@@ -129,6 +145,13 @@ def determinar_filial(cat, reg, comp):
         return "Clínica RedSalud Santiago", "96.856.000-2"
     return "RedSalud S.A.", "96.856.000-2"
 
+def es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila_raw):
+    candidatas = [fecha_pub, fecha_cie] + fila_raw[4:7]
+    for f in candidatas:
+        if re.search(r"2026-(09|10|11|12)", str(f)):
+            return True
+    return False
+
 def extraer_prestacion_real(fila_raw):
     textos_prohibidos = [
         "ACEPTADA", "EN PROCESO", "EVALUACIÓN", "EVALUACION", "ADJUDICADA",
@@ -151,7 +174,7 @@ def extraer_prestacion_real(fila_raw):
     return col_c if col_c else "Prestaciones Médicas"
 
 def sincronizar_contratos():
-    print("Iniciando sincronización limpia...", flush=True)
+    print("Iniciando sincronización incremental debajo de lo existente...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado exitosamente como: {sa_email}", flush=True)
@@ -194,72 +217,91 @@ def sincronizar_contratos():
             rows=1000,
             cols=25
         )
+        ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
 
-    # 4. Procesar filas: SOLO LICITACIONES, SOLO ADJUDICADAS Y DESDE AGOSTO 2026
+    # 4. Leer filas ya existentes (RESPETO TOTAL A LO EXISTENTE, SIN BORRAR)
+    datos_existentes = ws_contratos.get_all_values()
+    if not datos_existentes:
+        ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
+        datos_existentes = [ENCABEZADOS_CONTRATOS]
+
+    ids_existentes = set()
+    for row in datos_existentes[1:]:
+        if len(row) > 7 and row[7].strip():
+            ids_existentes.add(row[7].strip().upper())
+        if len(row) > 1 and row[1].strip():
+            ids_existentes.add(row[1].strip().upper())
+
+    print(f"Filas actuales en 'consolidado': {len(datos_existentes)}. IDs registrados: {len(ids_existentes)}", flush=True)
+
+    # 5. Filtrar licitaciones: ADJUDICADAS A REDSALUD Y DESDE SEPTIEMBRE 2026
     filas_nuevas = []
-    ids_procesados = set()
+    ids_nuevos = set()
 
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
             fila = list(r) + [""] * (20 - len(r))
             codigo = fila[1].strip()          # Col B: Código Proceso
-            categoria = fila[3].strip()       # Col D: Categoría Licitalab
+            categoria = fila[3].strip()       # Col D: Categoría
             fecha_pub = fila[4].strip()       # Col E: Fecha Pub
             fecha_cie = fila[5].strip()       # Col F: Fecha Cierre
             tipo_proc = fila[7].strip()       # Col H: Tipo Proceso
             comprador = fila[8].strip()       # Col I: Comprador
             region = fila[9].strip()          # Col J: Región
             estado = fila[10].strip()         # Col K: Estado Oferta
+            adjudicatario = fila[11].strip()  # Col L: Adjudicatario
             monto = fila[12].strip()          # Col M: Monto Total
 
             if not codigo:
                 continue
 
-            # FILTRO 1: ESTADO DE LA OFERTA DEBE SER ESTRICTAMENTE 'ADJUDICADA'
-            estado_u = estado.upper()
-            if "ADJUDICADA" not in estado_u:
-                es_adjudicada = any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
-                if not es_adjudicada:
+            # REGLA 1: ESTADO DE LA OFERTA = ADJUDICADA
+            if "ADJUDICADA" not in estado.upper():
+                es_adj = any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
+                if not es_adj:
                     continue
 
-            # FILTRO 2: EXCLUSIVAMENTE LICITACIONES (Descartar Compra Ágil y Cotizaciones)
-            es_compra_agil = any("AGIL" in str(c).upper() for c in [tipo_proc, codigo, categoria]) or "COT" in codigo.upper()
-            if es_compra_agil:
+            # REGLA 2: ADJUDICADA POR REDSALUD
+            es_redsalud = any("REDSALUD" in str(c).upper() or "RED SALUD" in str(c).upper() for c in [adjudicatario, fila[11], fila[13]])
+            if not es_redsalud:
                 continue
 
-            es_licitacion = (
+            # REGLA 3: EXCLUSIVAMENTE LICITACIONES (No Compra Ágil ni Cotizaciones)
+            if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
+                continue
+            es_lic = (
                 "LICIT" in tipo_proc.upper()
                 or any(sig in codigo.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2"])
             )
-            if not es_licitacion:
+            if not es_lic:
                 continue
 
-            # FILTRO 3: SOLO AGOSTO DE 2026 EN ADELANTE
-            tiene_fecha_agosto = any(
-                re.search(r"2026-(08|09|10|11|12)", str(f))
-                for f in [fecha_pub, fecha_cie] + fila[4:7]
-            )
-            if not tiene_fecha_agosto:
+            # REGLA 4: DESDE SEPTIEMBRE DEL 2026 EN ADELANTE
+            if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
                 continue
 
-            # FILTRO 4: EVITAR DUPLICADOS
-            if codigo in ids_procesados:
+            # REGLA 5: NO DUPLICAR (Si ya existe en consolidado, se salta)
+            cod_u = codigo.upper()
+            if cod_u in ids_existentes or cod_u in ids_nuevos:
                 continue
 
+            # Clasificación de Categoría Cliente según desplegable institucional
+            cat_cliente = clasificar_categoria_cliente(comprador)
+
+            # Prestación real sin estados
             prestacion = extraer_prestacion_real(fila)
-            cat_licitalab = categoria if categoria else "Salud General"
 
             rut_cliente = resolver_rut_cliente(comprador, codigo)
-            filial, rut_filial = determinar_filial(cat_licitalab, region, comprador)
+            filial, rut_filial = determinar_filial(categoria, region, comprador)
 
             filas_nuevas.append([
-                cat_licitalab,       # Col A: Categoría Cliente
+                cat_cliente,         # Col A: Categoría Cliente (FFAA, ISL, Fonasa, Municipalidades, Hospitales, etc.)
                 comprador,           # Col B: Cliente
                 rut_cliente,         # Col C: Rut Cliente
                 filial,              # Col D: Filial
                 rut_filial,          # Col E: Rut Filial
                 "",                  # Col F: Tipo registro (EN BLANCO)
-                "Licitación",        # Col G: Tipo Contrato
+                "Licitación",        # Col G: Tipo Contrato (Licitación)
                 codigo,              # Col H: ID licitación
                 prestacion,          # Col I: Prestaciones
                 "",                  # Col J: Fecha de inicio (EN BLANCO)
@@ -273,28 +315,29 @@ def sincronizar_contratos():
                 "Sí",                # Col R: Aplica Reajuste
                 ""                   # Col S: Reajuste (EN BLANCO)
             ])
-            ids_procesados.add(codigo)
+            ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Total licitaciones adjudicadas limpias encontradas: {tot_nuevas}", flush=True)
+    print(f"Licitaciones adjudicadas a RedSalud desde Septiembre 2026: {tot_nuevas}", flush=True)
 
-    # 5. Sobreescribir la pestaña 'consolidado' para limpiar los quiebres anteriores
-    print("Limpiando y regenerando pestaña 'consolidado'...", flush=True)
-    filas_necesarias = max(tot_nuevas + 50, 100)
-    ws_contratos.resize(rows=filas_necesarias, cols=25)
-    ws_contratos.clear()
-    ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
+    # 6. INSERTAR ÚNICAMENTE POR DEBAJO DE LO YA EXISTENTE (SIN BORRAR NADA)
+    if tot_nuevas > 0:
+        fila_inicio = len(datos_existentes) + 1
+        fila_fin = fila_inicio + tot_nuevas - 1
+        filas_necesarias = max(fila_fin + 50, 100)
+        ws_contratos.resize(rows=filas_necesarias, cols=25)
 
-    if filas_nuevas:
         for s in range(0, tot_nuevas, 1000):
             e = min(s + 1000, tot_nuevas)
+            r_ini = fila_inicio + s
+            r_fin = fila_inicio + e - 1
             ws_contratos.update(
-                range_name=f"A{s + 2}:S{e + 1}",
+                range_name=f"A{r_ini}:S{r_fin}",
                 values=filas_nuevas[s:e]
             )
-        print(f"Se actualizaron exitosamente {tot_nuevas} registros limpios en 'consolidado'.", flush=True)
+        print(f"Se agregaron exitosamente {tot_nuevas} registros NUEVOS debajo de la fila {len(datos_existentes)}.", flush=True)
     else:
-        print("No se encontraron registros que cumplan todos los filtros.", flush=True)
+        print("No hay licitaciones nuevas desde septiembre 2026 adjudicadas a RedSalud para agregar.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
