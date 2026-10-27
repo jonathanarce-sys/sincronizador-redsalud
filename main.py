@@ -33,7 +33,7 @@ RUTS_REDSALUD_EXACTOS = {
     "76326330",  # Sociedad Médica RedSalud
 }
 
-# Licitaciones descartadas explícitas de competidores
+# Licitaciones ajenas explícitas confirmadas
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1464-65-LE26",   # Rubikal
     "3283-9-LE26",    # Atrys Health
@@ -165,23 +165,43 @@ def determinar_filial(cat, reg, comp):
         return "Clínica RedSalud Santiago", "96.856.000-2"
     return "RedSalud S.A.", "96.856.000-2"
 
+def parsear_fechas_fila(fila):
+    fechas = []
+    for c in fila:
+        c_str = str(c).strip()
+        matches = re.findall(r"\b(\d{1,4})[-/.](\d{1,2})[-/.](\d{2,4})\b", c_str)
+        for m in matches:
+            p1, p2, p3 = int(m[0]), int(m[1]), int(m[2])
+            if p1 > 1000:
+                year, month, day = p1, p2, p3
+            elif p3 > 1000:
+                year, month, day = p3, p2, p1
+            elif 20 <= p3 <= 35:
+                year, month, day = 2000 + p3, p2, p1
+            else:
+                continue
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                fechas.append((year, month, day))
+    return fechas
+
 def es_septiembre_2026_en_adelante(fila_raw):
+    fechas = parsear_fechas_fila(fila_raw)
+    for y, m, d in fechas:
+        if y == 2026 and m >= 9:
+            return True
+        if y > 2026:
+            return True
+
     for c in fila_raw:
         s = str(c).strip().lower()
-        if re.search(r"2026[-/.](09|10|11|12)", s):
-            return True
-        if re.search(r"\b(09|10|11|12)[-/.]2026\b", s):
-            return True
-        if re.search(r"\b\d{1,2}[-/.]0?9[-/.]2026\b", s) or re.search(r"\b\d{1,2}[-/.](10|11|12)[-/.]2026\b", s):
-            return True
         if re.search(r"(septiembre|octubre|noviembre|diciembre).*2026|2026.*(septiembre|octubre|noviembre|diciembre)", s):
             return True
+
     return False
 
 def extraer_id_licitacion(fila_raw, idx_codigo):
-    valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "L1", "E2", "CO", "B2")
+    valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "SE", "L1", "E2", "CO", "B2")
     
-    # 1. Celda oficial de código
     if idx_codigo is not None and idx_codigo < len(fila_raw):
         celda = str(fila_raw[idx_codigo]).strip()
         codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
@@ -190,7 +210,6 @@ def extraer_id_licitacion(fila_raw, idx_codigo):
             if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
                 return code.upper()
 
-    # 2. Buscar en las primeras 5 columnas
     for c in fila_raw[:5]:
         celda = str(c).strip()
         codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
@@ -303,10 +322,9 @@ def sincronizar_contratos():
 
     print(f"Mapeo verificado: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
 
-    # Diagnóstico detallado de las filas de RedSalud en Base Madre
+    # Diagnóstico detallado con impresión de fechas detectadas
     filas_redsalud_licitacion = []
     filas_redsalud_compra_agil = []
-    filas_redsalud_otras = []
 
     for r in valores_maestra[1:]:
         es_rs = False
@@ -319,6 +337,7 @@ def sincronizar_contratos():
             cod = str(r[idx_codigo]).strip() if idx_codigo < len(r) else ""
             tipo = str(r[idx_tipo]).strip() if idx_tipo < len(r) else ""
             estado = str(r[idx_estado]).strip() if idx_estado < len(r) else ""
+            fechas_detectadas = parsear_fechas_fila(r)
             es_sept = es_septiembre_2026_en_adelante(r)
 
             info = {
@@ -326,33 +345,26 @@ def sincronizar_contratos():
                 "tipo": tipo,
                 "estado": estado,
                 "sept_2026": es_sept,
+                "fechas": fechas_detectadas,
                 "comprador": str(r[idx_comprador]).strip() if idx_comprador < len(r) else "",
                 "nombre": str(r[idx_nombre]).strip() if idx_nombre < len(r) else ""
             }
 
             if "AGIL" in tipo.upper() or "COT" in cod.upper():
                 filas_redsalud_compra_agil.append(info)
-            elif any(sig in cod.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2", "-LQ", "-LS"]) or "LICIT" in tipo.upper():
-                filas_redsalud_licitacion.append(info)
             else:
-                filas_redsalud_otras.append(info)
+                filas_redsalud_licitacion.append(info)
 
     print(f"=== ANÁLISIS EXHAUSTIVO REDSALUD EN BASE MADRE ===", flush=True)
     print(f"Total Compras Ágiles RedSalud: {len(filas_redsalud_compra_agil)}", flush=True)
     print(f"Total Licitaciones RedSalud: {len(filas_redsalud_licitacion)}", flush=True)
-    print(f"Total Otras RedSalud: {len(filas_redsalud_otras)}", flush=True)
 
     if filas_redsalud_licitacion:
-        print("Licitaciones de RedSalud encontradas:", flush=True)
+        print("Licitaciones de RedSalud encontradas y sus fechas detectadas:", flush=True)
         for f_lic in filas_redsalud_licitacion:
-            print(f"  -> Codigo: {f_lic['codigo']} | Estado: {f_lic['estado']} | Sept2026+: {f_lic['sept_2026']} | Cliente: {f_lic['comprador']}", flush=True)
-    else:
-        print("AVISO: En las 12.177 filas de la Base Madre NO hay Licitaciones asignadas a RedSalud en la columna Adjudicatario.", flush=True)
-        print("Muestra de Compras Ágiles RedSalud encontradas (primeras 5):", flush=True)
-        for f_ca in filas_redsalud_compra_agil[:5]:
-            print(f"  -> Codigo: {f_ca['codigo']} | Estado: {f_ca['estado']} | Sept2026+: {f_ca['sept_2026']} | Cliente: {f_ca['comprador']}", flush=True)
+            print(f"  -> Codigo: {f_lic['codigo']} | Estado: {f_lic['estado']} | Fechas: {f_lic['fechas']} | Sept2026+: {f_lic['sept_2026']} | Cliente: {f_lic['comprador']}", flush=True)
 
-    # 3. Conectar a archivo de Contratos (Destino)
+    # Conectar a archivo de Contratos (Destino)
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
@@ -384,7 +396,7 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
-    # 4. Filtrar licitaciones verdaderas
+    # Filtrar licitaciones verdaderas
     filas_nuevas = []
     ids_nuevos = set()
 
@@ -398,26 +410,33 @@ def sincronizar_contratos():
             estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
             monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
 
+            # Extraer código chileno oficial
             codigo = extraer_id_licitacion(fila, idx_codigo)
             if not codigo:
                 continue
 
+            # Bloqueo total de licitaciones ajenas
             if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
+            # Excluir compras ágiles y cotizaciones
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                 continue
 
+            # Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
+            # Verificación de adjudicatario RedSalud
             if not verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
                 continue
 
+            # Periodo Septiembre 2026 en adelante con parser matemático
             if not es_septiembre_2026_en_adelante(fila):
                 continue
 
+            # Evitar duplicar
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -456,6 +475,7 @@ def sincronizar_contratos():
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
+    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
         print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
