@@ -19,10 +19,7 @@ NOMBRE_HOJA_CONTRATOS = "consolidado"
 FILA_INICIO_OBJETIVO = 372
 
 # CONFIGURACIÓN DE FILTROS:
-# True: Excluye Compras Ágiles (COT) y deja solo Licitaciones (LE, LP, LR, SE, etc.)
 SOLO_LICITACIONES = True
-
-# True: Acepta adjudicaciones desde Septiembre 2025 a la fecha y procesos con código año 26
 DESDE_SEPTIEMBRE_A_LA_FECHA = True
 
 # RUTs oficiales de RedSalud (solo dígitos)
@@ -38,15 +35,18 @@ RUTS_REDSALUD_EXACTOS = {
     "96527000",  # Clínica RedSalud Elqui / La Serena
     "96559000",  # Centros Médicos y Dentales RedSalud
     "76326330",  # Sociedad Médica RedSalud
+    "99568700",  # Centro de Especialidades Médicas Valparaíso / Inversalud Valparaíso SpA
 }
 
 # Licitaciones descartadas explícitas de competidores
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
-    "1464-65-LE26",   # Rubikal
-    "3283-9-LE26",    # Atrys Health
-    "359-115-LE26",   # Ingefisic
-    "2770-153-LE26",  # No RedSalud
-    "2378-118-LE26",  # Veterinario control gatos
+    "1464-65-LE26",    # Rubikal
+    "3283-9-LE26",     # Atrys Health
+    "359-115-LE26",    # Ingefisic
+    "2770-153-LE26",   # No RedSalud
+    "2378-118-LE26",   # Veterinario control gatos
+    "1063538-37-LR26", # Grupo Bios S.A. (No RedSalud)
+    "899-58-LE25",     # No RedSalud
     "1374899-42-LP26",
     "1656-23-LP26",
     "1057490-75-LE26",
@@ -65,6 +65,12 @@ LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "548874-75-LP26",
     "1374899-24-LR26"
 }
+
+# Lista de palabras clave de competidores que anulan de inmediato la fila
+COMPETIDORES_BLOQUEADOS = [
+    "RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC",
+    "FRESENIUS", "MEDTRONIC", "BIOS", "GRUPO BIOS", "SIEMENS", "INDISA"
+]
 
 def obtener_cliente_gspread():
     posibles = [
@@ -141,33 +147,39 @@ def clasificar_categoria_cliente(comprador):
         return "Hospitales"
     return "Otros"
 
-def determinar_filial(cat, reg, comp):
-    cat_u = str(cat).upper()
-    reg_u = str(reg).upper()
+def determinar_filial(cat, reg, comp, adj="", codigo=""):
+    adj_u = str(adj).upper()
     comp_u = str(comp).upper()
+    reg_u = str(reg).upper()
+    cat_u = str(cat).upper()
+    cod_u = str(codigo).upper()
+
+    # Si el adjudicatario es de Valparaíso o la licitación es 899-33-LE26
+    if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u or "ESPECIALIDADES MEDICAS VALPARAISO" in adj_u:
+        return "Centro de Especialidades Médicas Valparaíso", "99.568.700-3"
 
     if "DENTAL" in cat_u:
         return "RedSalud Dental SpA", "76.458.120-3"
-    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u:
+    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u or "VALPARAISO" in adj_u:
         return "Clínica RedSalud Valparaíso", "96.543.000-6"
-    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u:
+    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u or "RANCAGUA" in adj_u:
         return "Clínica RedSalud Rancagua", "96.542.000-0"
-    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u:
+    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u or "TEMUCO" in adj_u:
         return "Clínica RedSalud Mayor Temuco", "96.537.000-3"
-    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u:
+    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u or "MAGALLANES" in adj_u:
         return "Clínica RedSalud Magallanes", "96.541.000-5"
-    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u:
+    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u or "BIOBIO" in adj_u:
         return "Centros Médicos RedSalud Biobío", "96.856.000-2"
-    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u:
+    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u or "MAULE" in adj_u:
         return "Centros Médicos RedSalud Maule", "96.856.000-2"
-    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u:
+    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u or "IQUIQUE" in adj_u:
         return "Centros Médicos RedSalud Iquique", "96.856.000-2"
-    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u:
+    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u or "ANTOFAGASTA" in adj_u:
         return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
     if "METROPOLITANA" in reg_u or "SANTIAGO" in reg_u:
-        if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]):
+        if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]) or "PROVIDENCIA" in adj_u:
             return "Clínica RedSalud Providencia", "96.536.000-8"
-        if any(x in comp_u for x in ["VITACURA", "LO BARNECHEA"]):
+        if any(x in comp_u for x in ["VITACURA", "LO BARNECHEA"]) or "VITACURA" in adj_u:
             return "Clínica RedSalud Vitacura", "96.536.000-8"
         return "Clínica RedSalud Santiago", "96.856.000-2"
     return "RedSalud S.A.", "96.856.000-2"
@@ -192,7 +204,7 @@ def parsear_fechas_fila(fila):
     return fechas
 
 def cumple_filtro_periodo(fila_raw, codigo):
-    # Proceso con sufijo de año 26 (ej: 1077499-65-SE26)
+    # Proceso con sufijo de año 26 (ej: 899-33-LE26, 1077499-65-SE26)
     if re.search(r"-[A-Za-z]+26\b", str(codigo)):
         return True
 
@@ -239,7 +251,7 @@ def extraer_prestacion(fila_raw, idx_nombre):
         "REDSALUD", "RED SALUD", "ACEPTADA", "EN PROCESO", "EVALUACIÓN",
         "EVALUACION", "ADJUDICADA", "PUBLICADA", "DESIERTA", "REVOCADA",
         "CANCELADA", "ENVIADA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L.",
-        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL", "ATRYS"
+        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL", "ATRYS", "BIOS"
     ]
     col_nom = fila_raw[idx_nombre].strip() if idx_nombre is not None and idx_nombre < len(fila_raw) else ""
     if col_nom and len(col_nom) >= 5 and not any(p in col_nom.upper() for p in palabras_prohibidas):
@@ -257,24 +269,27 @@ def extraer_prestacion(fila_raw, idx_nombre):
     return "Prestación Médica Asistencial"
 
 def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
+    # 1. Comprobar celda específica de adjudicatario
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda = str(fila[idx_adjudicatario]).strip().upper()
-        if any(bad in celda for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "FRESENIUS", "MEDTRONIC"]):
+        # Descartar si el adjudicatario contiene palabras de competidores conocidos
+        if any(bad in celda for bad in COMPETIDORES_BLOQUEADOS):
             return False
-        if re.search(r"\bRED\s*SALUD\b", celda) or "MEGASALUD" in celda:
+        if re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD|ESPECIALIDADES\s*MEDICAS\s*VALPARAISO", celda):
             return True
         rut_nums = re.sub(r"[^0-9]", "", celda)
         if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
             return True
 
+    # 2. Revisar otras columnas de adjudicación en la cabecera
     for i_c, h in enumerate(cabecera):
         h_u = str(h).upper()
         if ("ADJUDICATARIO" in h_u or "GANADOR" in h_u) and "CLIENTE" not in h_u and "CATEGOR" not in h_u:
             if i_c < len(fila):
                 texto = str(fila[i_c]).strip().upper()
-                if any(bad in texto for bad in ["RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC"]):
+                if any(bad in texto for bad in COMPETIDORES_BLOQUEADOS):
                     return False
-                if re.search(r"\bRED\s*SALUD\b", texto) or "MEGASALUD" in texto:
+                if re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD", texto):
                     return True
                 rut_nums = re.sub(r"[^0-9]", "", texto)
                 if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
@@ -283,7 +298,7 @@ def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
     return False
 
 def sincronizar_contratos():
-    print(f"Iniciando calibración definitiva desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
+    print(f"Iniciando sincronización ajustada desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado como: {sa_email}", flush=True)
@@ -366,6 +381,7 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
+    # Filtrar licitaciones verdaderas
     filas_nuevas = []
     ids_nuevos = set()
 
@@ -378,28 +394,36 @@ def sincronizar_contratos():
             region = fila[idx_region].strip() if idx_region < len(fila) else ""
             estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
             monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
+            adjudicatario_celda = fila[idx_adjudicatario].strip() if idx_adjudicatario < len(fila) else ""
 
+            # Extraer código chileno oficial
             codigo = extraer_id_licitacion(fila, idx_codigo)
             if not codigo:
                 continue
 
+            # Bloqueo total de licitaciones ajenas explícitas
             if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
+            # Filtro por tipo de proceso (solo licitaciones)
             if SOLO_LICITACIONES:
                 if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                     continue
 
+            # Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
+            # Verificación de adjudicatario RedSalud
             if not verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
                 continue
 
+            # Periodo calibrado (desde septiembre a la fecha / año 26)
             if not cumple_filtro_periodo(fila, codigo):
                 continue
 
+            # Evitar duplicar
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -407,13 +431,13 @@ def sincronizar_contratos():
             cat_cliente = clasificar_categoria_cliente(comprador)
             prestacion = extraer_prestacion(fila, idx_nombre)
             rut_cliente = resolver_rut_cliente(comprador, codigo)
-            filial, rut_filial = determinar_filial(categoria, region, comprador)
+            filial, rut_filial = determinar_filial(categoria, region, comprador, adj=adjudicatario_celda, codigo=codigo)
 
             filas_nuevas.append([
                 cat_cliente,         # Col A: Categoría Cliente
                 comprador,           # Col B: Cliente
                 rut_cliente,         # Col C: Rut Cliente
-                filial,              # Col D: Filial
+                filial,              # Col D: Filial (Ajustada a Valparaíso si corresponde)
                 rut_filial,          # Col E: Rut Filial
                 "",                  # Col F: Tipo registro (EN BLANCO)
                 "Licitación",        # Col G: Tipo Contrato (Licitación)
@@ -438,6 +462,7 @@ def sincronizar_contratos():
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
+    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
         print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
