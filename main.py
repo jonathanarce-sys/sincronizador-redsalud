@@ -16,28 +16,7 @@ SPREADSHEET_ID_CONTRATOS = (
     "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE"
 ).strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
-
-ENCABEZADOS_CONTRATOS = [
-    "Categoría Cliente",
-    "Cliente",
-    "Rut Cliente",
-    "Filial",
-    "Rut Filial",
-    "Tipo registro",
-    "Tipo Contrato",
-    "ID licitación",
-    "Prestaciones",
-    "Fecha de inicio",
-    "Fecha de termino",
-    "Duración en Meses",
-    "Monto Contrato",
-    "ID OC",
-    "Boleta de garantía",
-    "Vencimiento de boleta de garantía",
-    "Estado Contrato",
-    "Aplica Reajuste",
-    "Reajuste"
-]
+FILA_INICIO_OBJETIVO = 372
 
 def obtener_cliente_gspread():
     posibles = [
@@ -152,32 +131,42 @@ def es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila_raw):
             return True
     return False
 
-def extraer_prestacion_real(fila_raw):
-    textos_prohibidos = [
+def obtener_codigo_oficial(fila_raw):
+    patron_licitacion = r'\b\d{3,8}-\d{1,5}-[A-Za-z]+[0-9]*\b'
+    for c in fila_raw:
+        m = re.search(patron_licitacion, str(c))
+        if m:
+            return m.group(0).upper()
+    col_b = fila_raw[1].strip() if len(fila_raw) > 1 else ""
+    return col_b
+
+def obtener_prestacion_limpia(fila_raw):
+    palabras_negras = [
         "ACEPTADA", "EN PROCESO", "EVALUACIÓN", "EVALUACION", "ADJUDICADA",
         "PUBLICADA", "DESIERTA", "REVOCADA", "CANCELADA", "ENVIADA",
-        "INSTITUCIÓN COMPRADORA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L."
+        "INSTITUCIÓN PÚBLICA", "INSTITUCION PUBLICA", "SERVICIO DE SALUD",
+        "REDSALUD", "RED SALUD", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L."
     ]
     col_c = fila_raw[2].strip() if len(fila_raw) > 2 else ""
-    if col_c and not any(p in col_c.upper() for p in textos_prohibidos) and len(col_c) > 5:
+    if col_c and not any(p in col_c.upper() for p in palabras_negras) and len(col_c) >= 5:
         return col_c
 
     candidatos = []
     for c in fila_raw:
-        c_str = str(c).strip()
-        if len(c_str) > 10:
-            if not any(p in c_str.upper() for p in textos_prohibidos):
-                if not re.match(r"^\d+-\d+-[A-Za-z0-9]+$", c_str) and not re.match(r"^\d{7,8}-[\dkK]$", c_str):
-                    candidatos.append(c_str)
+        cs = str(c).strip()
+        if len(cs) > 10 and not any(p in cs.upper() for p in palabras_negras):
+            if not re.search(r'^\d+-\d+-[A-Za-z0-9]+$', cs) and not re.search(r'^\d{7,8}-[\dkK]$', cs):
+                candidatos.append(cs)
+
     if candidatos:
         return max(candidatos, key=len)
     return col_c if col_c else "Prestaciones Médicas"
 
 def sincronizar_contratos():
-    print("Iniciando sincronización incremental debajo de lo existente...", flush=True)
+    print(f"Iniciando sincronización protegiendo filas 1 a {FILA_INICIO_OBJETIVO - 1}...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
-        print(f"Autenticado exitosamente como: {sa_email}", flush=True)
+        print(f"Autenticado como: {sa_email}", flush=True)
     except Exception as e:
         print(f"Error de autenticación: {repr(e)}", flush=True)
         return
@@ -187,9 +176,9 @@ def sincronizar_contratos():
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
         valores_maestra = sheet_maestra.get_all_values()
-        print(f"Base Madre leida: {len(valores_maestra)} filas encontradas.", flush=True)
+        print(f"Base Madre leida: {len(valores_maestra)} filas.", flush=True)
     except Exception as e:
-        print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
+        print(f"Error Base Madre: {repr(e)}", flush=True)
         return
 
     # 2. Archivo de Gestión de Contratos (Destino)
@@ -201,7 +190,7 @@ def sincronizar_contratos():
             url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
             ss_contratos = client.open_by_url(url)
         except Exception as e:
-            print(f"Error abriendo Archivo Contratos: {repr(e)}", flush=True)
+            print(f"Error Archivo Contratos: {repr(e)}", flush=True)
             return
 
     # 3. Localizar hoja 'consolidado'
@@ -211,28 +200,19 @@ def sincronizar_contratos():
             ws_contratos = ws
             break
     if not ws_contratos:
-        print(f"Creando hoja '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
-        ws_contratos = ss_contratos.add_worksheet(
-            title=NOMBRE_HOJA_CONTRATOS,
-            rows=1000,
-            cols=25
-        )
-        ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
+        print(f"Error: No se encontró la hoja '{NOMBRE_HOJA_CONTRATOS}'.", flush=True)
+        return
 
-    # 4. Leer filas ya existentes (RESPETO TOTAL A LO EXISTENTE, SIN BORRAR)
+    # 4. Leer filas existentes para identificar IDs ya presentes y proteger filas 1 a 371
     datos_existentes = ws_contratos.get_all_values()
-    if not datos_existentes:
-        ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
-        datos_existentes = [ENCABEZADOS_CONTRATOS]
+    print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
 
     ids_existentes = set()
-    for row in datos_existentes[1:]:
+    for row in datos_existentes:
         if len(row) > 7 and row[7].strip():
             ids_existentes.add(row[7].strip().upper())
         if len(row) > 1 and row[1].strip():
             ids_existentes.add(row[1].strip().upper())
-
-    print(f"Filas actuales en 'consolidado': {len(datos_existentes)}. IDs registrados: {len(ids_existentes)}", flush=True)
 
     # 5. Filtrar licitaciones: ADJUDICADAS A REDSALUD Y DESDE SEPTIEMBRE 2026
     filas_nuevas = []
@@ -241,7 +221,6 @@ def sincronizar_contratos():
     if len(valores_maestra) > 1:
         for r in valores_maestra[1:]:
             fila = list(r) + [""] * (20 - len(r))
-            codigo = fila[1].strip()          # Col B: Código Proceso
             categoria = fila[3].strip()       # Col D: Categoría
             fecha_pub = fila[4].strip()       # Col E: Fecha Pub
             fecha_cie = fila[5].strip()       # Col F: Fecha Cierre
@@ -252,21 +231,22 @@ def sincronizar_contratos():
             adjudicatario = fila[11].strip()  # Col L: Adjudicatario
             monto = fila[12].strip()          # Col M: Monto Total
 
+            codigo = obtener_codigo_oficial(fila)
             if not codigo:
                 continue
 
-            # REGLA 1: ESTADO DE LA OFERTA = ADJUDICADA
+            # REGLA 1: ESTADO = ADJUDICADA
             if "ADJUDICADA" not in estado.upper():
                 es_adj = any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
                 if not es_adj:
                     continue
 
-            # REGLA 2: ADJUDICADA POR REDSALUD
+            # REGLA 2: GANADOR ES REDSALUD
             es_redsalud = any("REDSALUD" in str(c).upper() or "RED SALUD" in str(c).upper() for c in [adjudicatario, fila[11], fila[13]])
             if not es_redsalud:
                 continue
 
-            # REGLA 3: EXCLUSIVAMENTE LICITACIONES (No Compra Ágil ni Cotizaciones)
+            # REGLA 3: EXCLUSIVAMENTE LICITACIONES (Excluir Compra Ágil / Cotizaciones)
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                 continue
             es_lic = (
@@ -276,34 +256,30 @@ def sincronizar_contratos():
             if not es_lic:
                 continue
 
-            # REGLA 4: DESDE SEPTIEMBRE DEL 2026 EN ADELANTE
+            # REGLA 4: DESDE SEPTIEMBRE 2026 EN ADELANTE
             if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
                 continue
 
-            # REGLA 5: NO DUPLICAR (Si ya existe en consolidado, se salta)
+            # REGLA 5: EVITAR DUPLICADOS
             cod_u = codigo.upper()
             if cod_u in ids_existentes or cod_u in ids_nuevos:
                 continue
 
-            # Clasificación de Categoría Cliente según desplegable institucional
             cat_cliente = clasificar_categoria_cliente(comprador)
-
-            # Prestación real sin estados
-            prestacion = extraer_prestacion_real(fila)
-
+            prestacion = obtener_prestacion_limpia(fila)
             rut_cliente = resolver_rut_cliente(comprador, codigo)
             filial, rut_filial = determinar_filial(categoria, region, comprador)
 
             filas_nuevas.append([
-                cat_cliente,         # Col A: Categoría Cliente (FFAA, ISL, Fonasa, Municipalidades, Hospitales, etc.)
+                cat_cliente,         # Col A: Categoría Cliente
                 comprador,           # Col B: Cliente
                 rut_cliente,         # Col C: Rut Cliente
                 filial,              # Col D: Filial
                 rut_filial,          # Col E: Rut Filial
                 "",                  # Col F: Tipo registro (EN BLANCO)
                 "Licitación",        # Col G: Tipo Contrato (Licitación)
-                codigo,              # Col H: ID licitación
-                prestacion,          # Col I: Prestaciones
+                codigo,              # Col H: ID licitación (Código Oficial Calibrado)
+                prestacion,          # Col I: Prestaciones (Título Clínico Limpio)
                 "",                  # Col J: Fecha de inicio (EN BLANCO)
                 "",                  # Col K: Fecha de termino (EN BLANCO)
                 12,                  # Col L: Duración en Meses
@@ -318,13 +294,13 @@ def sincronizar_contratos():
             ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones adjudicadas a RedSalud desde Septiembre 2026: {tot_nuevas}", flush=True)
+    print(f"Licitaciones RedSalud Septiembre 2026+ nuevas encontradas: {tot_nuevas}", flush=True)
 
-    # 6. INSERTAR ÚNICAMENTE POR DEBAJO DE LO YA EXISTENTE (SIN BORRAR NADA)
+    # 6. ESCRIBIR ESTRICTAMENTE A PARTIR DE LA FILA 372 (SIN TOCAR FILAS 1 A 371)
     if tot_nuevas > 0:
-        fila_inicio = len(datos_existentes) + 1
+        fila_inicio = max(FILA_INICIO_OBJETIVO, len(datos_existentes) + 1)
         fila_fin = fila_inicio + tot_nuevas - 1
-        filas_necesarias = max(fila_fin + 50, 100)
+        filas_necesarias = max(fila_fin + 50, 450)
         ws_contratos.resize(rows=filas_necesarias, cols=25)
 
         for s in range(0, tot_nuevas, 1000):
@@ -335,9 +311,9 @@ def sincronizar_contratos():
                 range_name=f"A{r_ini}:S{r_fin}",
                 values=filas_nuevas[s:e]
             )
-        print(f"Se agregaron exitosamente {tot_nuevas} registros NUEVOS debajo de la fila {len(datos_existentes)}.", flush=True)
+        print(f"Éxito: Se escribieron {tot_nuevas} registros estrictamente desde la fila {fila_inicio} en adelante.", flush=True)
     else:
-        print("No hay licitaciones nuevas desde septiembre 2026 adjudicadas a RedSalud para agregar.", flush=True)
+        print("No hay licitaciones nuevas pendientes de insertar.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_contratos()
