@@ -13,11 +13,9 @@ SPREADSHEET_ID_MAESTRA = (
     "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 ).strip()
 SPREADSHEET_ID_CONTRATOS = (
-    "18HKuttayv6-MLIr5feByUaV0GEzvyRfr1E1DVaofbbY"
+    "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE"
 ).strip()
-NOMBRE_HOJA_CONTRATOS = (
-    "Base Contratos"
-)
+NOMBRE_HOJA_CONTRATOS = "consolidado"
 
 ENCABEZADOS_CONTRATOS = [
     "Categoría",
@@ -273,6 +271,20 @@ def es_agosto_2026_en_adelante(fecha_pub, fecha_cie):
             return True
     return False
 
+def obtener_o_crear_hoja_destino(ss_contratos):
+    for ws in ss_contratos.worksheets():
+        if ws.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower():
+            print(f"Hoja encontrada: '{ws.title}'", flush=True)
+            return ws
+    print(f"Creando hoja '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
+    ws = ss_contratos.add_worksheet(
+        title=NOMBRE_HOJA_CONTRATOS,
+        rows=1000,
+        cols=25
+    )
+    ws.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
+    return ws
+
 def sincronizar_contratos():
     print("Iniciando sincronización...", flush=True)
     try:
@@ -305,15 +317,10 @@ def sincronizar_contratos():
             return
 
     try:
-        ws_contratos = ss_contratos.worksheet(NOMBRE_HOJA_CONTRATOS)
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"Creando pestaña '{NOMBRE_HOJA_CONTRATOS}'...", flush=True)
-        ws_contratos = ss_contratos.add_worksheet(
-            title=NOMBRE_HOJA_CONTRATOS,
-            rows=1000,
-            cols=25
-        )
-        ws_contratos.update(range_name="A1:S1", values=[ENCABEZADOS_CONTRATOS])
+        ws_contratos = obtener_o_crear_hoja_destino(ss_contratos)
+    except Exception as e:
+        print(f"Error accediendo a la hoja destino: {repr(e)}", flush=True)
+        return
 
     # 3. Leer contratos existentes (evita duplicar)
     datos_existentes = ws_contratos.get_all_values()
@@ -435,7 +442,7 @@ def sincronizar_contratos():
                 range_name=f"A{r_ini}:S{r_fin}",
                 values=filas_nuevas[s:e]
             )
-        print(f"Se agregaron exitosamente {tot_nuevas} registros en 'Base Contratos'.", flush=True)
+        print(f"Se agregaron exitosamente {tot_nuevas} registros en '{ws_contratos.title}'.", flush=True)
     else:
         print("No hay adjudicaciones desde agosto 2026 nuevas pendientes.", flush=True)
 
