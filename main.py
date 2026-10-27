@@ -20,7 +20,7 @@ FILA_INICIO_OBJETIVO = 372
 
 # Lista oficial de RUTs base de RedSalud y sus clínicas/filiales en ChileCompra
 RUTS_REDSALUD = {
-    "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud / Santiago / Maule / Biobío
+    "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud
     "76458120",  # RedSalud Dental SpA
     "96536000",  # Clínica RedSalud Providencia / Vitacura / Santiago
     "96543000",  # Clínica RedSalud Valparaíso
@@ -38,7 +38,7 @@ COMPETIDORES_PROHIBIDOS = [
     "RUBIKAL", "ATRYS", "BIOMEDIC", "FRESENIUS", "FALCK", "B.BRAUN",
     "MEDTRONIC", "SIEMENS", "INDISA", "ALEMANA", "SAN JOSE", "LAS CONDES",
     "SAN CARLOS", "UNIVERSIDAD CATOLICA", "UC CHRISTUS", "INTERCLINICA",
-    "INGENIERIA", "CONSTRUCCION", "MONTAJES"
+    "INGENIERIA", "CONSTRUCCION", "MONTAJES", "PHARMA", "DROGUERIA"
 ]
 
 def obtener_cliente_gspread():
@@ -158,7 +158,8 @@ def detectar_indices_cabecera(cabecera):
     indices = {
         "codigo": 1, "nombre": 2, "categoria": 3, "fecha_pub": 4,
         "fecha_cie": 5, "tipo": 7, "comprador": 8, "region": 9,
-        "estado": 10, "adjudicatario": 11, "monto": 12
+        "estado": 10, "adjudicatario": 11, "monto": 12,
+        "columnas_proveedor": []
     }
     for idx, c in enumerate(cabecera):
         t = str(c).strip().upper()
@@ -180,42 +181,52 @@ def detectar_indices_cabecera(cabecera):
             indices["region"] = idx
         elif "ESTADO" in t and "OFERTA" in t:
             indices["estado"] = idx
-        elif "ADJUDICATARIO" in t or "PROVEEDOR GANADOR" in t or "GANADOR" in t:
-            indices["adjudicatario"] = idx
+        elif "ADJUDICATARIO" in t or "PROVEEDOR" in t or "GANADOR" in t or "OFERENTE" in t or "RAZÓN SOCIAL" in t or "RAZON SOCIAL" in t:
+            indices["columnas_proveedor"].append(idx)
+            if "ADJUDICATARIO" in t or "GANADOR" in t:
+                indices["adjudicatario"] = idx
         elif "MONTO" in t:
             indices["monto"] = idx
+
+    if not indices["columnas_proveedor"]:
+        indices["columnas_proveedor"] = [11]
     return indices
 
-def es_adjudicatario_redsalud_estricto(fila, idx_adjudicatario):
-    celda_adj = str(fila[idx_adjudicatario]).strip().upper() if len(fila) > idx_adjudicatario else ""
+def es_adjudicatario_redsalud_estricto(fila, idx_adjudicatario, columnas_proveedor):
+    # Evaluar celdas designadas para el adjudicatario
+    celdas_a_revisar = set([idx_adjudicatario] + columnas_proveedor)
+    
+    # 1. Comprobar si algún competidor conocido figura en esas columnas
+    for c_idx in celdas_a_revisar:
+        if c_idx < len(fila):
+            texto_celda = str(fila[c_idx]).strip().upper()
+            if any(no_es in texto_celda for no_es in COMPETIDORES_PROHIBIDOS):
+                return False
 
-    if not celda_adj:
-        return False
+    # 2. Verificar coincidencia explícita con RedSalud en las columnas de proveedor
+    tiene_redsalud = False
+    for c_idx in celdas_a_revisar:
+        if c_idx < len(fila):
+            texto_celda = str(fila[c_idx]).strip().upper()
+            if re.search(r"RED\s*SALUD", texto_celda):
+                tiene_redsalud = True
+                break
+            rut_limpio = re.sub(r"[^0-9]", "", texto_celda)
+            if any(r in rut_limpio for r in RUTS_REDSALUD):
+                tiene_redsalud = True
+                break
 
-    # Bloqueo inmediato de competidores
-    if any(no_es in celda_adj for no_es in COMPETIDORES_PROHIBIDOS):
-        return False
-
-    # Comprobar razón social
-    if re.search(r"RED\s*SALUD", celda_adj):
-        return True
-
-    # Comprobar RUT
-    rut_limpio = re.sub(r"[^0-9]", "", celda_adj)
-    for r in RUTS_REDSALUD:
-        if r in rut_limpio:
-            return True
-
-    return False
+    return tiene_redsalud
 
 def extraer_id_licitacion_estricto(fila_raw, idx_codigo):
-    patron = r"\b\d{3,8}-\d{1,5}-[A-Za-z]+[0-9]*\b"
+    # Patrón estricto de Mercado Público: excluye RFI, RFP, CM
+    patron = r"\b\d{3,8}-\d{1,5}-(?:LP|LE|LR|LQ|LS|L1|E2|CO|B2)\d{0,2}\b"
     col_cod = fila_raw[idx_codigo].strip() if len(fila_raw) > idx_codigo else ""
-    m = re.search(patron, col_cod)
+    m = re.search(patron, col_cod, re.IGNORECASE)
     if m:
         return m.group(0).upper()
     for c in fila_raw:
-        m = re.search(patron, str(c).strip())
+        m = re.search(patron, str(c).strip(), re.IGNORECASE)
         if m:
             return m.group(0).upper()
     return ""
@@ -318,30 +329,36 @@ def sincronizar_contratos():
             estado = fila[idx["estado"]].strip()
             monto = fila[idx["monto"]].strip()
 
+            # FILTRO 1: Código oficial de Mercado Público (descarta PROCESO-XXX y consultas RFI)
             codigo = extraer_id_licitacion_estricto(fila, idx["codigo"])
             if not codigo:
                 continue
 
+            # FILTRO 2: Solo licitaciones
             if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                 continue
             es_lic = (
                 "LICIT" in tipo_proc.upper()
-                or any(sig in codigo.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2"])
+                or any(sig in codigo.upper() for sig in ["-LE", "-LP", "-LR", "-L1", "-E2", "-CO", "-B2", "-LQ", "-LS"])
             )
             if not es_lic:
                 continue
 
+            # FILTRO 3: Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
-            # Verificación estricta de adjudicatario RedSalud
-            if not es_adjudicatario_redsalud_estricto(fila, idx["adjudicatario"]):
+            # FILTRO 4: VERIFICACIÓN INEQUÍVOCA DE REDSALUD COMO GANADOR
+            # Si el adjudicatario es Rubikal, Atrys o cualquier competidor, SE DESCARTA
+            if not es_adjudicatario_redsalud_estricto(fila, idx["adjudicatario"], idx["columnas_proveedor"]):
                 continue
 
+            # FILTRO 5: Desde Septiembre de 2026 en adelante
             if not es_septiembre_2026_en_adelante(fecha_pub, fecha_cie, fila):
                 continue
 
+            # FILTRO 6: No duplicar con los IDs históricos de las filas 1 a 371
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -381,6 +398,7 @@ def sincronizar_contratos():
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
+    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
 
