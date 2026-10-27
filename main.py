@@ -18,6 +18,13 @@ SPREADSHEET_ID_CONTRATOS = (
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 FILA_INICIO_OBJETIVO = 372
 
+# CONFIGURACIÓN DE FILTROS:
+# True: Excluye Compras Ágiles (COT) y deja solo Licitaciones (LE, LP, LR, SE, etc.)
+SOLO_LICITACIONES = True
+
+# True: Acepta adjudicaciones desde Septiembre 2025 a la fecha y procesos con código año 26
+DESDE_SEPTIEMBRE_A_LA_FECHA = True
+
 # RUTs oficiales de RedSalud (solo dígitos)
 RUTS_REDSALUD_EXACTOS = {
     "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud / Casa Matriz
@@ -33,7 +40,7 @@ RUTS_REDSALUD_EXACTOS = {
     "76326330",  # Sociedad Médica RedSalud
 }
 
-# Licitaciones ajenas explícitas confirmadas
+# Licitaciones descartadas explícitas de competidores
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1464-65-LE26",   # Rubikal
     "3283-9-LE26",    # Atrys Health
@@ -184,17 +191,23 @@ def parsear_fechas_fila(fila):
                 fechas.append((year, month, day))
     return fechas
 
-def es_septiembre_2026_en_adelante(fila_raw):
+def cumple_filtro_periodo(fila_raw, codigo):
+    # Proceso con sufijo de año 26 (ej: 1077499-65-SE26)
+    if re.search(r"-[A-Za-z]+26\b", str(codigo)):
+        return True
+
     fechas = parsear_fechas_fila(fila_raw)
     for y, m, d in fechas:
-        if y == 2026 and m >= 9:
-            return True
-        if y > 2026:
-            return True
+        if DESDE_SEPTIEMBRE_A_LA_FECHA:
+            if (y == 2025 and m >= 9) or (y >= 2026):
+                return True
+        else:
+            if (y == 2026 and m >= 9) or (y > 2026):
+                return True
 
     for c in fila_raw:
         s = str(c).strip().lower()
-        if re.search(r"(septiembre|octubre|noviembre|diciembre).*2026|2026.*(septiembre|octubre|noviembre|diciembre)", s):
+        if re.search(r"(septiembre|octubre|noviembre|diciembre).*(2025|2026)", s):
             return True
 
     return False
@@ -270,7 +283,7 @@ def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
     return False
 
 def sincronizar_contratos():
-    print(f"Iniciando calibración estricta desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
+    print(f"Iniciando calibración definitiva desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado como: {sa_email}", flush=True)
@@ -322,49 +335,6 @@ def sincronizar_contratos():
 
     print(f"Mapeo verificado: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
 
-    # Diagnóstico detallado con impresión de fechas detectadas
-    filas_redsalud_licitacion = []
-    filas_redsalud_compra_agil = []
-
-    for r in valores_maestra[1:]:
-        es_rs = False
-        if idx_adjudicatario is not None and idx_adjudicatario < len(r):
-            adj_txt = str(r[idx_adjudicatario]).upper()
-            if "REDSALUD" in adj_txt or "RED SALUD" in adj_txt or any(r_rs in re.sub(r"[^0-9]", "", adj_txt) for r_rs in RUTS_REDSALUD_EXACTOS):
-                es_rs = True
-
-        if es_rs:
-            cod = str(r[idx_codigo]).strip() if idx_codigo < len(r) else ""
-            tipo = str(r[idx_tipo]).strip() if idx_tipo < len(r) else ""
-            estado = str(r[idx_estado]).strip() if idx_estado < len(r) else ""
-            fechas_detectadas = parsear_fechas_fila(r)
-            es_sept = es_septiembre_2026_en_adelante(r)
-
-            info = {
-                "codigo": cod,
-                "tipo": tipo,
-                "estado": estado,
-                "sept_2026": es_sept,
-                "fechas": fechas_detectadas,
-                "comprador": str(r[idx_comprador]).strip() if idx_comprador < len(r) else "",
-                "nombre": str(r[idx_nombre]).strip() if idx_nombre < len(r) else ""
-            }
-
-            if "AGIL" in tipo.upper() or "COT" in cod.upper():
-                filas_redsalud_compra_agil.append(info)
-            else:
-                filas_redsalud_licitacion.append(info)
-
-    print(f"=== ANÁLISIS EXHAUSTIVO REDSALUD EN BASE MADRE ===", flush=True)
-    print(f"Total Compras Ágiles RedSalud: {len(filas_redsalud_compra_agil)}", flush=True)
-    print(f"Total Licitaciones RedSalud: {len(filas_redsalud_licitacion)}", flush=True)
-
-    if filas_redsalud_licitacion:
-        print("Licitaciones de RedSalud encontradas y sus fechas detectadas:", flush=True)
-        for f_lic in filas_redsalud_licitacion:
-            print(f"  -> Codigo: {f_lic['codigo']} | Estado: {f_lic['estado']} | Fechas: {f_lic['fechas']} | Sept2026+: {f_lic['sept_2026']} | Cliente: {f_lic['comprador']}", flush=True)
-
-    # Conectar a archivo de Contratos (Destino)
     ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
@@ -396,7 +366,6 @@ def sincronizar_contratos():
         if len(row) > 1 and row[1].strip():
             ids_historicos.add(row[1].strip().upper())
 
-    # Filtrar licitaciones verdaderas
     filas_nuevas = []
     ids_nuevos = set()
 
@@ -410,33 +379,27 @@ def sincronizar_contratos():
             estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
             monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
 
-            # Extraer código chileno oficial
             codigo = extraer_id_licitacion(fila, idx_codigo)
             if not codigo:
                 continue
 
-            # Bloqueo total de licitaciones ajenas
             if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
-            # Excluir compras ágiles y cotizaciones
-            if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
-                continue
+            if SOLO_LICITACIONES:
+                if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
+                    continue
 
-            # Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
-            # Verificación de adjudicatario RedSalud
             if not verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
                 continue
 
-            # Periodo Septiembre 2026 en adelante con parser matemático
-            if not es_septiembre_2026_en_adelante(fila):
+            if not cumple_filtro_periodo(fila, codigo):
                 continue
 
-            # Evitar duplicar
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -470,12 +433,11 @@ def sincronizar_contratos():
             ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud (Sept 2026+): {tot_nuevas}", flush=True)
+    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud encontradas: {tot_nuevas}", flush=True)
 
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
-    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
         print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
