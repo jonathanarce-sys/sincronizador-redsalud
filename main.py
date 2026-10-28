@@ -22,7 +22,7 @@ FILA_INICIO_OBJETIVO = 372
 SOLO_LICITACIONES = True
 DESDE_SEPTIEMBRE_A_LA_FECHA = True
 
-# RUTs oficiales de RedSalud (solo dígitos)
+# RUTs oficiales de RedSalud y sus razones sociales oficiales en Mercado Público
 RUTS_REDSALUD_EXACTOS = {
     "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud / Casa Matriz
     "76458120",  # RedSalud Dental SpA
@@ -38,7 +38,7 @@ RUTS_REDSALUD_EXACTOS = {
     "99568700",  # Centro de Especialidades Médicas Valparaíso / Inversalud Valparaíso SpA
 }
 
-# Licitaciones descartadas explícitas de competidores
+# Licitaciones descartadas explícitas de competidores y no RedSalud
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1464-65-LE26",    # Rubikal
     "3283-9-LE26",     # Atrys Health
@@ -47,6 +47,9 @@ LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "2378-118-LE26",   # Veterinario control gatos
     "1063538-37-LR26", # Grupo Bios S.A. (No RedSalud)
     "899-58-LE25",     # No RedSalud
+    "899-27-LE26",     # FALP - Fundación Arturo López Pérez (RUT 70.377.400-8)
+    "1374899-22-LR26", # Servicios Médicos Barlaro Ltda (RUT 78.403.510-7)
+    "1017312-1-LP26",  # No RedSalud
     "1374899-42-LP26",
     "1656-23-LP26",
     "1057490-75-LE26",
@@ -66,10 +69,11 @@ LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1374899-24-LR26"
 }
 
-# Lista de palabras clave de competidores que anulan de inmediato la fila
+# Palabras clave de competidores que anulan de inmediato la fila
 COMPETIDORES_BLOQUEADOS = [
     "RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC",
-    "FRESENIUS", "MEDTRONIC", "BIOS", "GRUPO BIOS", "SIEMENS", "INDISA"
+    "FRESENIUS", "MEDTRONIC", "BIOS", "GRUPO BIOS", "SIEMENS", "INDISA",
+    "ARTURO LOPEZ PEREZ", "LOPEZ PEREZ", "FALP", "BARLARO"
 ]
 
 def obtener_cliente_gspread():
@@ -154,12 +158,15 @@ def determinar_filial(cat, reg, comp, adj="", codigo=""):
     cat_u = str(cat).upper()
     cod_u = str(codigo).upper()
 
-    # Si el adjudicatario es de Valparaíso o la licitación es 899-33-LE26
+    # PRIORIDAD 1: Si el adjudicatario es de Valparaíso o la licitación es 899-33-LE26
     if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u or "ESPECIALIDADES MEDICAS VALPARAISO" in adj_u:
         return "Centro de Especialidades Médicas Valparaíso", "99.568.700-3"
 
+    # PRIORIDAD 2: Dental
     if "DENTAL" in cat_u:
         return "RedSalud Dental SpA", "76.458.120-3"
+
+    # PRIORIDAD 3: Regionales según adjudicatario o comprador
     if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u or "VALPARAISO" in adj_u:
         return "Clínica RedSalud Valparaíso", "96.543.000-6"
     if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u or "RANCAGUA" in adj_u:
@@ -176,12 +183,15 @@ def determinar_filial(cat, reg, comp, adj="", codigo=""):
         return "Centros Médicos RedSalud Iquique", "96.856.000-2"
     if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u or "ANTOFAGASTA" in adj_u:
         return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
+
+    # PRIORIDAD 4: Región Metropolitana
     if "METROPOLITANA" in reg_u or "SANTIAGO" in reg_u:
         if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]) or "PROVIDENCIA" in adj_u:
             return "Clínica RedSalud Providencia", "96.536.000-8"
         if any(x in comp_u for x in ["VITACURA", "LO BARNECHEA"]) or "VITACURA" in adj_u:
             return "Clínica RedSalud Vitacura", "96.536.000-8"
         return "Clínica RedSalud Santiago", "96.856.000-2"
+
     return "RedSalud S.A.", "96.856.000-2"
 
 def parsear_fechas_fila(fila):
@@ -204,7 +214,7 @@ def parsear_fechas_fila(fila):
     return fechas
 
 def cumple_filtro_periodo(fila_raw, codigo):
-    # Proceso con sufijo de año 26 (ej: 899-33-LE26, 1077499-65-SE26)
+    # Procesos con sufijo de año 26 (ej: 899-33-LE26, 1077499-65-SE26)
     if re.search(r"-[A-Za-z]+26\b", str(codigo)):
         return True
 
@@ -251,7 +261,8 @@ def extraer_prestacion(fila_raw, idx_nombre):
         "REDSALUD", "RED SALUD", "ACEPTADA", "EN PROCESO", "EVALUACIÓN",
         "EVALUACION", "ADJUDICADA", "PUBLICADA", "DESIERTA", "REVOCADA",
         "CANCELADA", "ENVIADA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L.",
-        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL", "ATRYS", "BIOS"
+        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL",
+        "ATRYS", "BIOS", "ARTURO LOPEZ PEREZ", "BARLARO"
     ]
     col_nom = fila_raw[idx_nombre].strip() if idx_nombre is not None and idx_nombre < len(fila_raw) else ""
     if col_nom and len(col_nom) >= 5 and not any(p in col_nom.upper() for p in palabras_prohibidas):
@@ -269,10 +280,28 @@ def extraer_prestacion(fila_raw, idx_nombre):
     return "Prestación Médica Asistencial"
 
 def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
-    # 1. Comprobar celda específica de adjudicatario
+    # 1. Comprobar si en la fila aparece algún competidor o proveedor ajeno conocido
+    fila_str = " ".join(str(c) for c in fila).upper()
+    if any(bad in fila_str for bad in COMPETIDORES_BLOQUEADOS):
+        return False
+
+    # 2. Extraer RUTs presentes en las columnas de adjudicación (columnas 10 a 20)
+    ruts_detectados = []
+    for idx_col in range(10, len(fila)):
+        val = str(fila[idx_col]).strip()
+        ruts_en_celda = re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", val)
+        for r in ruts_en_celda:
+            r_num = re.sub(r"[^0-9]", "", r)
+            ruts_detectados.append(r_num)
+
+    if ruts_detectados:
+        es_rs_rut = any(any(rs in r for rs in RUTS_REDSALUD_EXACTOS) for r in ruts_detectados)
+        if not es_rs_rut:
+            return False
+
+    # 3. Comprobar la celda específica de adjudicatario
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda = str(fila[idx_adjudicatario]).strip().upper()
-        # Descartar si el adjudicatario contiene palabras de competidores conocidos
         if any(bad in celda for bad in COMPETIDORES_BLOQUEADOS):
             return False
         if re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD|ESPECIALIDADES\s*MEDICAS\s*VALPARAISO", celda):
@@ -281,7 +310,7 @@ def verificar_adjudicatario_redsalud(fila, idx_adjudicatario, cabecera):
         if any(r_rs in rut_nums for r_rs in RUTS_REDSALUD_EXACTOS):
             return True
 
-    # 2. Revisar otras columnas de adjudicación en la cabecera
+    # 4. Revisar otras columnas de adjudicación en la cabecera
     for i_c, h in enumerate(cabecera):
         h_u = str(h).upper()
         if ("ADJUDICATARIO" in h_u or "GANADOR" in h_u) and "CLIENTE" not in h_u and "CATEGOR" not in h_u:
