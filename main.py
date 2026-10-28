@@ -8,6 +8,9 @@ import json
 import re
 from datetime import datetime, timedelta
 
+# ==========================================
+# 1. IDENTIFICADORES Y CONFIGURACION
+# ==========================================
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
@@ -20,8 +23,15 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-LICITALAB_API_URL = os.environ.get("LICITALAB_API_URL", "").strip()
+# URL Oficial LicitaLAB API BI
+LICITALAB_API_URL = os.environ.get(
+    "LICITALAB_API_URL", 
+    "https://biapi.licitalab.cl/bi/v2/opportunities"
+).strip()
 
+# ==========================================
+# 2. LISTA BLANCA OFICIAL RUTS REDSALUD
+# ==========================================
 RUTS_REDSALUD_WHITELIST = {
     "96856000", "76458120", "96536000", "96543000", "99568700",
     "96542000", "96537000", "96541000", "96524000", "96527000",
@@ -40,6 +50,9 @@ LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "548874-75-LP26", "1374899-24-LR26"
 }
 
+# ==========================================
+# 3. AUTENTICACION GOOGLE
+# ==========================================
 def obtener_cliente_gspread():
     posibles = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
@@ -56,7 +69,7 @@ def obtener_cliente_gspread():
                 val = ev.strip()
                 break
     if not val:
-        raise ValueError("Sin credenciales GCP")
+        raise ValueError("Sin credenciales GCP en el entorno.")
     try:
         pad = len(val) % 4
         if pad:
@@ -73,10 +86,13 @@ def obtener_cliente_gspread():
     client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
     return client, sa_email
 
+# ==========================================
+# 4. FASE 1: DESCARGA DESDE LICITALAB BI API
+# ==========================================
 def actualizar_base_madre_licitalab(sheet_maestra):
-    print("Fase 1: Conectando a LicitaLAB", flush=True)
+    print("--- FASE 1: Conectando a LicitaLAB API BI ---", flush=True)
     if not LICITALAB_TOKEN:
-        print("Sin LICITALAB_TOKEN", flush=True)
+        print("AVISO: No se detecto 'LICITALAB_TOKEN' en los Secrets de GitHub.", flush=True)
         return
 
     datos_actuales = sheet_maestra.get_all_values()
@@ -85,89 +101,81 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         if len(fila) > 1 and fila[1].strip():
             codigos_existentes.add(fila[1].strip().upper())
             
-    print(f"Base Madre: {len(codigos_existentes)} unicas", flush=True)
+    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones unicas.", flush=True)
 
     headers = {
-        "Authorization": f"Bearer {LICITALAB_TOKEN}",
+        "x-api-key": LICITALAB_TOKEN,
         "Accept": "application/json",
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    endpoints = []
-    if LICITALAB_API_URL:
-        endpoints.append(LICITALAB_API_URL)
-    
-    endpoints.extend([
-        "https://api.licitalab.cl/api/v1/licitaciones",
-        "https://api.licitalab.cl/api/v1/licitaciones/workspace",
-        "https://api.licitalab.cl/api/v1/tenders",
-        "https://api.licitalab.cl/api/v1/busquedas-guardadas",
-        "https://api.licitalab.cl/api/v1/saved-searches",
-        "https://api.licitalab.cl/api/v1/registros",
-        "https://api.licitalab.cl/api/v1/compra-agil",
-        "https://api.licitalab.cl/api/v1/procesos",
-        "https://api.licitalab.cl/api/v1"
-    ])
-
+    url = LICITALAB_API_URL
     items_licitalab = []
-    exito = False
 
-    for url in endpoints:
-        try:
-            print(f"Probando: {url}", flush=True)
-            resp = requests.get(url, headers=headers, timeout=20)
-            print(f"HTTP: {resp.status_code}", flush=True)
+    try:
+        print(f"Consultando endpoint oficial: {url}", flush=True)
+        resp = requests.get(url, headers=headers, timeout=40)
+        print(f"Respuesta LicitaLAB: HTTP {resp.status_code}", flush=True)
 
-            if resp.status_code in (401, 403):
-                headers["Authorization"] = f"Token {LICITALAB_TOKEN}"
-                headers["X-API-KEY"] = LICITALAB_TOKEN
-                resp = requests.get(url, headers=headers, timeout=20)
-                print(f"Reintento HTTP: {resp.status_code}", flush=True)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                items_licitalab = data
+            elif isinstance(data, dict):
+                items_licitalab = (
+                    data.get("data") or 
+                    data.get("opportunities") or 
+                    data.get("items") or 
+                    data.get("results") or 
+                    []
+                )
+            print(f"Exito: Se recuperaron {len(items_licitalab)} oportunidades desde LicitaLAB.", flush=True)
+        else:
+            print(f"Aviso LicitaLAB HTTP {resp.status_code}: {resp.text[:150]}", flush=True)
+    except Exception as e:
+        print(f"Error al conectar con LicitaLAB BI API: {repr(e)}", flush=True)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list):
-                    items_licitalab = data
-                elif isinstance(data, dict):
-                    items_licitalab = (
-                        data.get("data") or 
-                        data.get("licitaciones") or 
-                        data.get("tenders") or 
-                        data.get("results") or 
-                        data.get("items") or 
-                        []
-                    )
-                print(f"Exito en endpoint {url}: {len(items_licitalab)} registros", flush=True)
-                exito = True
-                break
-            else:
-                print(f"Detalle: {resp.text[:90]}", flush=True)
-        except Exception as e:
-            print(f"Error {url}: {repr(e)}", flush=True)
-
-    if not exito or not items_licitalab:
-        print("Fase 1: Sin datos nuevos de LicitaLAB", flush=True)
+    if not items_licitalab:
+        print("Fase 1 completada: Sin nuevas oportunidades recuperadas de LicitaLAB.", flush=True)
         return
 
     filas_nuevas = []
     for item in items_licitalab:
         if not isinstance(item, dict):
             continue
-        cod = str(item.get("codigo") or item.get("code") or item.get("codigo_externo") or "").strip().upper()
+        cod = str(
+            item.get("code") or 
+            item.get("codigo") or 
+            item.get("external_code") or 
+            item.get("codigo_externo") or 
+            ""
+        ).strip().upper()
         if not cod or cod in codigos_existentes:
             continue
 
         item_id = str(item.get("id") or "")
-        nombre = str(item.get("nombre") or item.get("title") or item.get("name") or "").strip()
-        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or "Salud").strip()
-        fecha_pub = str(item.get("fecha_publicacion") or item.get("published_at") or item.get("created_at") or "")[:10]
-        fecha_cie = str(item.get("fecha_cierre") or item.get("closing_at") or "")[:10]
+        nombre = str(item.get("name") or item.get("nombre") or item.get("title") or "").strip()
+        categoria = str(
+            item.get("workspace_tag") or 
+            item.get("category") or 
+            item.get("categoria") or 
+            item.get("linea_servicio") or 
+            "Salud"
+        ).strip()
+        fecha_pub = str(item.get("published_at") or item.get("fecha_publicacion") or item.get("created_at") or "")[:10]
+        fecha_cie = str(item.get("closing_at") or item.get("fecha_cierre") or "")[:10]
         region = str(item.get("region") or "").strip()
-        tipo = str(item.get("tipo") or item.get("type") or "Licitacion").strip()
-        comprador = str(item.get("organismo") or item.get("buyer") or item.get("institucion") or "").strip()
-        estado = str(item.get("estado") or item.get("status") or "Publicada").strip()
-        adj = str(item.get("adjudicatario") or item.get("winner") or "").strip()
-        monto = str(item.get("monto") or item.get("amount") or "").strip()
+        tipo = str(item.get("type") or item.get("tipo") or "Licitacion").strip()
+        
+        buyer = item.get("buyer") or item.get("organismo") or item.get("institucion") or ""
+        comprador = buyer.get("name", "") if isinstance(buyer, dict) else str(buyer).strip()
+        
+        estado = str(item.get("status") or item.get("estado") or "Publicada").strip()
+        
+        award = item.get("award") or item.get("adjudicatario") or item.get("winner") or ""
+        adj = award.get("name", "") if isinstance(award, dict) else str(award).strip()
+        
+        monto = str(item.get("amount") or item.get("monto") or item.get("estimated_amount") or "").strip()
 
         fila_madre = [item_id, cod, nombre, categoria, fecha_pub, fecha_cie, region, tipo, comprador, "", estado, adj, monto]
         filas_nuevas.append(fila_madre)
@@ -175,10 +183,13 @@ def actualizar_base_madre_licitalab(sheet_maestra):
 
     if filas_nuevas:
         sheet_maestra.append_rows(filas_nuevas)
-        print(f"Fase 1: {len(filas_nuevas)} filas agregadas a Base Madre", flush=True)
+        print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones nuevas en la Base Madre.", flush=True)
     else:
-        print("Fase 1: Base Madre al dia", flush=True)
+        print("Base Madre al dia: Todas las oportunidades de LicitaLAB ya estaban registradas.", flush=True)
 
+# ==========================================
+# 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
+# ==========================================
 def calcular_dv_chileno(num):
     mults = [2, 3, 4, 5, 6, 7]
     s = sum(int(d) * mults[i % 6] for i, d in enumerate(str(num)[::-1]))
@@ -365,27 +376,33 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
 
     return False
 
+# ==========================================
+# 6. ORQUESTADOR COMPLETO
+# ==========================================
 def sincronizar_todo():
-    print("Iniciando sincronizacion", flush=True)
+    print("=== INICIANDO SINCRONIZADOR INTEGRAL LICITALAB -> REDSALUD ===", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
-        print(f"Sheets conectado: {sa_email}", flush=True)
+        print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
     except Exception as e:
-        print(f"Error conexion: {repr(e)}", flush=True)
+        print(f"Error de conexión: {repr(e)}", flush=True)
         return
 
+    # 1. Base Madre
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
     except Exception as e:
-        print(f"Error Base Madre: {repr(e)}", flush=True)
+        print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
         return
 
+    # Fase 1: Descargar desde LicitaLAB hacia Base Madre
     actualizar_base_madre_licitalab(sheet_maestra)
 
-    print("Fase 2: Consolidando a RedSalud", flush=True)
+    # Fase 2: Filtrar Base Madre hacia 'consolidado'
+    print("\n--- FASE 2: Sincronizando hacia consolidado ---", flush=True)
     valores_maestra = sheet_maestra.get_all_values()
-    print(f"Filas Base Madre: {len(valores_maestra)}", flush=True)
+    print(f"Total filas en Base Madre: {len(valores_maestra)}", flush=True)
 
     cabecera = valores_maestra[0] if valores_maestra else []
     idx_codigo = 1
@@ -431,11 +448,11 @@ def sincronizar_todo():
             ws_contratos = ws
             break
     if not ws_contratos:
-        print(f"Error: Hoja {NOMBRE_HOJA_CONTRATOS} no existe", flush=True)
+        print(f"Error: Hoja '{NOMBRE_HOJA_CONTRATOS}' no encontrada.", flush=True)
         return
 
     datos_existentes = ws_contratos.get_all_values()
-    print(f"Filas actuales en consolidado: {len(datos_existentes)}", flush=True)
+    print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
 
     ids_historicos = set()
     limite_historico = min(FILA_INICIO_OBJETIVO - 1, len(datos_existentes))
@@ -493,13 +510,13 @@ def sincronizar_todo():
             ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones RedSalud: {tot_nuevas}", flush=True)
+    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud: {tot_nuevas}", flush=True)
 
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
     if filas_totales_actuales >= fila_inicio:
-        print(f"Limpiando rango desde fila {fila_inicio}", flush=True)
+        print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
 
     if tot_nuevas > 0:
@@ -515,9 +532,9 @@ def sincronizar_todo():
                 range_name=f"A{r_ini}:S{r_fin}",
                 values=filas_nuevas[s:e]
             )
-        print(f"Exito: {tot_nuevas} licitaciones escritas desde fila {fila_inicio}", flush=True)
+        print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
     else:
-        print("Consolidado purgado sin filas ajenas", flush=True)
+        print("RESULTADO: Ninguna licitación ajena fue insertada. Rango consolidado purgado.", flush=True)
 
 if __name__ == "__main__":
     sincronizar_todo()
