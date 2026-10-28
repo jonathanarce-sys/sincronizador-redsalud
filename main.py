@@ -1,34 +1,29 @@
 import os
 import requests
-import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import base64
 import json
 import re
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-SPREADSHEET_ID_MAESTRA = (
-    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-).strip()
-SPREADSHEET_ID_CONTRATOS = (
-    "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE"
-).strip()
+# ==========================================
+# 1. IDENTIFICADORES DE HOJAS
+# ==========================================
+SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
+SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 FILA_INICIO_OBJETIVO = 372
 
-# CONFIGURACIÓN DE FILTROS:
-SOLO_LICITACIONES = True
-DESDE_SEPTIEMBRE_A_LA_FECHA = True
-
-# RUTs oficiales de RedSalud, sus clínicas filiales y centros médicos (lista blanca estricta)
+# ==========================================
+# 2. LISTA BLANCA OFICIAL RUTS REDSALUD
+# ==========================================
 RUTS_REDSALUD_WHITELIST = {
     "96856000",  # RedSalud S.A. / Servicios Clínicos RedSalud / Casa Matriz (96.856.000-2)
     "76458120",  # RedSalud Dental SpA (76.458.120-3)
     "96536000",  # Clínica RedSalud Providencia / Vitacura / Santiago (96.536.000-8)
     "96543000",  # Clínica RedSalud Valparaíso (96.543.000-6)
-    "99568700",  # Centro de Especialidades Médicas Valparaíso / Inversalud Valparaíso SpA (99.568.700-3)
+    "99568700",  # Centro de Especialidades Médicas Valparaíso / Inversalud (99.568.700-3)
     "96542000",  # Clínica RedSalud Rancagua (96.542.000-0)
     "96537000",  # Clínica RedSalud Mayor Temuco (96.537.000-3)
     "96541000",  # Clínica RedSalud Magallanes (96.541.000-5)
@@ -43,40 +38,20 @@ RUTS_REDSALUD_WHITELIST = {
     "96774580",  # Inversiones RedSalud (96.774.580-4)
 }
 
-# Licitaciones descartadas explícitas de competidores y no RedSalud
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
-    "1464-65-LE26",    # Rubikal
-    "3283-9-LE26",     # Atrys Health
-    "359-115-LE26",    # Ingefisic
-    "2770-153-LE26",   # No RedSalud
-    "2378-118-LE26",   # Veterinario control gatos
-    "1063538-37-LR26", # Grupo Bios S.A.
-    "899-58-LE25",     # No RedSalud
-    "899-27-LE26",     # FALP - Fundación Arturo López Pérez (70.377.400-8)
-    "1374899-22-LR26", # Servicios Médicos Barlaro Ltda (78.403.510-7)
-    "1017312-1-LP26",  # No RedSalud
-    "1057540-23-LP26", # Sociedad de Telemedicina APSORAD SPA (76.541.298-6)
-    "1057508-16-LE26", # Personas naturales enfermería (Betanzo, Reyes, etc.)
-    "1077499-65-SE26", # Código SE no es licitación de Mercado Público
-    "1374899-42-LP26",
-    "1656-23-LP26",
-    "1057490-75-LE26",
-    "612-43-LE26",
-    "1422825-57-RFI26",
-    "2667-79-LP26",
-    "2667-73-LE26",
-    "2107-147-LE26",
-    "1175-74-LP26",
-    "757-80-LE26",
-    "899-38-LP26",
-    "899-37-LE26",
-    "857-5-LE26",
-    "1274285-46-LE26",
-    "5512-15-LP26",
-    "548874-75-LP26",
-    "1374899-24-LR26"
+    "1464-65-LE26", "3283-9-LE26", "359-115-LE26", "2770-153-LE26",
+    "2378-118-LE26", "1063538-37-LR26", "899-58-LE25", "899-27-LE26",
+    "1374899-22-LR26", "1017312-1-LP26", "1057540-23-LP26", "1057508-16-LE26",
+    "1077499-65-SE26", "1374899-42-LP26", "1656-23-LP26", "1057490-75-LE26",
+    "612-43-LE26", "1422825-57-RFI26", "2667-79-LP26", "2667-73-LE26",
+    "2107-147-LE26", "1175-74-LP26", "757-80-LE26", "899-38-LP26",
+    "899-37-LE26", "857-5-LE26", "1274285-46-LE26", "5512-15-LP26",
+    "548874-75-LP26", "1374899-24-LR26"
 }
 
+# ==========================================
+# 3. AUTENTICACIÓN GOOGLE
+# ==========================================
 def obtener_cliente_gspread():
     posibles = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
@@ -89,12 +64,11 @@ def obtener_cliente_gspread():
             break
     if not val:
         for ek, ev in os.environ.items():
-            cond_k = any(x in ek.upper() for x in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"])
-            if cond_k and ev.strip():
+            if any(x in ek.upper() for x in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"]) and ev.strip():
                 val = ev.strip()
                 break
     if not val:
-        raise ValueError("Sin credenciales GCP.")
+        raise ValueError("Sin credenciales GCP en el entorno.")
     try:
         pad = len(val) % 4
         if pad:
@@ -111,6 +85,79 @@ def obtener_cliente_gspread():
     client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
     return client, sa_email
 
+# ==========================================
+# 4. FASE 1: DESCARGA AUTOMÁTICA A BASE MADRE
+# ==========================================
+def actualizar_base_madre(sheet_maestra):
+    print("--- FASE 1: Consultando novedades para la Base Maestra ---", flush=True)
+    
+    # Obtenemos códigos actuales en la Base Madre para no duplicar
+    datos_actuales = sheet_maestra.get_all_values()
+    codigos_existentes = set()
+    for fila in datos_actuales[1:]:
+        if len(fila) > 1 and fila[1].strip():
+            codigos_existentes.add(fila[1].strip().upper())
+            
+    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones únicas.", flush=True)
+
+    # Consultamos los últimos 3 días en la API pública de Mercado Público
+    filas_a_insertar = []
+    fechas_a_revisar = [
+        datetime.now().strftime("%d%m%Y"),
+        (datetime.now() - timedelta(days=1)).strftime("%d%m%Y"),
+        (datetime.now() - timedelta(days=2)).strftime("%d%m%Y"),
+    ]
+
+    # Ticket público estándar de consulta
+    ticket_publico = "F8537A18-6766-4DEF-9E59-426B4F609C66"
+
+    for f_str in fechas_a_revisar:
+        url = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?fecha={f_str}&ticket={ticket_publico}"
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                lista = data.get("Listado", [])
+                for item in lista:
+                    cod = item.get("CodigoExterno", "").strip().upper()
+                    # Solo nos interesan licitaciones que no tengamos y que sean compras públicas formales
+                    if cod and cod not in codigos_existentes and not cod.endswith("-COT26"):
+                        nombre = item.get("Nombre", "").strip()
+                        estado = item.get("CodigoEstado", "Publicada")
+                        fecha_cie = item.get("FechaCierre", "")[:10]
+                        fecha_pub = f"{f_str[4:]}-{f_str[2:4]}-{f_str[:2]}"  # YYYY-MM-DD
+                        
+                        # Armar fila compatible con las columnas de tu Base Madre
+                        nueva_fila = [
+                            "",                # Col A: ID
+                            cod,               # Col B: Código Proceso
+                            nombre,            # Col C: Nombre Proceso
+                            "Salud",           # Col D: Categoría
+                            fecha_pub,         # Col E: Fecha Publicación
+                            fecha_cie,         # Col F: Fecha Cierre
+                            "",                # Col G: Región
+                            "Licitación",      # Col H: Tipo Proceso
+                            item.get("Comprador", {}).get("NombreOrganismo", ""), # Col I: Comprador
+                            "",                # Col J: Región Territorio
+                            estado,            # Col K: Estado
+                            "",                # Col L: Adjudicatario
+                            ""                 # Col M: Monto
+                        ]
+                        filas_a_insertar.append(nueva_fila)
+                        codigos_existentes.add(cod)
+        except Exception as e:
+            print(f"Aviso consultando fecha {f_str}: {repr(e)}", flush=True)
+
+    if filas_a_insertar:
+        # Añadir al final de la Base Madre en bloques
+        sheet_maestra.append_rows(filas_a_insertar)
+        print(f"Éxito Fase 1: Se agregaron {len(filas_a_insertar)} licitaciones nuevas a la Base Madre.", flush=True)
+    else:
+        print("Fase 1 completada: La Base Madre ya se encuentra al día con los últimos registros disponibles.", flush=True)
+
+# ==========================================
+# 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
+# ==========================================
 def calcular_dv_chileno(num):
     mults = [2, 3, 4, 5, 6, 7]
     s = sum(int(d) * mults[i % 6] for i, d in enumerate(str(num)[::-1]))
@@ -159,33 +206,30 @@ def determinar_filial(cat, reg, comp, adj="", codigo=""):
     cat_u = str(cat).upper()
     cod_u = str(codigo).upper()
 
-    # PRIORIDAD 1: Si el adjudicatario es de Valparaíso o la licitación es 899-33-LE26
-    if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u or "ESPECIALIDADES MEDICAS VALPARAISO" in adj_u:
+    # Si es adjudicado a Valparaíso o el código es 899-33-LE26
+    if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u:
         return "Centro de Especialidades Médicas Valparaíso", "99.568.700-3"
 
-    # PRIORIDAD 2: Dental
     if "DENTAL" in cat_u:
         return "RedSalud Dental SpA", "76.458.120-3"
 
-    # PRIORIDAD 3: Regionales según adjudicatario o comprador
-    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u or "VALPARAISO" in adj_u:
+    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u:
         return "Clínica RedSalud Valparaíso", "96.543.000-6"
-    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u or "RANCAGUA" in adj_u:
+    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u:
         return "Clínica RedSalud Rancagua", "96.542.000-0"
-    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u or "TEMUCO" in adj_u:
+    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u:
         return "Clínica RedSalud Mayor Temuco", "96.537.000-3"
-    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u or "MAGALLANES" in adj_u:
+    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u:
         return "Clínica RedSalud Magallanes", "96.541.000-5"
-    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u or "BIOBIO" in adj_u:
+    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u:
         return "Centros Médicos RedSalud Biobío", "96.856.000-2"
-    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u or "MAULE" in adj_u:
+    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u:
         return "Centros Médicos RedSalud Maule", "96.856.000-2"
-    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u or "IQUIQUE" in adj_u:
+    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u:
         return "Centros Médicos RedSalud Iquique", "96.856.000-2"
-    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u or "ANTOFAGASTA" in adj_u:
+    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u:
         return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
 
-    # PRIORIDAD 4: Región Metropolitana
     if "METROPOLITANA" in reg_u or "SANTIAGO" in reg_u:
         if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]) or "PROVIDENCIA" in adj_u:
             return "Clínica RedSalud Providencia", "96.536.000-8"
@@ -215,30 +259,16 @@ def parsear_fechas_fila(fila):
     return fechas
 
 def cumple_filtro_periodo(fila_raw, codigo):
-    # Procesos con sufijo de año 26 (ej: 899-33-LE26)
     if re.search(r"-[A-Za-z]+26\b", str(codigo)):
         return True
-
     fechas = parsear_fechas_fila(fila_raw)
     for y, m, d in fechas:
-        if DESDE_SEPTIEMBRE_A_LA_FECHA:
-            if (y == 2025 and m >= 9) or (y >= 2026):
-                return True
-        else:
-            if (y == 2026 and m >= 9) or (y > 2026):
-                return True
-
-    for c in fila_raw:
-        s = str(c).strip().lower()
-        if re.search(r"(septiembre|octubre|noviembre|diciembre).*(2025|2026)", s):
+        if (y == 2025 and m >= 9) or (y >= 2026):
             return True
-
     return False
 
 def extraer_id_licitacion(fila_raw, idx_codigo):
-    # Sufijos oficiales de Licitación Pública en ChileCompra (SE excluido porque no es licitación)
     valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "L1", "E2", "CO", "B2")
-    
     if idx_codigo is not None and idx_codigo < len(fila_raw):
         celda = str(fila_raw[idx_codigo]).strip()
         codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
@@ -254,7 +284,6 @@ def extraer_id_licitacion(fila_raw, idx_codigo):
             parts = code.split("-")
             if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
                 return code.upper()
-
     return ""
 
 def extraer_prestacion(fila_raw, idx_nombre):
@@ -282,7 +311,6 @@ def extraer_prestacion(fila_raw, idx_nombre):
     return "Prestación Médica Asistencial"
 
 def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
-    # 1. Obtener RUT del comprador para no confundirlo
     rut_comprador = ""
     if idx_comprador is not None and idx_comprador < len(fila):
         comp_str = str(fila[idx_comprador])
@@ -290,10 +318,7 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
         if ruts_comp:
             rut_comprador = re.sub(r"[^0-9]", "", ruts_comp[0])
 
-    # 2. Extraer todos los RUTs presentes en las columnas de adjudicación (columnas 10 a 20)
     ruts_adjudicados = []
-    
-    # Revisar celda oficial de adjudicatario
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda_adj = str(fila[idx_adjudicatario])
         for r in re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", celda_adj):
@@ -301,7 +326,6 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
             if r_num != rut_comprador:
                 ruts_adjudicados.append(r_num)
 
-    # Revisar demás columnas de adjudicación
     for idx_col in range(10, len(fila)):
         val = str(fila[idx_col]).strip()
         for r in re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", val):
@@ -309,12 +333,10 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
             if r_num != rut_comprador and r_num not in ruts_adjudicados:
                 ruts_adjudicados.append(r_num)
 
-    # FILTRO ESTRICTO POR RUT:
+    # Si hay RUTs explícitos en adjudicación, debe coincidir con la lista blanca
     if ruts_adjudicados:
-        es_rs = any(any(rs in r for rs in RUTS_REDSALUD_WHITELIST) for r in ruts_adjudicados)
-        return es_rs
+        return any(any(rs in r for rs in RUTS_REDSALUD_WHITELIST) for r in ruts_adjudicados)
 
-    # Si no tiene RUT explícito en el texto de la celda:
     if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
         celda_adj_u = str(fila[idx_adjudicatario]).upper()
         if any(bad in celda_adj_u for bad in ["APSORAD", "FALP", "BARLARO", "RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "BIOS"]):
@@ -324,26 +346,35 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
 
     return False
 
-def sincronizar_contratos():
-    print(f"Iniciando sincronización estricta por RUT de RedSalud desde fila {FILA_INICIO_OBJETIVO}...", flush=True)
+# ==========================================
+# 6. ORQUESTADOR COMPLETO
+# ==========================================
+def sincronizar_todo():
+    print("=== INICIANDO SINCRONIZADOR INTEGRAL ===", flush=True)
     try:
         client, sa_email = obtener_cliente_gspread()
-        print(f"Autenticado como: {sa_email}", flush=True)
+        print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
     except Exception as e:
-        print(f"Error de autenticación: {repr(e)}", flush=True)
+        print(f"Error de conexión: {repr(e)}", flush=True)
         return
 
+    # 1. Base Madre
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
-        valores_maestra = sheet_maestra.get_all_values()
-        print(f"Base Madre leida: {len(valores_maestra)} filas.", flush=True)
     except Exception as e:
-        print(f"Error Base Madre: {repr(e)}", flush=True)
+        print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
         return
 
-    cabecera = valores_maestra[0] if valores_maestra else []
+    # Ejecutar Fase 1: Traer novedades a la Base Madre
+    actualizar_base_madre(sheet_maestra)
 
+    # Ejecutar Fase 2: Filtrar Base Madre hacia 'consolidado'
+    print("\n--- FASE 2: Sincronizando hacia 'consolidado' ---", flush=True)
+    valores_maestra = sheet_maestra.get_all_values()
+    print(f"Total filas en Base Madre: {len(valores_maestra)}", flush=True)
+
+    cabecera = valores_maestra[0] if valores_maestra else []
     idx_codigo = 1
     idx_nombre = 2
     idx_categoria = 3
@@ -375,18 +406,11 @@ def sincronizar_contratos():
         elif "MONTO" in t:
             idx_monto = idx
 
-    print(f"Mapeo verificado: Codigo={idx_codigo}, Nombre={idx_nombre}, Adjudicatario={idx_adjudicatario}, Estado={idx_estado}", flush=True)
-
-    ss_contratos = None
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
     except Exception:
-        try:
-            url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
-            ss_contratos = client.open_by_url(url)
-        except Exception as e:
-            print(f"Error Archivo Contratos: {repr(e)}", flush=True)
-            return
+        url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
+        ss_contratos = client.open_by_url(url)
 
     ws_contratos = None
     for ws in ss_contratos.worksheets():
@@ -394,7 +418,7 @@ def sincronizar_contratos():
             ws_contratos = ws
             break
     if not ws_contratos:
-        print(f"Error: No se encontró la hoja '{NOMBRE_HOJA_CONTRATOS}'.", flush=True)
+        print(f"Error: Hoja '{NOMBRE_HOJA_CONTRATOS}' no encontrada.", flush=True)
         return
 
     datos_existentes = ws_contratos.get_all_values()
@@ -422,34 +446,23 @@ def sincronizar_contratos():
             monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
             adjudicatario_celda = fila[idx_adjudicatario].strip() if idx_adjudicatario < len(fila) else ""
 
-            # Extraer código chileno oficial de licitación
             codigo = extraer_id_licitacion(fila, idx_codigo)
-            if not codigo:
+            if not codigo or codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
                 continue
 
-            # Bloqueo total de licitaciones ajenas explícitas
-            if codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
+            if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
                 continue
 
-            # Filtro por tipo de proceso (solo licitaciones)
-            if SOLO_LICITACIONES:
-                if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
-                    continue
-
-            # Estado de la oferta adjudicada
             es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
             if not es_adj:
                 continue
 
-            # FILTRO EXCLUSIVO POR RUT DE REDSALUD
             if not verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
                 continue
 
-            # Periodo calibrado (desde septiembre a la fecha / año 26)
             if not cumple_filtro_periodo(fila, codigo):
                 continue
 
-            # Evitar duplicar
             cod_u = codigo.upper()
             if cod_u in ids_historicos or cod_u in ids_nuevos:
                 continue
@@ -460,35 +473,18 @@ def sincronizar_contratos():
             filial, rut_filial = determinar_filial(categoria, region, comprador, adj=adjudicatario_celda, codigo=codigo)
 
             filas_nuevas.append([
-                cat_cliente,         # Col A: Categoría Cliente
-                comprador,           # Col B: Cliente
-                rut_cliente,         # Col C: Rut Cliente
-                filial,              # Col D: Filial (Ajustada a Valparaíso si corresponde)
-                rut_filial,          # Col E: Rut Filial
-                "",                  # Col F: Tipo registro (EN BLANCO)
-                "Licitación",        # Col G: Tipo Contrato (Licitación)
-                codigo,              # Col H: ID licitación (Mercado Público)
-                prestacion,          # Col I: Prestaciones (Título Clínico)
-                "",                  # Col J: Fecha de inicio (EN BLANCO)
-                "",                  # Col K: Fecha de termino (EN BLANCO)
-                12,                  # Col L: Duración en Meses
-                monto,               # Col M: Monto Contrato
-                "",                  # Col N: ID OC (EN BLANCO)
-                "",                  # Col O: Boleta de garantía (EN BLANCO)
-                "",                  # Col P: Vencimiento boleta (EN BLANCO)
-                "En gestión",        # Col Q: Estado Contrato
-                "Sí",                # Col R: Aplica Reajuste
-                ""                   # Col S: Reajuste (EN BLANCO)
+                cat_cliente, comprador, rut_cliente, filial, rut_filial,
+                "", "Licitación", codigo, prestacion, "", "", 12, monto,
+                "", "", "", "En gestión", "Sí", ""
             ])
             ids_nuevos.add(cod_u)
 
     tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud (filtro RUT): {tot_nuevas}", flush=True)
+    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud: {tot_nuevas}", flush=True)
 
     fila_inicio = FILA_INICIO_OBJETIVO
     filas_totales_actuales = max(len(datos_existentes), fila_inicio)
 
-    # Limpiar cualquier contenido remanente desde la fila 372 hacia abajo
     if filas_totales_actuales >= fila_inicio:
         print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
         ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
@@ -508,7 +504,7 @@ def sincronizar_contratos():
             )
         print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
     else:
-        print("RESULTADO: Ninguna licitación ajena fue insertada. La fila 372 en adelante quedó purgada.", flush=True)
+        print("RESULTADO: Ninguna licitación ajena fue insertada. Rango consolidado purgado.", flush=True)
 
 if __name__ == "__main__":
-    sincronizar_contratos()
+    sincronizar_todo()
