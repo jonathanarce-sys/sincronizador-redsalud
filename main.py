@@ -20,10 +20,7 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-LICITALAB_API_URL = os.environ.get(
-    "LICITALAB_API_URL", 
-    "https://api.licitalab.cl/v1/licitaciones"
-).strip()
+LICITALAB_API_URL = os.environ.get("LICITALAB_API_URL", "").strip()
 
 RUTS_REDSALUD_WHITELIST = {
     "96856000", "76458120", "96536000", "96543000", "99568700",
@@ -96,11 +93,17 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    endpoints = [
-        LICITALAB_API_URL,
-        "https://api.licitalab.cl/v1/licitaciones",
-        "https://api.licitalab.cl/api/licitaciones"
-    ]
+    endpoints = []
+    if LICITALAB_API_URL:
+        endpoints.append(LICITALAB_API_URL)
+    
+    endpoints.extend([
+        "https://api.licitalab.cl/api/v1/opportunities/workspace",
+        "https://api.licitalab.cl/api/v1/opportunities",
+        "https://api.licitalab.cl/v1/opportunities/workspace",
+        "https://api.licitalab.cl/v1/opportunities",
+        "https://api.licitalab.cl/api/opportunities"
+    ])
 
     items_licitalab = []
     exito = False
@@ -122,12 +125,18 @@ def actualizar_base_madre_licitalab(sheet_maestra):
                 if isinstance(data, list):
                     items_licitalab = data
                 elif isinstance(data, dict):
-                    items_licitalab = data.get("data") or data.get("licitaciones") or data.get("results") or []
+                    items_licitalab = (
+                        data.get("data") or 
+                        data.get("opportunities") or 
+                        data.get("licitaciones") or 
+                        data.get("results") or 
+                        []
+                    )
                 print(f"Licitaciones LicitaLAB: {len(items_licitalab)}", flush=True)
                 exito = True
                 break
             else:
-                print(f"Detalle: {resp.text[:80]}", flush=True)
+                print(f"Detalle: {resp.text[:100]}", flush=True)
         except Exception as e:
             print(f"Error {url}: {repr(e)}", flush=True)
 
@@ -143,8 +152,8 @@ def actualizar_base_madre_licitalab(sheet_maestra):
 
         item_id = str(item.get("id") or "")
         nombre = str(item.get("nombre") or item.get("title") or item.get("name") or "").strip()
-        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or "Salud").strip()
-        fecha_pub = str(item.get("fecha_publicacion") or item.get("published_at") or "")[:10]
+        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or item.get("business_line") or "Salud").strip()
+        fecha_pub = str(item.get("fecha_publicacion") or item.get("published_at") or item.get("created_at") or "")[:10]
         fecha_cie = str(item.get("fecha_cierre") or item.get("closing_at") or "")[:10]
         region = str(item.get("region") or "").strip()
         tipo = str(item.get("tipo") or item.get("type") or "Licitacion").strip()
