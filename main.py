@@ -106,8 +106,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
     print("--- FASE 1: Conexión y descarga desde LicitaLAB hacia Base Madre ---", flush=True)
     
     if not LICITALAB_TOKEN:
-        print("AVISO: No se detectó 'LICITALAB_TOKEN' en los Secrets de GitHub.", flush=True)
-        print("Por favor agrega el secreto 'LICITALAB_TOKEN' con la clave entregada por LicitaLAB.", flush=True)
+        print("AVISO: No se detecto 'LICITALAB_TOKEN' en los Secrets de GitHub.", flush=True)
         return
 
     datos_actuales = sheet_maestra.get_all_values()
@@ -116,7 +115,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         if len(fila) > 1 and fila[1].strip():
             codigos_existentes.add(fila[1].strip().upper())
             
-    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones únicas.", flush=True)
+    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones unicas.", flush=True)
 
     headers = {
         "Authorization": f"Bearer {LICITALAB_TOKEN}",
@@ -124,7 +123,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    endpoints_a_probar = [
+    endpoints = [
         LICITALAB_API_URL,
         "https://api.licitalab.cl/v1/licitaciones",
         "https://api.licitalab.cl/api/licitaciones"
@@ -133,7 +132,52 @@ def actualizar_base_madre_licitalab(sheet_maestra):
     items_licitalab = []
     exito = False
 
-    for url in endpoints_a_probar:
+    for url in endpoints:
         try:
             print(f"Consultando LicitaLAB en: {url}...", flush=True)
-            resp = requests.get(url, headers=headers
+            resp = requests.get(url, headers=headers, timeout=30)
+            print(f"Respuesta LicitaLAB: HTTP {resp.status_code}", flush=True)
+
+            if resp.status_code in (401, 403):
+                headers["Authorization"] = f"Token {LICITALAB_TOKEN}"
+                headers["X-API-KEY"] = LICITALAB_TOKEN
+                resp = requests.get(url, headers=headers, timeout=30)
+                print(f"Reintento con header alternativo: HTTP {resp.status_code}", flush=True)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    items_licitalab = data
+                elif isinstance(data, dict):
+                    items_licitalab = data.get("data") or data.get("licitaciones") or data.get("results") or []
+                print(f"Licitaciones recuperadas desde LicitaLAB: {len(items_licitalab)}", flush=True)
+                exito = True
+                break
+            else:
+                print(f"Detalle respuesta: {resp.text[:120]}", flush=True)
+        except Exception as e:
+            print(f"Error al conectar con {url}: {repr(e)}", flush=True)
+
+    if not exito or not items_licitalab:
+        print("Fase 1 completada: No se recibieron nuevos registros desde LicitaLAB en esta consulta.", flush=True)
+        return
+
+    filas_nuevas = []
+    for item in items_licitalab:
+        cod = str(item.get("codigo") or item.get("code") or item.get("codigo_externo") or "").strip().upper()
+        if not cod or cod in codigos_existentes:
+            continue
+
+        nombre = str(item.get("nombre") or item.get("title") or item.get("name") or "").strip()
+        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or "Salud").strip()
+        fecha_pub = str(item.get("fecha_publicacion") or item.get("published_at") or "")[:10]
+        fecha_cie = str(item.get("fecha_cierre") or item.get("closing_at") or "")[:10]
+        region = str(item.get("region") or "").strip()
+        tipo = str(item.get("tipo") or item.get("type") or "Licitacion").strip()
+        comprador = str(item.get("organismo") or item.get("buyer") or item.get("institucion") or "").strip()
+        estado = str(item.get("estado") or item.get("status") or "Publicada").strip()
+        adj = str(item.get("adjudicatario") or item.get("winner") or "").strip()
+        monto = str(item.get("monto") or item.get("amount") or "").strip()
+
+        fila_madre = [
+            str(item.get("id") or ""),
