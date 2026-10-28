@@ -85,11 +85,15 @@ def obtener_cliente_gspread():
     client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
     return client, sa_email
 
-# ==========================================
-# 4. FASE 1: DESCARGA DESDE LICITALAB BI API
-# ==========================================
+def normalizar_tipo_proceso(tipo_raw, codigo):
+    """Garantiza que solo existan los 2 tipos oficiales en Columna H: 'Compra Ágil' o 'Licitación Pública'"""
+    t = str(tipo_raw).upper()
+    c = str(codigo).upper()
+    if "AGIL" in t or "ÁGIL" in t or "COT" in c or "-COT" in c:
+        return "Compra Ágil"
+    return "Licitación Pública"
+
 def extraer_codigo_objeto(item):
-    """Busca el código de licitación de forma exhaustiva en el objeto de LicitaLAB"""
     prioritarios = [
         "code", "codigo", "codigo_externo", "external_code", "tender_code",
         "opportunity_code", "id_licitacion", "numero_licitacion"
@@ -103,7 +107,6 @@ def extraer_codigo_objeto(item):
             if "-" in val and len(val) >= 6:
                 return val.strip().upper()
 
-    # Buscar en objetos anidados (tender, opportunity, etc.)
     for k, v in item.items():
         if isinstance(v, dict):
             for p in prioritarios:
@@ -115,7 +118,6 @@ def extraer_codigo_objeto(item):
                     if "-" in sub_val and len(sub_val) >= 6:
                         return sub_val.strip().upper()
 
-    # Búsqueda regex en cualquier string del primer nivel
     for k, v in item.items():
         if isinstance(v, str):
             m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", v)
@@ -123,6 +125,9 @@ def extraer_codigo_objeto(item):
                 return m[0].upper()
     return ""
 
+# ==========================================
+# 4. FASE 1: DESCARGA Y MAPEO EXACTO DE 20 COLUMNAS
+# ==========================================
 def actualizar_base_madre_licitalab(sheet_maestra):
     print("--- FASE 1: Conectando a LicitaLAB API BI ---", flush=True)
     if not LICITALAB_TOKEN:
@@ -130,17 +135,82 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         return
 
     datos_actuales = sheet_maestra.get_all_values()
+    if not datos_actuales:
+        print("Error: Base Madre vacía.", flush=True)
+        return
+
+    cabecera = datos_actuales[0]
+    total_cols = max(len(cabecera), 20)
+    print(f"Base Madre configurada con {total_cols} columnas.", flush=True)
+
+    # Identificar indices exactos basados en la estructura real
+    mapa = {
+        "id": 0,            # Col A: ID Proceso
+        "codigo": 1,        # Col B: Código Proceso
+        "nombre": 2,        # Col C: Nombre Proceso
+        "categoria": 3,     # Col D: Categoría / Línea de Servicio
+        "fecha_pub": 4,     # Col E: Fecha Publicación
+        "fecha_cie": 5,     # Col F: Fecha de Cierre
+        "fecha_2do": 6,     # Col G: Fecha Cierre 2do Llamado
+        "tipo": 7,          # Col H: Tipo Proceso
+        "comprador": 8,     # Col I: Institución Compradora
+        "region": 9,        # Col J: Región / Territorio
+        "estado": 10,       # Col K: Estado de la Oferta
+        "adjudicatario": 11,# Col L: Adjudicatario (Proveedor Ganador)
+        "monto": 12,        # Col M: Monto Presupuesto Total + IVA (CLP)
+        "comentarios": 13,  # Col N: Comentarios / Observaciones
+        "codigo_oc": 14,    # Col O: Código OC
+        "estado_oc": 15,    # Col P: Estado OC
+        "emisor_oc": 16,    # Col Q: Organismo Emisor OC
+        "neto_oc": 17,      # Col R: Monto Neto OC (CLP)
+        "iva_oc": 18,       # Col S: Monto IVA OC (CLP)
+        "bruto_oc": 19      # Col T: Monto Bruto Facturable OC (CLP)
+    }
+
+    # Sobreescribir dinámicamente si los nombres están en posiciones específicas
+    for idx, c in enumerate(cabecera):
+        t = str(c).strip().upper()
+        if "ID PROCESO" in t: mapa["id"] = idx
+        elif "CÓDIGO PROCESO" in t or "CODIGO PROCESO" in t: mapa["codigo"] = idx
+        elif "NOMBRE PROCESO" in t: mapa["nombre"] = idx
+        elif "CATEGORÍA" in t or "LINEA DE SERVICIO" in t: mapa["categoria"] = idx
+        elif "FECHA PUBLICACIÓN" in t or "FECHA PUBLICACION" in t: mapa["fecha_pub"] = idx
+        elif "2DO LLAMADO" in t: mapa["fecha_2do"] = idx
+        elif "FECHA DE CIERRE" in t: mapa["fecha_cie"] = idx
+        elif "TIPO PROCESO" in t: mapa["tipo"] = idx
+        elif "INSTITUCIÓN COMPRADORA" in t or "INSTITUCION COMPRADORA" in t: mapa["comprador"] = idx
+        elif "REGIÓN" in t or "TERRITORIO" in t: mapa["region"] = idx
+        elif "ESTADO DE LA OFERTA" in t: mapa["estado"] = idx
+        elif "ADJUDICATARIO" in t: mapa["adjudicatario"] = idx
+        elif "PRESUPUESTO" in t or "MONTO" in t and "OC" not in t: mapa["monto"] = idx
+
+    idx_cod = mapa.get("codigo", 1)
     codigos_existentes = set()
     for fila in datos_actuales[1:]:
-        if len(fila) > 1 and fila[1].strip():
-            # Buscar cualquier código presente en columna B o C
-            m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", fila[1])
+        if idx_cod < len(fila) and fila[idx_cod].strip():
+            m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", fila[idx_cod])
             if m:
                 codigos_existentes.add(m[0].upper())
             else:
-                codigos_existentes.add(fila[1].strip().upper())
+                codigos_existentes.add(fila[idx_cod].strip().upper())
             
-    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones unicas.", flush=True)
+    print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones únicas.", flush=True)
+
+    # Corregir de inmediato si quedó alguna fila con 'Licitacion' sin tilde en Columna H
+    idx_tipo = mapa.get("tipo", 7)
+    filas_modificadas = False
+    for r_idx in range(1, min(100, len(datos_actuales))):
+        if idx_tipo < len(datos_actuales[r_idx]):
+            v = datos_actuales[r_idx][idx_tipo].strip()
+            if v == "Licitacion":
+                datos_actuales[r_idx][idx_tipo] = "Licitación Pública"
+                filas_modificadas = True
+    if filas_modificadas:
+        sheet_maestra.update(
+            range_name=f"H2:H{min(100, len(datos_actuales))}",
+            values=[[datos_actuales[i][idx_tipo]] for i in range(1, min(100, len(datos_actuales)))]
+        )
+        print("Limpieza realizada: Columna H normalizada exclusivamente a 'Compra Ágil' y 'Licitación Pública'.", flush=True)
 
     headers = {
         "x-api-key": LICITALAB_TOKEN,
@@ -148,9 +218,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    # Intentar obtener el lote más reciente
     fecha_delta = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
-    
     intentos_params = [
         {"since": fecha_delta},
         {"updated_after": fecha_delta},
@@ -161,77 +229,44 @@ def actualizar_base_madre_licitalab(sheet_maestra):
     ]
 
     items_licitalab = []
-    
     for params in intentos_params:
         try:
-            print(f"Consultando API BI con params={params}...", flush=True)
             resp = requests.get(LICITALAB_API_URL, headers=headers, params=params, timeout=40)
             if resp.status_code == 200:
                 data = resp.json()
-                lista = []
-                if isinstance(data, list):
-                    lista = data
-                elif isinstance(data, dict):
-                    lista = (
-                        data.get("data") or 
-                        data.get("opportunities") or 
-                        data.get("items") or 
-                        data.get("results") or 
-                        []
-                    )
-                print(f"Respuesta HTTP 200: {len(lista)} registros recibidos.", flush=True)
-                
-                if lista and not items_licitalab:
+                lista = data if isinstance(data, list) else (data.get("data") or data.get("opportunities") or data.get("items") or data.get("results") or [])
+                if lista:
                     items_licitalab = lista
-                    # Diagnóstico del esquema JSON de LicitaLAB
-                    if isinstance(lista[0], dict):
-                        print(f"Claves disponibles en cada objeto: {list(lista[0].keys())}", flush=True)
                     break
         except Exception as e:
             print(f"Error consultando params {params}: {repr(e)}", flush=True)
 
     if not items_licitalab:
-        print("Fase 1 completada: Sin oportunidades devueltas.", flush=True)
+        print("Fase 1 completada: Sin datos nuevos devueltos por LicitaLAB.", flush=True)
         return
 
     filas_nuevas = []
-    descartados_existentes = 0
-    descartados_sin_codigo = 0
-
     for item in items_licitalab:
         if not isinstance(item, dict):
             continue
 
         cod = extraer_codigo_objeto(item)
-        if not cod:
-            descartados_sin_codigo += 1
-            continue
-
-        if cod in codigos_existentes:
-            descartados_existentes += 1
+        if not cod or cod in codigos_existentes:
             continue
 
         item_id = str(item.get("id") or "")
         nombre = str(item.get("name") or item.get("nombre") or item.get("title") or "").strip()
-        
-        # Categoría / Línea de servicio de LicitaLAB
-        categoria = str(
-            item.get("workspace_tag") or 
-            item.get("category") or 
-            item.get("categoria") or 
-            item.get("linea_servicio") or 
-            item.get("business_line") or 
-            "Salud"
-        ).strip()
-        
+        categoria = str(item.get("workspace_tag") or item.get("category") or item.get("categoria") or item.get("linea_servicio") or "Salud").strip()
         fecha_pub = str(item.get("published_at") or item.get("fecha_publicacion") or item.get("created_at") or "")[:10]
         fecha_cie = str(item.get("closing_at") or item.get("fecha_cierre") or "")[:10]
-        region = str(item.get("region") or "").strip()
-        tipo = str(item.get("type") or item.get("tipo") or "Licitacion").strip()
+        fecha_2do = str(item.get("closing_at_second_call") or "-").strip()
+        
+        tipo_proc = normalizar_tipo_proceso(item.get("type") or item.get("tipo") or "", cod)
         
         buyer = item.get("buyer") or item.get("organismo") or item.get("institucion") or ""
         comprador = buyer.get("name", "") if isinstance(buyer, dict) else str(buyer).strip()
         
+        region = str(item.get("region") or "").strip()
         estado = str(item.get("status") or item.get("estado") or "Publicada").strip()
         
         award = item.get("award") or item.get("adjudicatario") or item.get("winner") or ""
@@ -239,19 +274,41 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         
         monto = str(item.get("amount") or item.get("monto") or item.get("estimated_amount") or "").strip()
 
-        fila_madre = [item_id, cod, nombre, categoria, fecha_pub, fecha_cie, region, tipo, comprador, "", estado, adj, monto]
-        filas_nuevas.append(fila_madre)
+        # Construcción exacta respetando los 20 encabezados de la Base Madre:
+        fila_20_cols = [""] * total_cols
+        fila_20_cols[mapa["id"]] = item_id
+        fila_20_cols[mapa["codigo"]] = cod
+        fila_20_cols[mapa["nombre"]] = nombre
+        fila_20_cols[mapa["categoria"]] = categoria
+        fila_20_cols[mapa["fecha_pub"]] = fecha_pub
+        fila_20_cols[mapa["fecha_cie"]] = fecha_cie
+        fila_20_cols[mapa["fecha_2do"]] = fecha_2do
+        fila_20_cols[mapa["tipo"]] = tipo_proc
+        fila_20_cols[mapa["comprador"]] = comprador
+        fila_20_cols[mapa["region"]] = region
+        fila_20_cols[mapa["estado"]] = estado
+        fila_20_cols[mapa["adjudicatario"]] = adj
+        fila_20_cols[mapa["monto"]] = monto
+        # Columnas N hasta T (Comentarios y datos de Orden de Compra):
+        fila_20_cols[mapa["comentarios"]] = ""
+        fila_20_cols[mapa["codigo_oc"]] = ""
+        fila_20_cols[mapa["estado_oc"]] = ""
+        fila_20_cols[mapa["emisor_oc"]] = ""
+        fila_20_cols[mapa["neto_oc"]] = ""
+        fila_20_cols[mapa["iva_oc"]] = ""
+        fila_20_cols[mapa["bruto_oc"]] = ""
+
+        filas_nuevas.append(fila_20_cols)
         codigos_existentes.add(cod)
 
-    print(f"Resumen Fase 1: {len(filas_nuevas)} nuevas detectadas | {descartados_existentes} ya existían | {descartados_sin_codigo} sin código.", flush=True)
-
     if filas_nuevas:
-        filas_nuevas.sort(key=lambda r: str(r[4]), reverse=True)
-        print(f"Insertando {len(filas_nuevas)} licitaciones en fila 2 de la Base Madre...", flush=True)
+        idx_fpub = mapa.get("fecha_pub", 4)
+        filas_nuevas.sort(key=lambda r: str(r[idx_fpub]), reverse=True)
+        print(f"Insertando {len(filas_nuevas)} licitaciones respetando las 20 columnas oficiales en Fila 2...", flush=True)
         sheet_maestra.insert_rows(filas_nuevas, row=2)
-        print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones en la Base Madre.", flush=True)
+        print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones con la estructura completa de encabezados.", flush=True)
     else:
-        print("Base Madre al dia: Ningún registro nuevo califica para inserción.", flush=True)
+        print("Base Madre al dia: Todas las oportunidades de LicitaLAB ya estaban registradas.", flush=True)
 
 # ==========================================
 # 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
