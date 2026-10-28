@@ -98,11 +98,15 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         endpoints.append(LICITALAB_API_URL)
     
     endpoints.extend([
-        "https://api.licitalab.cl/api/v1/opportunities/workspace",
-        "https://api.licitalab.cl/api/v1/opportunities",
-        "https://api.licitalab.cl/v1/opportunities/workspace",
-        "https://api.licitalab.cl/v1/opportunities",
-        "https://api.licitalab.cl/api/opportunities"
+        "https://api.licitalab.cl/api/v1/licitaciones",
+        "https://api.licitalab.cl/api/v1/licitaciones/workspace",
+        "https://api.licitalab.cl/api/v1/tenders",
+        "https://api.licitalab.cl/api/v1/busquedas-guardadas",
+        "https://api.licitalab.cl/api/v1/saved-searches",
+        "https://api.licitalab.cl/api/v1/registros",
+        "https://api.licitalab.cl/api/v1/compra-agil",
+        "https://api.licitalab.cl/api/v1/procesos",
+        "https://api.licitalab.cl/api/v1"
     ])
 
     items_licitalab = []
@@ -110,14 +114,14 @@ def actualizar_base_madre_licitalab(sheet_maestra):
 
     for url in endpoints:
         try:
-            print(f"URL: {url}", flush=True)
-            resp = requests.get(url, headers=headers, timeout=30)
+            print(f"Probando: {url}", flush=True)
+            resp = requests.get(url, headers=headers, timeout=20)
             print(f"HTTP: {resp.status_code}", flush=True)
 
             if resp.status_code in (401, 403):
                 headers["Authorization"] = f"Token {LICITALAB_TOKEN}"
                 headers["X-API-KEY"] = LICITALAB_TOKEN
-                resp = requests.get(url, headers=headers, timeout=30)
+                resp = requests.get(url, headers=headers, timeout=20)
                 print(f"Reintento HTTP: {resp.status_code}", flush=True)
 
             if resp.status_code == 200:
@@ -127,16 +131,17 @@ def actualizar_base_madre_licitalab(sheet_maestra):
                 elif isinstance(data, dict):
                     items_licitalab = (
                         data.get("data") or 
-                        data.get("opportunities") or 
                         data.get("licitaciones") or 
+                        data.get("tenders") or 
                         data.get("results") or 
+                        data.get("items") or 
                         []
                     )
-                print(f"Licitaciones LicitaLAB: {len(items_licitalab)}", flush=True)
+                print(f"Exito en endpoint {url}: {len(items_licitalab)} registros", flush=True)
                 exito = True
                 break
             else:
-                print(f"Detalle: {resp.text[:100]}", flush=True)
+                print(f"Detalle: {resp.text[:90]}", flush=True)
         except Exception as e:
             print(f"Error {url}: {repr(e)}", flush=True)
 
@@ -146,13 +151,15 @@ def actualizar_base_madre_licitalab(sheet_maestra):
 
     filas_nuevas = []
     for item in items_licitalab:
+        if not isinstance(item, dict):
+            continue
         cod = str(item.get("codigo") or item.get("code") or item.get("codigo_externo") or "").strip().upper()
         if not cod or cod in codigos_existentes:
             continue
 
         item_id = str(item.get("id") or "")
         nombre = str(item.get("nombre") or item.get("title") or item.get("name") or "").strip()
-        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or item.get("business_line") or "Salud").strip()
+        categoria = str(item.get("categoria") or item.get("category") or item.get("linea_servicio") or "Salud").strip()
         fecha_pub = str(item.get("fecha_publicacion") or item.get("published_at") or item.get("created_at") or "")[:10]
         fecha_cie = str(item.get("fecha_cierre") or item.get("closing_at") or "")[:10]
         region = str(item.get("region") or "").strip()
