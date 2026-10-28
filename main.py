@@ -23,7 +23,6 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-# URL Oficial LicitaLAB API BI
 LICITALAB_API_URL = os.environ.get(
     "LICITALAB_API_URL", 
     "https://biapi.licitalab.cl/bi/v2/opportunities"
@@ -109,34 +108,57 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    url = LICITALAB_API_URL
+    # Fecha de sincronización incremental (últimos 7 días)
+    fecha_delta = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
+    
+    # Consultar con parámetros delta (since / updated_after) para traer lo más reciente
+    intentos_params = [
+        {"since": fecha_delta},
+        {"updated_after": fecha_delta},
+        {"from": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")},
+        {"sort": "-created_at"},
+        {"order": "desc"},
+        {}
+    ]
+
     items_licitalab = []
-
-    try:
-        print(f"Consultando endpoint oficial: {url}", flush=True)
-        resp = requests.get(url, headers=headers, timeout=40)
-        print(f"Respuesta LicitaLAB: HTTP {resp.status_code}", flush=True)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                items_licitalab = data
-            elif isinstance(data, dict):
-                items_licitalab = (
-                    data.get("data") or 
-                    data.get("opportunities") or 
-                    data.get("items") or 
-                    data.get("results") or 
-                    []
-                )
-            print(f"Exito: Se recuperaron {len(items_licitalab)} oportunidades desde LicitaLAB.", flush=True)
-        else:
-            print(f"Aviso LicitaLAB HTTP {resp.status_code}: {resp.text[:150]}", flush=True)
-    except Exception as e:
-        print(f"Error al conectar con LicitaLAB BI API: {repr(e)}", flush=True)
+    
+    for params in intentos_params:
+        try:
+            print(f"Consultando API BI con params={params}...", flush=True)
+            resp = requests.get(LICITALAB_API_URL, headers=headers, params=params, timeout=40)
+            if resp.status_code == 200:
+                data = resp.json()
+                lista = []
+                if isinstance(data, list):
+                    lista = data
+                elif isinstance(data, dict):
+                    lista = (
+                        data.get("data") or 
+                        data.get("opportunities") or 
+                        data.get("items") or 
+                        data.get("results") or 
+                        []
+                    )
+                print(f"Respuesta HTTP 200: {len(lista)} registros recibidos.", flush=True)
+                
+                # Revisar si estos registros contienen alguno nuevo
+                nuevos_en_lote = [
+                    x for x in lista 
+                    if isinstance(x, dict) and str(x.get("code") or x.get("codigo") or "").strip().upper() not in codigos_existentes
+                ]
+                print(f"Nuevos no existentes en Base Madre en este lote: {len(nuevos_en_lote)}", flush=True)
+                
+                if nuevos_en_lote:
+                    items_licitalab = lista
+                    break
+                elif lista and not items_licitalab:
+                    items_licitalab = lista
+        except Exception as e:
+            print(f"Error consultando con params {params}: {repr(e)}", flush=True)
 
     if not items_licitalab:
-        print("Fase 1 completada: Sin nuevas oportunidades recuperadas de LicitaLAB.", flush=True)
+        print("Fase 1 completada: Sin oportunidades devueltas.", flush=True)
         return
 
     filas_nuevas = []
@@ -182,10 +204,14 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         codigos_existentes.add(cod)
 
     if filas_nuevas:
-        sheet_maestra.append_rows(filas_nuevas)
-        print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones nuevas en la Base Madre.", flush=True)
+        # Ordenar por fecha descendente antes de insertar
+        filas_nuevas.sort(key=lambda r: str(r[4]), reverse=True)
+        # En la Base Madre las filas más recientes van arriba (Fila 2)
+        print(f"Insertando {len(filas_nuevas)} licitaciones al inicio de la Base Madre (Fila 2)...", flush=True)
+        sheet_maestra.insert_rows(filas_nuevas, row=2)
+        print(f"Exito Fase 1: Se agregaron {len(filas_nuevas)} licitaciones nuevas a la Base Madre.", flush=True)
     else:
-        print("Base Madre al dia: Todas las oportunidades de LicitaLAB ya estaban registradas.", flush=True)
+        print("Base Madre al dia: Todas las oportunidades recibidas de LicitaLAB ya estaban registradas.", flush=True)
 
 # ==========================================
 # 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
