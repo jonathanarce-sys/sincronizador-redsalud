@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timedelta
 
 # ==========================================
-# 1. IDENTIFICADORES DE HOJAS
+# 1. IDENTIFICADORES DE HOJAS Y CONFIGURACIÓN
 # ==========================================
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
@@ -86,12 +86,11 @@ def obtener_cliente_gspread():
     return client, sa_email
 
 # ==========================================
-# 4. FASE 1: DESCARGA AUTOMÁTICA A BASE MADRE
+# 4. FASE 1: DESCARGA Y DIAGNÓSTICO EN BASE MADRE
 # ==========================================
 def actualizar_base_madre(sheet_maestra):
     print("--- FASE 1: Consultando novedades para la Base Maestra ---", flush=True)
     
-    # Obtenemos códigos actuales en la Base Madre para no duplicar
     datos_actuales = sheet_maestra.get_all_values()
     codigos_existentes = set()
     for fila in datos_actuales[1:]:
@@ -100,7 +99,6 @@ def actualizar_base_madre(sheet_maestra):
             
     print(f"Base Madre contiene actualmente {len(codigos_existentes)} licitaciones únicas.", flush=True)
 
-    # Consultamos los últimos 3 días en la API pública de Mercado Público
     filas_a_insertar = []
     fechas_a_revisar = [
         datetime.now().strftime("%d%m%Y"),
@@ -108,52 +106,52 @@ def actualizar_base_madre(sheet_maestra):
         (datetime.now() - timedelta(days=2)).strftime("%d%m%Y"),
     ]
 
-    # Ticket público estándar de consulta
     ticket_publico = "F8537A18-6766-4DEF-9E59-426B4F609C66"
 
     for f_str in fechas_a_revisar:
         url = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?fecha={f_str}&ticket={ticket_publico}"
         try:
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=15)
+            print(f"Consulta fecha {f_str}: Status HTTP {r.status_code}", flush=True)
             if r.status_code == 200:
                 data = r.json()
                 lista = data.get("Listado", [])
+                print(f"Licitaciones encontradas para {f_str}: {len(lista)}", flush=True)
                 for item in lista:
                     cod = item.get("CodigoExterno", "").strip().upper()
-                    # Solo nos interesan licitaciones que no tengamos y que sean compras públicas formales
                     if cod and cod not in codigos_existentes and not cod.endswith("-COT26"):
                         nombre = item.get("Nombre", "").strip()
                         estado = item.get("CodigoEstado", "Publicada")
                         fecha_cie = item.get("FechaCierre", "")[:10]
-                        fecha_pub = f"{f_str[4:]}-{f_str[2:4]}-{f_str[:2]}"  # YYYY-MM-DD
+                        fecha_pub = f"{f_str[4:]}-{f_str[2:4]}-{f_str[:2]}"
                         
-                        # Armar fila compatible con las columnas de tu Base Madre
                         nueva_fila = [
-                            "",                # Col A: ID
-                            cod,               # Col B: Código Proceso
-                            nombre,            # Col C: Nombre Proceso
-                            "Salud",           # Col D: Categoría
-                            fecha_pub,         # Col E: Fecha Publicación
-                            fecha_cie,         # Col F: Fecha Cierre
-                            "",                # Col G: Región
-                            "Licitación",      # Col H: Tipo Proceso
-                            item.get("Comprador", {}).get("NombreOrganismo", ""), # Col I: Comprador
-                            "",                # Col J: Región Territorio
-                            estado,            # Col K: Estado
-                            "",                # Col L: Adjudicatario
-                            ""                 # Col M: Monto
+                            "",
+                            cod,
+                            nombre,
+                            "Salud",
+                            fecha_pub,
+                            fecha_cie,
+                            "",
+                            "Licitación",
+                            item.get("Comprador", {}).get("NombreOrganismo", ""),
+                            "",
+                            estado,
+                            "",
+                            ""
                         ]
                         filas_a_insertar.append(nueva_fila)
                         codigos_existentes.add(cod)
+            else:
+                print(f"Respuesta no exitosa para {f_str}: {r.text[:100]}", flush=True)
         except Exception as e:
             print(f"Aviso consultando fecha {f_str}: {repr(e)}", flush=True)
 
     if filas_a_insertar:
-        # Añadir al final de la Base Madre en bloques
         sheet_maestra.append_rows(filas_a_insertar)
         print(f"Éxito Fase 1: Se agregaron {len(filas_a_insertar)} licitaciones nuevas a la Base Madre.", flush=True)
     else:
-        print("Fase 1 completada: La Base Madre ya se encuentra al día con los últimos registros disponibles.", flush=True)
+        print("Fase 1 completada: Sin nuevas filas agregadas a la Base Madre en este ciclo.", flush=True)
 
 # ==========================================
 # 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
@@ -206,7 +204,6 @@ def determinar_filial(cat, reg, comp, adj="", codigo=""):
     cat_u = str(cat).upper()
     cod_u = str(codigo).upper()
 
-    # Si es adjudicado a Valparaíso o el código es 899-33-LE26
     if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u:
         return "Centro de Especialidades Médicas Valparaíso", "99.568.700-3"
 
@@ -333,7 +330,6 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
             if r_num != rut_comprador and r_num not in ruts_adjudicados:
                 ruts_adjudicados.append(r_num)
 
-    # Si hay RUTs explícitos en adjudicación, debe coincidir con la lista blanca
     if ruts_adjudicados:
         return any(any(rs in r for rs in RUTS_REDSALUD_WHITELIST) for r in ruts_adjudicados)
 
@@ -358,7 +354,6 @@ def sincronizar_todo():
         print(f"Error de conexión: {repr(e)}", flush=True)
         return
 
-    # 1. Base Madre
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
