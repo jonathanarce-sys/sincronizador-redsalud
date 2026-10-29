@@ -99,15 +99,17 @@ def leer_archivo_raw(ruta_archivo):
 
 def alinear_dataframes(lista_dfs_con_nombre):
     """
-    Alinea las columnas de todos los archivos al esquema del archivo Maestro/Base.
-    Si un archivo nuevo tiene variaciones de mayúsculas, tildes o espacios,
-    las mapea exactamente a las columnas originales (de la A a la W).
-    Solo las columnas verdaderamente inéditas se agregan al final.
+    Alinea estrictamente las columnas de los reportes ingresados al esquema base oficial:
+    1. Traspasa 'Valor Ambulatorio Hábil' a 'Valor Neto' y elimina la primera.
+    2. Traspasa 'Inicio Vigencia' a 'Vigencia Desde' y elimina 'Inicio Vigencia'.
+    3. Asigna 'ARMADA' en la columna Cliente cuando el archivo corresponda a este organismo.
+    4. Elimina la columna 'Contrato'.
+    5. Restringe la salida estrictamente a los encabezados maestros, eliminando columnas huérfanas (AW a BH).
     """
     if not lista_dfs_con_nombre:
         return pd.DataFrame()
 
-    # Priorizar el archivo de Trazabilidad / Maestro como plantilla base
+    # Identificar el archivo Maestro / Trazabilidad como la plantilla canónica oficial
     idx_maestro = 0
     for i, (df, nombre) in enumerate(lista_dfs_con_nombre):
         if "TRAZABILIDAD" in nombre.upper() or "MAESTRO" in nombre.upper():
@@ -115,65 +117,120 @@ def alinear_dataframes(lista_dfs_con_nombre):
             break
 
     df_base, nombre_base = lista_dfs_con_nombre[idx_maestro]
-    print(f"Archivo base para estructura de columnas: {nombre_base} ({len(df_base.columns)} columnas)", flush=True)
+    print(f"Estructura maestra tomada de: {nombre_base} ({len(df_base.columns)} columnas)", flush=True)
 
-    # Columnas canónicas maestras
+    # 1. Base de columnas canónicas del archivo maestro original
     columnas_canonicas = list(df_base.columns)
+    
+    # Eliminar columna 'Contrato' si venía en el archivo maestro
+    columnas_canonicas = [c for c in columnas_canonicas if normalizar_nombre_columna(c) not in ["CONTRATO", "NUMERO CONTRATO", "N CONTRATO"]]
+
+    # Mapa de nombres normalizados del archivo maestro
     mapa_normalizado = {normalizar_nombre_columna(c): c for c in columnas_canonicas}
 
-    # Diccionario de equivalencias semánticas frecuentes por si difieren de nombre
-    sinonimos = {
-        "CODIGO": "CODIGO FONASA",
-        "COD FONASA": "CODIGO FONASA",
-        "CODIGO DE PRESTACION": "CODIGO FONASA",
-        "GLOSA": "GLOSA PRESTACION",
-        "DESCRIPCION": "GLOSA PRESTACION",
-        "PRESTACION": "GLOSA PRESTACION",
-        "VALOR": "ARANCEL",
-        "PRECIO": "ARANCEL",
-        "VALOR ARANCEL": "ARANCEL"
-    }
-    for sin, target in sinonimos.items():
-        sin_norm = normalizar_nombre_columna(sin)
-        target_norm = normalizar_nombre_columna(target)
-        if target_norm in mapa_normalizado and sin_norm not in mapa_normalizado:
-            mapa_normalizado[sin_norm] = mapa_normalizado[target_norm]
+    # Ubicar los nombres exactos en el maestro para 'VIGENCIA DESDE', 'VALOR NETO' y 'CLIENTE'
+    col_vigencia_desde = None
+    col_valor_neto = None
+    col_cliente = None
 
-    dfs_alineados = []
+    for c in columnas_canonicas:
+        cn = normalizar_nombre_columna(c)
+        if "VIGENCIA DESDE" in cn or "DESDE" in cn or "FECHA INICIO" in cn:
+            col_vigencia_desde = c
+        elif "VALOR NETO" in cn or "NETO" in cn:
+            col_valor_neto = c
+        elif "CLIENTE" in cn or "INSTITUCION" in cn:
+            col_cliente = c
+
+    # Si no existieran explícitas, asegurar sus encabezados oficiales en el esquema
+    if not col_vigencia_desde:
+        col_vigencia_desde = "Vigencia Desde"
+        columnas_canonicas.append(col_vigencia_desde)
+        mapa_normalizado[normalizar_nombre_columna(col_vigencia_desde)] = col_vigencia_desde
+
+    if not col_valor_neto:
+        col_valor_neto = "Valor Neto"
+        columnas_canonicas.append(col_valor_neto)
+        mapa_normalizado[normalizar_nombre_columna(col_valor_neto)] = col_valor_neto
+
+    if not col_cliente:
+        col_cliente = "Cliente"
+        columnas_canonicas.append(col_cliente)
+        mapa_normalizado[normalizar_nombre_columna(col_cliente)] = col_cliente
+
+    # Mapeo semántico obligatorio según instrucciones del usuario:
+    # A) 'Inicio Vigencia' -> 'Vigencia Desde'
+    mapa_normalizado["INICIO VIGENCIA"] = col_vigencia_desde
+    mapa_normalizado["INICIO DE VIGENCIA"] = col_vigencia_desde
+    mapa_normalizado["FECHA INICIO VIGENCIA"] = col_vigencia_desde
+
+    # B) 'Valor Ambulatorio Hábil' -> 'Valor Neto'
+    mapa_normalizado["VALOR AMBULATORIO HABIL"] = col_valor_neto
+    mapa_normalizado["VALOR AMBULATORIO HABIL CLP"] = col_valor_neto
+    mapa_normalizado["VALOR AMBULATORIO"] = col_valor_neto
+
+    # C) Equivalencias estándar de codificación y glosa
+    equivalencias_adicionales = {
+        "CODIGO FONASA": ["CODIGO", "COD FONASA", "COD_FONASA", "CODIGO DE PRESTACION"],
+        "GLOSA PRESTACION": ["GLOSA", "DESCRIPCION", "PRESTACION", "NOMBRE PRESTACION"],
+        "CODIGO PRESTADOR": ["COD PRESTADOR", "COD_PRESTADOR", "CODIGO INTERNO"],
+        "FILIAL": ["CLINICA", "SUCURSAL", "CENTRO MEDICO"]
+    }
+    for col_std, variantes in equivalencias_adicionales.items():
+        norm_std = normalizar_nombre_columna(col_std)
+        if norm_std in mapa_normalizado:
+            real_col = mapa_normalizado[norm_std]
+            for var in variantes:
+                mapa_normalizado[normalizar_nombre_columna(var)] = real_col
+
+    dfs_calibrados = []
 
     for df, nombre in lista_dfs_con_nombre:
+        df_trabajo = df.copy()
+
+        # Eliminar columna Contrato si viene en el archivo
+        cols_a_eliminar = [c for c in df_trabajo.columns if normalizar_nombre_columna(c) in ["CONTRATO", "NUMERO CONTRATO", "N CONTRATO"]]
+        if cols_a_eliminar:
+            df_trabajo = df_trabajo.drop(columns=cols_a_eliminar)
+
+        # Regla: Asignar 'ARMADA' en Cliente si el archivo corresponde a la Armada
+        if "ARMADA" in nombre.upper():
+            df_trabajo[col_cliente] = "ARMADA"
+
+        # Mapear nombres de columnas
         renombramiento = {}
-        for col in df.columns:
-            col_norm = normalizar_nombre_columna(col)
-            if col_norm in mapa_normalizado:
-                # Mapear a la columna existente oficial
-                renombramiento[col] = mapa_normalizado[col_norm]
-            else:
-                # Columna nueva que no existía en el maestro
-                print(f"  [+] Nueva columna agregada desde {nombre}: '{col}'", flush=True)
-                columnas_canonicas.append(col)
-                mapa_normalizado[col_norm] = col
-                renombramiento[col] = col
+        for col in df_trabajo.columns:
+            cn = normalizar_nombre_columna(col)
+            if cn in mapa_normalizado:
+                target_col = mapa_normalizado[cn]
+                # Si la columna ya existe en el dataframe (ej. ya había valor neto), combinarla
+                renombramiento[col] = target_col
 
-        df_renombrado = df.rename(columns=renombramiento)
+        df_renombrado = df_trabajo.rename(columns=renombramiento)
+
+        # Si tras renombrar existen columnas duplicadas (por ejemplo si traía Valor Neto y Valor Ambulatorio Hábil), consolidar
+        if df_renombrado.columns.duplicated().any():
+            df_renombrado = df_renombrado.groupby(lambda x: x, axis=1).first()
+
         df_renombrado["ORIGEN_ARCHIVO"] = nombre
-        dfs_alineados.append(df_renombrado)
+        dfs_calibrados.append(df_renombrado)
 
-    # Concatenar todos con el orden de columnas canónicas
+    # Añadir 'ORIGEN_ARCHIVO' a las columnas maestras
     if "ORIGEN_ARCHIVO" not in columnas_canonicas:
         columnas_canonicas.append("ORIGEN_ARCHIVO")
 
-    df_final = pd.concat(dfs_alineados, ignore_index=True)
-    # Reordenar columnas para que las originales queden primero (Cols A..W) y las extras al final
-    cols_existentes_final = [c for c in columnas_canonicas if c in df_final.columns]
-    resto_cols = [c for c in df_final.columns if c not in cols_existentes_final]
-    cols_ordenadas = cols_existentes_final + resto_cols
+    # Concatenar todos los dataframes
+    df_consolidado = pd.concat(dfs_calibrados, ignore_index=True)
 
-    df_final = df_final[cols_ordenadas].fillna("")
+    # FILTRO ESTRICTO: NO permitir columnas fuera del esquema maestro (Elimina columnas AW a BH)
+    columnas_finales = [c for c in columnas_canonicas if c in df_consolidado.columns]
+    df_final = df_consolidado[columnas_finales].fillna("")
+
+    print(f"Columnas finales calibradas: {len(df_final.columns)} columnas estrictamente maestras.", flush=True)
     return df_final
 
 def sincronizar_aranceles():
-    print("=== INICIANDO SINCRONIZADOR DE ARANCELES (data/raw -> RAW_Data_Ingesta) ===", flush=True)
+    print("=== INICIANDO SINCRONIZADOR DE ARANCELES (CALIBRACIÓN OFICIAL) ===", flush=True)
 
     try:
         client, sa_email = obtener_cliente_gspread()
@@ -189,7 +246,6 @@ def sincronizar_aranceles():
         print(f"Error abriendo planilla Maestro Aranceles ({SPREADSHEET_ID_ARANCELES}): {repr(e)}", flush=True)
         return
 
-    # Buscar o crear hoja RAW_Data_Ingesta
     ws_ingesta = None
     for ws in ss_aranceles.worksheets():
         if ws.title.strip().lower() == HOJA_DESTINO.lower():
@@ -224,13 +280,13 @@ def sincronizar_aranceles():
         print("Sin datos legibles en los archivos de data/raw/.", flush=True)
         return
 
-    # Alinear columnas inteligentemente
-    df_consolidado = alinear_dataframes(lista_dfs)
-    print(f"Resultado consolidado con columnas alineadas: {len(df_consolidado)} filas, {len(df_consolidado.columns)} columnas.", flush=True)
+    # Alinear y aplicar calibraciones estrictas
+    df_final = alinear_dataframes(lista_dfs)
+    print(f"Resultado calibrado: {len(df_final)} filas, {len(df_final.columns)} columnas.", flush=True)
 
-    # Escritura por lotes en Google Sheets
-    headers = df_consolidado.columns.tolist()
-    valores = [headers] + df_consolidado.values.tolist()
+    # Preparar valores para Google Sheets
+    headers = df_final.columns.tolist()
+    valores = [headers] + df_final.values.tolist()
 
     filas_necesarias = max(len(valores) + 50, 100)
     cols_necesarias = max(len(headers) + 2, 25)
@@ -238,10 +294,10 @@ def sincronizar_aranceles():
     print(f"Redimensionando hoja '{HOJA_DESTINO}' a {filas_necesarias} filas y {cols_necesarias} columnas...", flush=True)
     ws_ingesta.resize(rows=filas_necesarias, cols=cols_necesarias)
 
-    print(f"Limpiando contenido previo desalineado en '{HOJA_DESTINO}'...", flush=True)
+    print(f"Limpiando contenido previo en '{HOJA_DESTINO}' para eliminar columnas AW:BH...", flush=True)
     ws_ingesta.clear()
 
-    print(f"Escribiendo {len(valores)} filas ordenadas y alineadas en '{HOJA_DESTINO}'...", flush=True)
+    print(f"Escribiendo {len(valores)} filas limpias y calibradas en '{HOJA_DESTINO}'...", flush=True)
     tamano_lote = 5000
     for i in range(0, len(valores), tamano_lote):
         lote = valores[i:i + tamano_lote]
@@ -252,7 +308,7 @@ def sincronizar_aranceles():
         ws_ingesta.update(range_name=rango, values=lote)
         print(f"  -> Lote escrito: filas {fila_inicio} a {fila_fin}", flush=True)
 
-    print(f"=== ÉXITO: Ingesta de Aranceles completada con columnas perfectamente alineadas ({len(valores) - 1} filas) ===", flush=True)
+    print(f"=== ÉXITO: Ingesta de Aranceles calibrada correctamente ({len(valores) - 1} filas) ===", flush=True)
 
 if __name__ == "__main__":
     sincronizar_aranceles()
