@@ -15,6 +15,8 @@ SPREADSHEET_ID_ARANCELES = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo".strip(
 HOJA_DESTINO = "RAW_Data_Ingesta"
 CARPETA_RAW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "raw")
 
+VALORES_AMBITO_VALIDOS = ["URGENCIA", "AMBULATORIO", "HOSPITALARIO", "TRANSVERSAL", "INDIFERENCIADO"]
+
 def normalizar_nombre_columna(col):
     """Elimina tildes, mayúsculas/minúsculas y espacios duplicados para emparejar encabezados."""
     c = str(col).strip()
@@ -23,6 +25,26 @@ def normalizar_nombre_columna(col):
     c_clean = c_clean.upper()
     c_clean = re.sub(r'[\s_]+', ' ', c_clean).strip()
     return c_clean
+
+def normalizar_valor_ambito(val_raw, glosa=""):
+    """Normaliza el valor del ámbito para que coincida exactamente con la lista desplegable."""
+    v = str(val_raw).strip().upper()
+    g = str(glosa).strip().upper()
+    
+    for opt in VALORES_AMBITO_VALIDOS:
+        if opt in v:
+            return opt
+            
+    # Si viene vacío o no coincide, deducir por contexto de glosa o arancel
+    if any(k in g for k in ["URGENCIA", "URG"]):
+        return "URGENCIA"
+    elif any(k in g for k in ["HOSPITAL", "CAMA", "DIA CAMA", "PABELLON", "INTERNACION"]):
+        return "HOSPITALARIO"
+    elif any(k in g for k in ["CONSULTA", "AMBULATORIO", "EXAMEN", "LABORATORIO", "IMAGEN"]):
+        return "AMBULATORIO"
+    elif v:
+        return "INDIFERENCIADO"
+    return "AMBULATORIO"
 
 def obtener_cliente_gspread():
     posibles = [
@@ -99,12 +121,12 @@ def leer_archivo_raw(ruta_archivo):
 
 def alinear_dataframes(lista_dfs_con_nombre):
     """
-    Alinea estrictamente las columnas de los reportes ingresados al esquema base oficial:
-    1. Traspasa 'Valor Ambulatorio Hábil' a 'Valor Neto' y elimina la primera.
-    2. Traspasa 'Inicio Vigencia' a 'Vigencia Desde' y elimina 'Inicio Vigencia'.
-    3. Asigna 'ARMADA' en la columna Cliente cuando el archivo corresponda a este organismo.
-    4. Elimina la columna 'Contrato'.
-    5. Restringe la salida estrictamente a los encabezados maestros, eliminando columnas huérfanas (AW a BH).
+    Alinea estrictamente las columnas al esquema maestro:
+    1. Asigna 'ARMADA' con precisión quirúrgica en la columna 'cliente' (NO en id_convenio_cliente).
+    2. Elimina completamente las columnas 'contrato' y 'feedback_client'.
+    3. Normaliza y rellena la columna 'ámbito' según la lista desplegable permitida.
+    4. Traspasa 'Valor Ambulatorio Hábil' a 'Valor Neto' y 'Inicio Vigencia' a 'Vigencia Desde'.
+    5. Restringe las columnas al esquema oficial sin desbordamientos hacia la derecha.
     """
     if not lista_dfs_con_nombre:
         return pd.DataFrame()
@@ -119,118 +141,125 @@ def alinear_dataframes(lista_dfs_con_nombre):
     df_base, nombre_base = lista_dfs_con_nombre[idx_maestro]
     print(f"Estructura maestra tomada de: {nombre_base} ({len(df_base.columns)} columnas)", flush=True)
 
-    # 1. Base de columnas canónicas del archivo maestro original
     columnas_canonicas = list(df_base.columns)
     
-    # Eliminar columna 'Contrato' si venía en el archivo maestro
-    columnas_canonicas = [c for c in columnas_canonicas if normalizar_nombre_columna(c) not in ["CONTRATO", "NUMERO CONTRATO", "N CONTRATO"]]
+    # Columnas prohibidas que deben ser eliminadas del esquema
+    prohibidas = [
+        "CONTRATO", "NUMERO CONTRATO", "N CONTRATO",
+        "FEEDBACK CLIENT", "FEEDBACK CLIENTE", "FEEDBACK"
+    ]
+    columnas_canonicas = [c for c in columnas_canonicas if normalizar_nombre_columna(c) not in prohibidas]
 
-    # Mapa de nombres normalizados del archivo maestro
     mapa_normalizado = {normalizar_nombre_columna(c): c for c in columnas_canonicas}
 
-    # Ubicar los nombres exactos en el maestro para 'VIGENCIA DESDE', 'VALOR NETO' y 'CLIENTE'
+    # Identificar las columnas clave exactas
+    col_cliente_exacta = None
+    col_ambito_exacta = None
     col_vigencia_desde = None
     col_valor_neto = None
-    col_cliente = None
 
     for c in columnas_canonicas:
         cn = normalizar_nombre_columna(c)
-        if "VIGENCIA DESDE" in cn or "DESDE" in cn or "FECHA INICIO" in cn:
+        # Búsqueda exacta de 'CLIENTE' evitando 'ID CONVENIO CLIENTE'
+        if cn == "CLIENTE" or cn == "NOMBRE CLIENTE":
+            col_cliente_exacta = c
+        elif cn in ["AMBITO", "AMBITO ATENCION"]:
+            col_ambito_exacta = c
+        elif "VIGENCIA DESDE" in cn or cn == "DESDE":
             col_vigencia_desde = c
-        elif "VALOR NETO" in cn or "NETO" in cn:
+        elif cn in ["VALOR NETO", "NETO", "VALOR"]:
             col_valor_neto = c
-        elif "CLIENTE" in cn or "INSTITUCION" in cn:
-            col_cliente = c
 
-    # Si no existieran explícitas, asegurar sus encabezados oficiales en el esquema
+    # Garantizar columnas obligatorias en la cabecera
+    if not col_cliente_exacta:
+        col_cliente_exacta = "cliente"
+        columnas_canonicas.append(col_cliente_exacta)
+        mapa_normalizado["CLIENTE"] = col_cliente_exacta
+
+    if not col_ambito_exacta:
+        col_ambito_exacta = "ámbito"
+        columnas_canonicas.append(col_ambito_exacta)
+        mapa_normalizado["AMBITO"] = col_ambito_exacta
+
     if not col_vigencia_desde:
         col_vigencia_desde = "Vigencia Desde"
         columnas_canonicas.append(col_vigencia_desde)
-        mapa_normalizado[normalizar_nombre_columna(col_vigencia_desde)] = col_vigencia_desde
+        mapa_normalizado["VIGENCIA DESDE"] = col_vigencia_desde
 
     if not col_valor_neto:
         col_valor_neto = "Valor Neto"
         columnas_canonicas.append(col_valor_neto)
-        mapa_normalizado[normalizar_nombre_columna(col_valor_neto)] = col_valor_neto
+        mapa_normalizado["VALOR NETO"] = col_valor_neto
 
-    if not col_cliente:
-        col_cliente = "Cliente"
-        columnas_canonicas.append(col_cliente)
-        mapa_normalizado[normalizar_nombre_columna(col_cliente)] = col_cliente
-
-    # Mapeo semántico obligatorio según instrucciones del usuario:
-    # A) 'Inicio Vigencia' -> 'Vigencia Desde'
+    # Mapeo semántico directo
     mapa_normalizado["INICIO VIGENCIA"] = col_vigencia_desde
     mapa_normalizado["INICIO DE VIGENCIA"] = col_vigencia_desde
-    mapa_normalizado["FECHA INICIO VIGENCIA"] = col_vigencia_desde
-
-    # B) 'Valor Ambulatorio Hábil' -> 'Valor Neto'
     mapa_normalizado["VALOR AMBULATORIO HABIL"] = col_valor_neto
     mapa_normalizado["VALOR AMBULATORIO HABIL CLP"] = col_valor_neto
-    mapa_normalizado["VALOR AMBULATORIO"] = col_valor_neto
-
-    # C) Equivalencias estándar de codificación y glosa
-    equivalencias_adicionales = {
-        "CODIGO FONASA": ["CODIGO", "COD FONASA", "COD_FONASA", "CODIGO DE PRESTACION"],
-        "GLOSA PRESTACION": ["GLOSA", "DESCRIPCION", "PRESTACION", "NOMBRE PRESTACION"],
-        "CODIGO PRESTADOR": ["COD PRESTADOR", "COD_PRESTADOR", "CODIGO INTERNO"],
-        "FILIAL": ["CLINICA", "SUCURSAL", "CENTRO MEDICO"]
-    }
-    for col_std, variantes in equivalencias_adicionales.items():
-        norm_std = normalizar_nombre_columna(col_std)
-        if norm_std in mapa_normalizado:
-            real_col = mapa_normalizado[norm_std]
-            for var in variantes:
-                mapa_normalizado[normalizar_nombre_columna(var)] = real_col
 
     dfs_calibrados = []
 
     for df, nombre in lista_dfs_con_nombre:
         df_trabajo = df.copy()
 
-        # Eliminar columna Contrato si viene en el archivo
-        cols_a_eliminar = [c for c in df_trabajo.columns if normalizar_nombre_columna(c) in ["CONTRATO", "NUMERO CONTRATO", "N CONTRATO"]]
-        if cols_a_eliminar:
-            df_trabajo = df_trabajo.drop(columns=cols_a_eliminar)
-
-        # Regla: Asignar 'ARMADA' en Cliente si el archivo corresponde a la Armada
-        if "ARMADA" in nombre.upper():
-            df_trabajo[col_cliente] = "ARMADA"
+        # Eliminar columnas no deseadas (Contrato y Feedback_client)
+        cols_drop = [c for c in df_trabajo.columns if normalizar_nombre_columna(c) in prohibidas]
+        if cols_drop:
+            df_trabajo = df_trabajo.drop(columns=cols_drop)
 
         # Mapear nombres de columnas
         renombramiento = {}
         for col in df_trabajo.columns:
             cn = normalizar_nombre_columna(col)
             if cn in mapa_normalizado:
-                target_col = mapa_normalizado[cn]
-                # Si la columna ya existe en el dataframe (ej. ya había valor neto), combinarla
-                renombramiento[col] = target_col
+                renombramiento[col] = mapa_normalizado[cn]
 
         df_renombrado = df_trabajo.rename(columns=renombramiento)
 
-        # Si tras renombrar existen columnas duplicadas (por ejemplo si traía Valor Neto y Valor Ambulatorio Hábil), consolidar
         if df_renombrado.columns.duplicated().any():
             df_renombrado = df_renombrado.groupby(lambda x: x, axis=1).first()
+
+        # REGLA 1: 'ARMADA' debe ir exclusivamente en la columna 'cliente'
+        if "ARMADA" in nombre.upper():
+            df_renombrado[col_cliente_exacta] = "ARMADA"
+            # Si id_convenio_cliente contenía 'ARMADA' por error, limpiarlo o conservar ID numérico
+            for col in df_renombrado.columns:
+                if normalizar_nombre_columna(col) in ["ID CONVENIO CLIENTE", "ID CLIENTE"]:
+                    df_renombrado[col] = df_renombrado[col].replace({"ARMADA": ""})
+
+        # REGLA 2: Normalizar y poblar 'ámbito'
+        glosa_col = None
+        for col in df_renombrado.columns:
+            if "GLOSA" in normalizar_nombre_columna(col):
+                glosa_col = col
+                break
+
+        if col_ambito_exacta not in df_renombrado.columns:
+            df_renombrado[col_ambito_exacta] = ""
+
+        # Aplicar validación de ámbito para cada fila
+        df_renombrado[col_ambito_exacta] = [
+            normalizar_valor_ambito(val, glosa=row.get(glosa_col, "") if glosa_col else "")
+            for val, row in zip(df_renombrado[col_ambito_exacta], df_renombrado.to_dict("records"))
+        ]
 
         df_renombrado["ORIGEN_ARCHIVO"] = nombre
         dfs_calibrados.append(df_renombrado)
 
-    # Añadir 'ORIGEN_ARCHIVO' a las columnas maestras
     if "ORIGEN_ARCHIVO" not in columnas_canonicas:
         columnas_canonicas.append("ORIGEN_ARCHIVO")
 
-    # Concatenar todos los dataframes
     df_consolidado = pd.concat(dfs_calibrados, ignore_index=True)
 
-    # FILTRO ESTRICTO: NO permitir columnas fuera del esquema maestro (Elimina columnas AW a BH)
+    # Restringir estrictamente a columnas del esquema oficial (evita desbordes AW a BH)
     columnas_finales = [c for c in columnas_canonicas if c in df_consolidado.columns]
     df_final = df_consolidado[columnas_finales].fillna("")
 
-    print(f"Columnas finales calibradas: {len(df_final.columns)} columnas estrictamente maestras.", flush=True)
+    print(f"Columnas finales calibradas: {len(df_final.columns)} columnas.", flush=True)
     return df_final
 
 def sincronizar_aranceles():
-    print("=== INICIANDO SINCRONIZADOR DE ARANCELES (CALIBRACIÓN OFICIAL) ===", flush=True)
+    print("=== INICIANDO SINCRONIZADOR DE ARANCELES (CALIBRACIÓN V4) ===", flush=True)
 
     try:
         client, sa_email = obtener_cliente_gspread()
@@ -294,7 +323,7 @@ def sincronizar_aranceles():
     print(f"Redimensionando hoja '{HOJA_DESTINO}' a {filas_necesarias} filas y {cols_necesarias} columnas...", flush=True)
     ws_ingesta.resize(rows=filas_necesarias, cols=cols_necesarias)
 
-    print(f"Limpiando contenido previo en '{HOJA_DESTINO}' para eliminar columnas AW:BH...", flush=True)
+    print(f"Limpiando contenido previo en '{HOJA_DESTINO}'...", flush=True)
     ws_ingesta.clear()
 
     print(f"Escribiendo {len(valores)} filas limpias y calibradas en '{HOJA_DESTINO}'...", flush=True)
@@ -308,7 +337,7 @@ def sincronizar_aranceles():
         ws_ingesta.update(range_name=rango, values=lote)
         print(f"  -> Lote escrito: filas {fila_inicio} a {fila_fin}", flush=True)
 
-    print(f"=== ÉXITO: Ingesta de Aranceles calibrada correctamente ({len(valores) - 1} filas) ===", flush=True)
+    print(f"=== ÉXITO: Ingesta de Aranceles calibrada con éxito en '{HOJA_DESTINO}' ({len(valores) - 1} filas) ===", flush=True)
 
 if __name__ == "__main__":
     sincronizar_aranceles()
