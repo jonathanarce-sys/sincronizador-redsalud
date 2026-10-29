@@ -2,6 +2,8 @@ import os
 import glob
 import base64
 import json
+import unicodedata
+import re
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -12,6 +14,15 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID_ARANCELES = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo".strip()
 HOJA_DESTINO = "RAW_Data_Ingesta"
 CARPETA_RAW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "raw")
+
+def normalizar_nombre_columna(col):
+    """Elimina tildes, mayúsculas/minúsculas y espacios duplicados para emparejar encabezados."""
+    c = str(col).strip()
+    c_norm = unicodedata.normalize('NFKD', c)
+    c_clean = "".join([ch for ch in c_norm if not unicodedata.combining(ch)])
+    c_clean = c_clean.upper()
+    c_clean = re.sub(r'[\s_]+', ' ', c_clean).strip()
+    return c_clean
 
 def obtener_cliente_gspread():
     posibles = [
@@ -51,48 +62,119 @@ def leer_archivo_raw(ruta_archivo):
     """Lee archivos .xlsx, .xls o .csv con detección de separadores y codificación."""
     ext = os.path.splitext(ruta_archivo)[1].lower()
     nombre_base = os.path.basename(ruta_archivo)
-    print(f"-> Procesando archivo: {nombre_base}...", flush=True)
+    print(f"-> Leyendo archivo: {nombre_base}...", flush=True)
 
     if ext in [".xlsx", ".xls"]:
         try:
             df = pd.read_excel(ruta_archivo, dtype=str)
-            df["ORIGEN_ARCHIVO"] = nombre_base
-            return df
+            df = df.dropna(how="all")
+            return df, nombre_base
         except Exception as e:
             print(f"Error leyendo Excel {nombre_base}: {repr(e)}", flush=True)
-            return None
+            return None, nombre_base
 
     elif ext == ".csv":
         for enc in ["utf-8-sig", "utf-8", "latin1", "cp1252"]:
             for sep in [",", ";", "\t", "|"]:
                 try:
                     df = pd.read_csv(ruta_archivo, sep=sep, encoding=enc, dtype=str)
-                    if len(df.columns) > 1:
-                        df["ORIGEN_ARCHIVO"] = nombre_base
-                        return df
+                    df = df.dropna(how="all")
+                    if len(df.columns) > 1 and len(df) > 0:
+                        return df, nombre_base
                 except Exception:
                     continue
         print(f"No se pudo determinar el formato del CSV: {nombre_base}", flush=True)
-        return None
+        return None, nombre_base
     else:
-        # En caso de archivos sin extensión reconocible, intentar como Excel y luego como CSV
         try:
             df = pd.read_excel(ruta_archivo, dtype=str)
-            df["ORIGEN_ARCHIVO"] = nombre_base
-            return df
+            return df.dropna(how="all"), nombre_base
         except Exception:
             try:
                 df = pd.read_csv(ruta_archivo, sep=None, engine="python", encoding="latin1", dtype=str)
-                df["ORIGEN_ARCHIVO"] = nombre_base
-                return df
+                return df.dropna(how="all"), nombre_base
             except Exception as e:
-                print(f"Archivo omitido o formato desconocido: {nombre_base} ({repr(e)})", flush=True)
-                return None
+                print(f"Formato no reconocido para {nombre_base}: {repr(e)}", flush=True)
+                return None, nombre_base
+
+def alinear_dataframes(lista_dfs_con_nombre):
+    """
+    Alinea las columnas de todos los archivos al esquema del archivo Maestro/Base.
+    Si un archivo nuevo tiene variaciones de mayúsculas, tildes o espacios,
+    las mapea exactamente a las columnas originales (de la A a la W).
+    Solo las columnas verdaderamente inéditas se agregan al final.
+    """
+    if not lista_dfs_con_nombre:
+        return pd.DataFrame()
+
+    # Priorizar el archivo de Trazabilidad / Maestro como plantilla base
+    idx_maestro = 0
+    for i, (df, nombre) in enumerate(lista_dfs_con_nombre):
+        if "TRAZABILIDAD" in nombre.upper() or "MAESTRO" in nombre.upper():
+            idx_maestro = i
+            break
+
+    df_base, nombre_base = lista_dfs_con_nombre[idx_maestro]
+    print(f"Archivo base para estructura de columnas: {nombre_base} ({len(df_base.columns)} columnas)", flush=True)
+
+    # Columnas canónicas maestras
+    columnas_canonicas = list(df_base.columns)
+    mapa_normalizado = {normalizar_nombre_columna(c): c for c in columnas_canonicas}
+
+    # Diccionario de equivalencias semánticas frecuentes por si difieren de nombre
+    sinonimos = {
+        "CODIGO": "CODIGO FONASA",
+        "COD FONASA": "CODIGO FONASA",
+        "CODIGO DE PRESTACION": "CODIGO FONASA",
+        "GLOSA": "GLOSA PRESTACION",
+        "DESCRIPCION": "GLOSA PRESTACION",
+        "PRESTACION": "GLOSA PRESTACION",
+        "VALOR": "ARANCEL",
+        "PRECIO": "ARANCEL",
+        "VALOR ARANCEL": "ARANCEL"
+    }
+    for sin, target in sinonimos.items():
+        sin_norm = normalizar_nombre_columna(sin)
+        target_norm = normalizar_nombre_columna(target)
+        if target_norm in mapa_normalizado and sin_norm not in mapa_normalizado:
+            mapa_normalizado[sin_norm] = mapa_normalizado[target_norm]
+
+    dfs_alineados = []
+
+    for df, nombre in lista_dfs_con_nombre:
+        renombramiento = {}
+        for col in df.columns:
+            col_norm = normalizar_nombre_columna(col)
+            if col_norm in mapa_normalizado:
+                # Mapear a la columna existente oficial
+                renombramiento[col] = mapa_normalizado[col_norm]
+            else:
+                # Columna nueva que no existía en el maestro
+                print(f"  [+] Nueva columna agregada desde {nombre}: '{col}'", flush=True)
+                columnas_canonicas.append(col)
+                mapa_normalizado[col_norm] = col
+                renombramiento[col] = col
+
+        df_renombrado = df.rename(columns=renombramiento)
+        df_renombrado["ORIGEN_ARCHIVO"] = nombre
+        dfs_alineados.append(df_renombrado)
+
+    # Concatenar todos con el orden de columnas canónicas
+    if "ORIGEN_ARCHIVO" not in columnas_canonicas:
+        columnas_canonicas.append("ORIGEN_ARCHIVO")
+
+    df_final = pd.concat(dfs_alineados, ignore_index=True)
+    # Reordenar columnas para que las originales queden primero (Cols A..W) y las extras al final
+    cols_existentes_final = [c for c in columnas_canonicas if c in df_final.columns]
+    resto_cols = [c for c in df_final.columns if c not in cols_existentes_final]
+    cols_ordenadas = cols_existentes_final + resto_cols
+
+    df_final = df_final[cols_ordenadas].fillna("")
+    return df_final
 
 def sincronizar_aranceles():
     print("=== INICIANDO SINCRONIZADOR DE ARANCELES (data/raw -> RAW_Data_Ingesta) ===", flush=True)
-    
-    # 1. Conexión Google Sheets
+
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
@@ -117,7 +199,6 @@ def sincronizar_aranceles():
         print(f"Creando pestaña '{HOJA_DESTINO}'...", flush=True)
         ws_ingesta = ss_aranceles.add_worksheet(title=HOJA_DESTINO, rows=1000, cols=30)
 
-    # 2. Explorar carpeta data/raw
     if not os.path.exists(CARPETA_RAW):
         print(f"Aviso: La carpeta '{CARPETA_RAW}' no existe localmente.", flush=True)
         return
@@ -126,42 +207,41 @@ def sincronizar_aranceles():
         os.path.join(CARPETA_RAW, f) for f in os.listdir(CARPETA_RAW)
         if not f.startswith(".") and f != ".gitkeep"
     ]
-    
+
     if not archivos:
         print("Fase Aranceles: No se encontraron archivos para procesar en data/raw/.", flush=True)
         return
 
     print(f"Archivos encontrados en data/raw/: {len(archivos)}", flush=True)
-    
-    dfs = []
-    for f in archivos:
-        df = leer_archivo_raw(f)
-        if df is not None and not df.empty:
-            dfs.append(df)
 
-    if not dfs:
+    lista_dfs = []
+    for f in archivos:
+        df, nombre = leer_archivo_raw(f)
+        if df is not None and not df.empty:
+            lista_dfs.append((df, nombre))
+
+    if not lista_dfs:
         print("Sin datos legibles en los archivos de data/raw/.", flush=True)
         return
 
-    # Consolidar todos los reportes
-    df_consolidado = pd.concat(dfs, ignore_index=True)
-    df_consolidado = df_consolidado.fillna("")
-    print(f"Total registros consolidados para ingesta: {len(df_consolidado)} filas, {len(df_consolidado.columns)} columnas.", flush=True)
+    # Alinear columnas inteligentemente
+    df_consolidado = alinear_dataframes(lista_dfs)
+    print(f"Resultado consolidado con columnas alineadas: {len(df_consolidado)} filas, {len(df_consolidado.columns)} columnas.", flush=True)
 
-    # 3. Escritura por lotes en Google Sheets
+    # Escritura por lotes en Google Sheets
     headers = df_consolidado.columns.tolist()
     valores = [headers] + df_consolidado.values.tolist()
 
     filas_necesarias = max(len(valores) + 50, 100)
-    cols_necesarias = max(len(headers) + 5, 20)
-    
+    cols_necesarias = max(len(headers) + 2, 25)
+
     print(f"Redimensionando hoja '{HOJA_DESTINO}' a {filas_necesarias} filas y {cols_necesarias} columnas...", flush=True)
     ws_ingesta.resize(rows=filas_necesarias, cols=cols_necesarias)
 
-    print(f"Limpiando contenido previo en '{HOJA_DESTINO}'...", flush=True)
+    print(f"Limpiando contenido previo desalineado en '{HOJA_DESTINO}'...", flush=True)
     ws_ingesta.clear()
 
-    print(f"Escribiendo {len(valores)} filas en '{HOJA_DESTINO}'...", flush=True)
+    print(f"Escribiendo {len(valores)} filas ordenadas y alineadas en '{HOJA_DESTINO}'...", flush=True)
     tamano_lote = 5000
     for i in range(0, len(valores), tamano_lote):
         lote = valores[i:i + tamano_lote]
@@ -172,7 +252,7 @@ def sincronizar_aranceles():
         ws_ingesta.update(range_name=rango, values=lote)
         print(f"  -> Lote escrito: filas {fila_inicio} a {fila_fin}", flush=True)
 
-    print(f"=== ÉXITO: Ingesta de Aranceles completada en '{HOJA_DESTINO}' ({len(valores) - 1} filas) ===", flush=True)
+    print(f"=== ÉXITO: Ingesta de Aranceles completada con columnas perfectamente alineadas ({len(valores) - 1} filas) ===", flush=True)
 
 if __name__ == "__main__":
     sincronizar_aranceles()
