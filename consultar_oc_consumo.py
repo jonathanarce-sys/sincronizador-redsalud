@@ -8,7 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 1. CONFIGURACIÓN
+# 1. IDENTIFICADORES Y CONFIGURACIÓN
 # ==========================================
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 HOJA_REPORTE = "Reporte_Consumo_OC"
@@ -20,12 +20,6 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-LICITALAB_API_URL = os.environ.get(
-    "LICITALAB_API_URL", 
-    "https://biapi.licitalab.cl/bi/v2/opportunities"
-).strip()
-
-# Lista de 111 licitaciones únicas solicitadas
 CODIGOS_OBJETIVO = [
     "1057402-55-LE26", "1057402-41-LE26", "1057402-90-LE26", "874750-17-L126",
     "1658-84-LE26", "1080089-31-LP26", "1237328-45-LE26", "3996-21-LE26",
@@ -91,115 +85,176 @@ def obtener_cliente_gspread():
     client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
     return client, sa_email
 
-def consultar_datos_base_maestra(sheet_maestra):
-    """Obtiene los datos base de las licitaciones desde la Base Maestra existente"""
-    valores = sheet_maestra.get_all_values()
-    if not valores or len(valores) < 2:
-        return {}
+def escanear_todas_las_pestanas(ss_maestra):
+    """
+    Escanea todas las pestañas existentes (Sheet1, Base Contratos, etc.)
+    para extraer datos de las licitaciones y sus órdenes de compra previas.
+    """
+    mapa_licitaciones = {}
     
-    cabecera = [str(c).strip().upper() for c in valores[0]]
-    idx_cod = 1
-    idx_nom = 2
-    idx_org = 8
-    idx_monto = 12
-    idx_estado = 10
-    
-    for idx, c in enumerate(cabecera):
-        if "CÓDIGO" in c or "CODIGO" in c: idx_cod = idx
-        elif "NOMBRE" in c: idx_nom = idx
-        elif "INSTITUCI" in c or "COMPRADOR" in c: idx_org = idx
-        elif "PRESUPUESTO" in c or "MONTO" in c: idx_monto = idx
-        elif "ESTADO" in c: idx_estado = idx
+    for ws in ss_maestra.worksheets():
+        if ws.title.strip().lower() == HOJA_REPORTE.lower():
+            continue
+            
+        print(f"Indexando pestaña: '{ws.title}'...", flush=True)
+        try:
+            datos = ws.get_all_values()
+        except Exception:
+            continue
+            
+        if not datos or len(datos) < 2:
+            continue
+            
+        cabecera = [str(c).strip().upper() for c in datos[0]]
+        
+        idx_cod = -1
+        idx_nom = -1
+        idx_org = -1
+        idx_monto = -1
+        idx_estado = -1
+        idx_oc = -1
+        idx_oc_neto = -1
+        idx_oc_bruto = -1
+        idx_oc_estado = -1
+        
+        for idx, c in enumerate(cabecera):
+            if ("CÓDIGO" in c or "CODIGO" in c) and not any(x in c for x in ["OC", "ORDEN", "CLIENTE"]):
+                if idx_cod == -1: idx_cod = idx
+            elif "NOMBRE" in c and "PROCESO" in c:
+                idx_nom = idx
+            elif any(x in c for x in ["INSTITUCIÓN", "INSTITUCION", "COMPRADOR", "ORGANISMO"]):
+                idx_org = idx
+            elif ("MONTO" in c or "PRESUPUESTO" in c) and "OC" not in c and "ORDEN" not in c:
+                idx_monto = idx
+            elif "ESTADO" in c and "OFERTA" in c:
+                idx_estado = idx
+            elif "CÓDIGO OC" in c or "CODIGO OC" in c or "NUMERO OC" in c:
+                idx_oc = idx
+            elif "ESTADO OC" in c:
+                idx_oc_estado = idx
+            elif "MONTO NETO OC" in c or "NETO OC" in c:
+                idx_oc_neto = idx
+            elif "MONTO BRUTO" in c or "BRUTO FACTURABLE" in c:
+                idx_oc_bruto = idx
 
-    dicc = {}
-    for r in valores[1:]:
-        if idx_cod < len(r) and r[idx_cod].strip():
-            c_val = r[idx_cod].strip().upper()
-            nom = r[idx_nom].strip() if idx_nom < len(r) else ""
-            org = r[idx_org].strip() if idx_org < len(r) else ""
-            mto = r[idx_monto].strip() if idx_monto < len(r) else "0"
-            est = r[idx_estado].strip() if idx_estado < len(r) else ""
-            dicc[c_val] = {
-                "nombre": nom,
-                "organismo": org,
-                "monto_presupuesto": mto,
-                "estado_oferta": est
-            }
-    return dicc
+        for fila in datos[1:]:
+            # Buscar el código en la fila
+            codigo_encontrado = None
+            if idx_cod != -1 and idx_cod < len(fila) and fila[idx_cod].strip():
+                m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", fila[idx_cod])
+                if m:
+                    codigo_encontrado = m[0].upper()
+            
+            if not codigo_encontrado:
+                for celda in fila[:6]:
+                    m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", str(celda))
+                    if m:
+                        codigo_encontrado = m[0].upper()
+                        break
+                        
+            if not codigo_encontrado:
+                continue
 
-def consultar_ordenes_compra_licitalab(codigos):
-    """Consulta la API de LicitaLAB BI / Mercado Público para obtener las OCs asociadas"""
+            # Extraer campos
+            nom = fila[idx_nom].strip() if idx_nom != -1 and idx_nom < len(fila) else ""
+            org = fila[idx_org].strip() if idx_org != -1 and idx_org < len(fila) else ""
+            mto = fila[idx_monto].strip() if idx_monto != -1 and idx_monto < len(fila) else "0"
+            est = fila[idx_estado].strip() if idx_estado != -1 and idx_estado < len(fila) else ""
+            
+            oc_cod = fila[idx_oc].strip() if idx_oc != -1 and idx_oc < len(fila) else ""
+            oc_est = fila[idx_oc_estado].strip() if idx_oc_estado != -1 and idx_oc_estado < len(fila) else ""
+            oc_neto = fila[idx_oc_neto].strip() if idx_oc_neto != -1 and idx_oc_neto < len(fila) else "0"
+            oc_bruto = fila[idx_oc_bruto].strip() if idx_oc_bruto != -1 and idx_oc_bruto < len(fila) else "0"
+
+            if codigo_encontrado not in mapa_licitaciones:
+                mapa_licitaciones[codigo_encontrado] = {
+                    "nombre": nom,
+                    "organismo": org,
+                    "presupuesto": mto,
+                    "estado_oferta": est,
+                    "ocs": []
+                }
+            else:
+                # Completar campos si estaban vacíos
+                if nom and not mapa_licitaciones[codigo_encontrado]["nombre"]:
+                    mapa_licitaciones[codigo_encontrado]["nombre"] = nom
+                if org and not mapa_licitaciones[codigo_encontrado]["organismo"]:
+                    mapa_licitaciones[codigo_encontrado]["organismo"] = org
+                if mto and mto != "0" and mapa_licitaciones[codigo_encontrado]["presupuesto"] == "0":
+                    mapa_licitaciones[codigo_encontrado]["presupuesto"] = mto
+
+            if oc_cod:
+                mapa_licitaciones[codigo_encontrado]["ocs"].append({
+                    "codigo_oc": oc_cod,
+                    "estado_oc": oc_est,
+                    "neto": oc_neto,
+                    "bruto": oc_bruto
+                })
+
+    return mapa_licitaciones
+
+def consultar_licitalab_especifico(codigo):
+    """Consulta la API de LicitaLAB BI por un código específico"""
+    if not LICITALAB_TOKEN:
+        return None
+        
     headers = {
         "x-api-key": LICITALAB_TOKEN,
         "Accept": "application/json",
         "User-Agent": "RedSalud-Consumo/1.0"
     }
-
-    print(f"Consultando órdenes de compra para {len(codigos)} licitaciones...", flush=True)
-    resultados_oc = {}
     
-    # Consultar detalle u oportunidades
-    for cod in codigos:
-        url_detalle = f"https://biapi.licitalab.cl/bi/v2/opportunities/{cod}"
+    rutas = [
+        f"https://biapi.licitalab.cl/bi/v2/opportunities?code={codigo}",
+        f"https://biapi.licitalab.cl/bi/v2/opportunities/{codigo}"
+    ]
+    
+    for url in rutas:
         try:
-            resp = requests.get(url_detalle, headers=headers, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                item = data.get("data") if isinstance(data, dict) and "data" in data else data
-                ocs = item.get("purchase_orders") or item.get("ordenes_compra") or item.get("orders") or []
-                
-                # Si las OCs vienen resumidas en campos de la oportunidad:
-                monto_adj = item.get("TOTAL_AWARDED_AMOUNT") or item.get("AVAILABLE_AMOUNT") or 0
-                cant_oc = item.get("TOTAL_QUOTES") or len(ocs)
-                
-                resultados_oc[cod] = {
-                    "ocs": ocs,
-                    "monto_adjudicado_api": monto_adj,
-                    "cant_oc": cant_oc
-                }
-            else:
-                resultados_oc[cod] = {"ocs": [], "monto_adjudicado_api": 0, "cant_oc": 0}
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0]
+                elif isinstance(data, dict):
+                    if "data" in data and isinstance(data["data"], list) and len(data["data"]) > 0:
+                        return data["data"][0]
+                    elif "data" in data and isinstance(data["data"], dict):
+                        return data["data"]
+                    return data
         except Exception:
-            resultados_oc[cod] = {"ocs": [], "monto_adjudicado_api": 0, "cant_oc": 0}
-            
-    return resultados_oc
+            pass
+    return None
+
+def consultar_mercadopublico_publico(codigo):
+    """Consulta directa a la API de Mercado Público como respaldo"""
+    ticket = "F8537A18-6766-4DEF-9E59-426B4FEE5844"
+    url = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?codigo={codigo}&ticket={ticket}"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            res = r.json()
+            if "Listado" in res and len(res["Listado"]) > 0:
+                return res["Listado"][0]
+    except Exception:
+        pass
+    return None
 
 def generar_reporte_consumo():
-    print("=== INICIANDO EXTRACCIÓN Y REPORTE DE CONSUMO / ORDENES DE COMPRA ===", flush=True)
-    
-    # 1. Autenticación Google Sheets
+    print("=== INICIANDO MOTOR PROFUNDO DE REPORTE DE CONSUMO Y OCs ===", flush=True)
+
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-        sheet_maestra = ss_maestra.sheet1
     except Exception as e:
-        print(f"Error conectando con Google Sheets: {repr(e)}", flush=True)
+        print(f"Error conectando a Google Sheets: {repr(e)}", flush=True)
         return
 
-    # 2. Obtener datos base
-    info_base = consultar_datos_base_maestra(sheet_maestra)
-    print(f"Información base indexada: {len(info_base)} procesos en Base Maestra.", flush=True)
+    # 1. Escanear pestañas existentes de la planilla
+    datos_hojas = escanear_todas_las_pestanas(ss_maestra)
+    print(f"Licitaciones indexadas desde las pestañas de Google Sheets: {len(datos_hojas)}", flush=True)
 
-    # 3. Consultar OCs (o consultar endpoint de LicitaLAB si hay token)
-    info_ocs = {}
-    if LICITALAB_TOKEN:
-        try:
-            # Consultamos las oportunidades recientes para cruzar datos
-            url_opps = "https://biapi.licitalab.cl/bi/v2/opportunities"
-            headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json"}
-            resp = requests.get(url_opps, headers=headers, params={"limit": 1000}, timeout=30)
-            if resp.status_code == 200:
-                data = resp.json()
-                lista = data if isinstance(data, list) else (data.get("data") or data.get("opportunities") or [])
-                for it in lista:
-                    c = str(it.get("OPPORTUNITY_CODE") or it.get("code") or "").strip().upper()
-                    if c in CODIGOS_OBJETIVO:
-                        info_ocs[c] = it
-        except Exception as e:
-            print(f"Aviso consultando API BI: {repr(e)}", flush=True)
-
-    # 4. Construir filas del reporte
     encabezados = [
         "N°",
         "Código Proceso",
@@ -216,33 +271,61 @@ def generar_reporte_consumo():
     ]
 
     filas_reporte = []
+
+    print(f"\nProcesando los {len(CODIGOS_OBJETIVO)} códigos solicitados...", flush=True)
     
     for i, cod in enumerate(CODIGOS_OBJETIVO, start=1):
-        datos_base = info_base.get(cod, {})
-        datos_api = info_ocs.get(cod, {})
+        # 1. Buscar primero en los datos locales de las pestañas
+        info_local = datos_hojas.get(cod, {})
         
-        org = datos_base.get("organismo") or datos_api.get("ORGANISM") or "SERVICIO DE SALUD"
-        nom = datos_base.get("nombre") or datos_api.get("OPPORTUNITY_NAME") or "Prestación Asistencial"
-        est = datos_base.get("estado_oferta") or datos_api.get("OPPORTUNITY_STATUS") or "Adjudicada"
+        org = info_local.get("organismo", "").strip()
+        nom = info_local.get("nombre", "").strip()
+        est = info_local.get("estado_oferta", "").strip()
+        monto_raw = info_local.get("presupuesto", "0").strip()
+        ocs_locales = info_local.get("ocs", [])
         
-        # Montos
-        monto_str = str(datos_base.get("monto_presupuesto") or datos_api.get("AVAILABLE_AMOUNT") or "0")
-        monto_limpio = re.sub(r"[^\d]", "", monto_str)
-        monto_presupuesto = int(monto_limpio) if monto_limpio else 0
-        
-        # Órdenes de compra asociadas
-        monto_consumido_raw = datos_api.get("TOTAL_AWARDED_AMOUNT") or datos_api.get("WON_AMOUNT") or 0
-        monto_consumido = int(float(monto_consumido_raw)) if monto_consumido_raw else 0
-        
-        # En caso de que no tenga monto OC consumido registrado aún:
-        if monto_consumido == 0 and monto_presupuesto > 0 and est.upper() == "ADJUDICADA":
-            # Si la licitación está recién adjudicada, el consumo parte en 0 o según emisión
-            monto_consumido = 0
+        # 2. Si falta el nombre u organismo, consultar a la API de LicitaLAB o Mercado Público
+        if not org or not nom or monto_raw in ["0", "", "0.0"]:
+            print(f"[{i}/{len(CODIGOS_OBJETIVO)}] Consultando API para {cod}...", flush=True)
+            info_api = consultar_licitalab_especifico(cod)
             
-        saldo = max(0, monto_presupuesto - monto_consumido)
-        porc_consumo = round((monto_consumido / monto_presupuesto) * 100, 1) if monto_presupuesto > 0 else 0.0
-        
-        # Clasificación del estado de consumo
+            if info_api:
+                org = org or str(info_api.get("ORGANISM") or info_api.get("buyer") or "")
+                nom = nom or str(info_api.get("OPPORTUNITY_NAME") or info_api.get("name") or "")
+                est = est or str(info_api.get("OPPORTUNITY_STATUS") or info_api.get("status") or "")
+                monto_raw = monto_raw if monto_raw not in ["0", ""] else str(info_api.get("AVAILABLE_AMOUNT") or info_api.get("TOTAL_AWARDED_AMOUNT") or 0)
+            else:
+                # Consultar Mercado Público
+                info_mp = consultar_mercadopublico_publico(cod)
+                if info_mp:
+                    org = org or str(info_mp.get("Comprador", {}).get("NombreOrganismo") or "")
+                    nom = nom or str(info_mp.get("Nombre") or "")
+                    est = est or str(info_mp.get("Estado") or "")
+                    monto_raw = monto_raw if monto_raw not in ["0", ""] else str(info_mp.get("MontoEstimado") or 0)
+
+        # Normalizar textos y valores
+        org = org if org else "Organismo Comprador del Estado"
+        nom = nom if nom else "Servicios Asistenciales Médicos"
+        est = est if est else "Adjudicada"
+
+        m_num = re.sub(r"[^\d]", "", str(monto_raw))
+        presupuesto = int(m_num) if m_num else 0
+
+        # Consumo de OCs
+        consumo_total = 0
+        lista_ocs = []
+        for oc in ocs_locales:
+            c_oc = oc.get("codigo_oc", "")
+            if c_oc and c_oc not in lista_ocs:
+                lista_ocs.append(c_oc)
+            b_val = re.sub(r"[^\d]", "", str(oc.get("bruto") or oc.get("neto") or 0))
+            if b_val:
+                consumo_total += int(b_val)
+
+        cant_oc = len(lista_ocs)
+        saldo = max(0, presupuesto - consumo_total)
+        porc_consumo = round((consumo_total / presupuesto) * 100, 1) if presupuesto > 0 else 0.0
+
         if porc_consumo >= 100:
             estado_consumo = "100% Consumido (Completado)"
         elif porc_consumo >= 75:
@@ -251,9 +334,8 @@ def generar_reporte_consumo():
             estado_consumo = "En Consumo Activo"
         else:
             estado_consumo = "Sin Consumo (Pendiente OC)"
-            
-        cods_oc = str(datos_api.get("ORDER_CODES") or datos_api.get("OC") or "Pendiente de Emisión")
-        cant_oc = int(datos_api.get("TOTAL_QUOTES") or (1 if monto_consumido > 0 else 0))
+
+        codigos_oc_str = ", ".join(lista_ocs) if lista_ocs else "Pendiente de Emisión"
 
         filas_reporte.append([
             i,
@@ -261,16 +343,16 @@ def generar_reporte_consumo():
             org,
             nom,
             est,
-            f"${monto_presupuesto:,.0f}".replace(",", "."),
+            f"${presupuesto:,.0f}".replace(",", "."),
             cant_oc,
-            f"${monto_consumido:,.0f}".replace(",", "."),
+            f"${consumo_total:,.0f}".replace(",", "."),
             f"${saldo:,.0f}".replace(",", "."),
             f"{porc_consumo:.1f}%",
             estado_consumo,
-            cods_oc
+            codigos_oc_str
         ])
 
-    # 5. Gestionar la pestaña independiente 'Reporte_Consumo_OC'
+    # 4. Escribir en la pestaña 'Reporte_Consumo_OC'
     ws_reporte = None
     for ws in ss_maestra.worksheets():
         if ws.title.strip().lower() == HOJA_REPORTE.lower():
@@ -278,22 +360,18 @@ def generar_reporte_consumo():
             break
 
     if not ws_reporte:
-        print(f"Creando pestaña independiente '{HOJA_REPORTE}'...", flush=True)
+        print(f"Creando pestaña '{HOJA_REPORTE}'...", flush=True)
         ws_reporte = ss_maestra.add_worksheet(title=HOJA_REPORTE, rows=len(filas_reporte) + 50, cols=15)
-    else:
-        print(f"Pestaña '{HOJA_REPORTE}' localizada. Actualizando...", flush=True)
 
-    # Redimensionar y limpiar
     ws_reporte.resize(rows=len(filas_reporte) + 20, cols=len(encabezados) + 2)
     ws_reporte.clear()
 
-    # Escribir contenido
     todo = [encabezados] + filas_reporte
     col_fin = gspread.utils.rowcol_to_a1(1, len(encabezados)).replace("1", "")
     rango = f"A1:{col_fin}{len(todo)}"
-    
+
     ws_reporte.update(range_name=rango, values=todo)
-    print(f"=== ÉXITO: {len(filas_reporte)} registros de consumo escritos en '{HOJA_REPORTE}' ===", flush=True)
+    print(f"\n=== ÉXITO: {len(filas_reporte)} licitaciones analizadas y reportadas en '{HOJA_REPORTE}' ===", flush=True)
 
 if __name__ == "__main__":
     generar_reporte_consumo()
