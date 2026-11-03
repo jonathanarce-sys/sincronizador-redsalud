@@ -1,0 +1,30 @@
+name: Reporte de Consumo y OCs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Ejecución programada semanal los lunes a las 08:00 UTC
+    - cron: '0 8 * * 1'
+
+jobs:
+  generar_reporte:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests gspread google-auth pandas
+
+      - name: Ejecutar Extractor de Consumo y OCs
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
+        run: python consultar_oc_consumo.py
