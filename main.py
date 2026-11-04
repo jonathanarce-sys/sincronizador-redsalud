@@ -8,15 +8,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 1. IDENTIFICADORES Y CONFIGURACIÓN GLOBAL
+# 1. IDENTIFICADORES Y CONFIGURACIÓN
 # ==========================================
-# ID Planilla Base Maestra de Licitaciones:
 SPREADSHEET_ID_MAESTRA = os.environ.get(
     "SPREADSHEET_ID_MAESTRA", 
     "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
 ).strip()
 
-# ID Planilla Consolidado Sector Público:
 SPREADSHEET_ID_CONSOLIDADO = os.environ.get(
     "SPREADSHEET_ID_CONSOLIDADO", 
     "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE"
@@ -24,10 +22,9 @@ SPREADSHEET_ID_CONSOLIDADO = os.environ.get(
 
 HOJA_DESTINO_CONSOLIDADO = os.environ.get("HOJA_DESTINO_CONSOLIDADO", "Consolidado").strip()
 
-# LÍMITE DE SEGURIDAD ESTRICTO:
-# Las filas 1 a 433 son registros históricos validados y auditados.
-# La escritura comenzará estrictamente desde la fila 434 en adelante.
-FILA_INICIO_CONSOLIDADO = 434
+# Las filas 1 a 434 son el histórico original validado (fila 434: Hospital Dr. Luis Tisné Brousse).
+# La escritura comenzará estrictamente desde la fila 435 en adelante.
+FILA_INICIO_CONSOLIDADO = 435
 
 LICITALAB_TOKEN = (
     os.environ.get("LICITALAB_TOKEN") or 
@@ -36,19 +33,30 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-TICKET_MERCADOPUBLICO = os.environ.get("MP_TICKET") or "F8537A18-6766-4DEF-9E59-426B4FEE5844"
-
-# 20 RUTs oficiales de filiales y clínicas RedSalud
-RUTS_REDSALUD = [
-    "96.942.400-2", "99.533.790-8", "96.598.850-0", "76.542.910-2",
-    "96.567.920-0", "78.040.520-0", "76.046.416-3", "96.774.580-4",
-    "78.053.560-1", "76.906.480-K", "99.568.700-3", "76.181.326-9",
-    "76.207.967-4", "78.918.290-6", "96.885.930-7", "88.611.600-4",
-    "76.124.062-5", "99.568.720-8", "96.680.980-9", "76.110.809-3"
-]
+RUTS_REDSALUD_DICT = {
+    "96.942.400-2": "RS Santiago",
+    "99.533.790-8": "RS Providencia",
+    "96.598.850-0": "Megasalud",
+    "76.542.910-2": "RS Magallanes",
+    "96.567.920-0": "RS Valparaíso",
+    "78.040.520-0": "RS Valparaíso",
+    "76.046.416-3": "Megasalud",
+    "96.774.580-4": "RS Vitacura",
+    "78.053.560-1": "RS Vitacura",
+    "76.906.480-K": "RS Vitacura",
+    "99.568.700-3": "RS Santiago",
+    "76.181.326-9": "Instituto del Cáncer",
+    "76.207.967-4": "RS Rancagua",
+    "78.918.290-6": "RS Rancagua",
+    "96.885.930-7": "RS Iquique",
+    "88.611.600-4": "RS Temuco",
+    "76.124.062-5": "RS Temuco",
+    "99.568.720-8": "RS Santiago",
+    "96.680.980-9": "RS Santiago",
+    "76.110.809-3": "RS Santiago"
+}
 
 def obtener_cliente_gspread():
-    """Autentica con la cuenta de servicio de Google Cloud."""
     posibles = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
         "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS"
@@ -82,34 +90,54 @@ def obtener_cliente_gspread():
     client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
     return client, sa_email
 
-def consultar_licitalab_recientes(limit=500):
-    """Consulta las oportunidades más recientes desde LicitaLAB BI API."""
-    if not LICITALAB_TOKEN:
-        print("Aviso: LICITALAB_TOKEN no configurado en entorno.")
-        return []
-    
-    headers = {
-        "x-api-key": LICITALAB_TOKEN,
-        "Accept": "application/json",
-        "User-Agent": "RedSalud-Sincronizador/1.0"
-    }
-    url = f"https://biapi.licitalab.cl/bi/v2/opportunities?limit={limit}"
-    try:
-        r = requests.get(url, headers=headers, timeout=25)
-        if r.status_code == 200:
-            d = r.json()
-            items = d if isinstance(d, list) else (d.get("data") or d.get("opportunities") or [])
-            print(f"LicitaLAB BI API: {len(items)} oportunidades recuperadas.")
-            return items
-    except Exception as e:
-        print(f"Error consultando LicitaLAB BI API: {e}")
-    return []
+def deducir_categoria_cliente(nombre_org):
+    nom = str(nombre_org or "").upper()
+    if "HOSPITAL" in nom or "CLINICO" in nom or "CLÍNICO" in nom or "CRS" in nom:
+        return "Hospital"
+    elif "SERVICIO DE SALUD" in nom or "SS" in nom:
+        return "Servicio de Salud"
+    elif "MUNICIPAL" in nom or "CORP" in nom or "DISAM" in nom or "DESAMU" in nom:
+        return "Municipalidad"
+    elif "ARMADA" in nom or "EJERCITO" in nom or "FUERZA AEREA" in nom or "DIPRECA" in nom or "CAPREDENA" in nom:
+        return "Fuerzas Armadas"
+    return "Institución Pública"
 
-def extraer_adjudicadas_de_maestra(ss_maestra):
+def es_licitacion_real(codigo, tipo_proceso):
     """
-    Lee las licitaciones en estado 'Adjudicada' de la Base Maestra existente.
+    Excluye estrictamente Compras Ágiles (COT, COTI, CO, etc.).
+    Solo admite licitaciones públicas y privadas (LP, LR, LE, LQ, L1, LS, etc.).
     """
-    filas_adjudicadas = []
+    cod = str(codigo or "").strip().upper()
+    tip = str(tipo_proceso or "").strip().upper()
+
+    # Si dice explícitamente compra ágil o cotización, rechazar
+    if "ÁGIL" in tip or "AGIL" in tip or "COTIZACI" in tip or "COMPRA AGIL" in tip:
+        return False
+
+    # Analizar el sufijo del código de Mercado Público:
+    # Ejemplo: 1057402-41-LE26 -> Sufijo: LE26 -> Tipo: LE
+    partes = cod.split("-")
+    if len(partes) >= 3:
+        sufijo = partes[2]
+        # Si el sufijo contiene COT o CO, es compra ágil
+        if "COT" in sufijo or "CO" in sufijo:
+            return False
+        # Si tiene LP, LR, LE, LQ, L1, LS, E2, B2, etc. es licitación
+        if any(x in sufijo for x in ["LP", "LR", "LE", "LQ", "L1", "LS", "E2", "B2"]):
+            return True
+
+    # Si el tipo proceso dice Licitación
+    if "LICITA" in tip:
+        return True
+
+    return False
+
+def extraer_licitaciones_adjudicadas_mapeadas(ss_maestra):
+    """
+    Lee la Base Maestra, filtra SOLAMENTE licitaciones adjudicadas (NO compras ágiles)
+    y mapea al esquema de 9 columnas del Consolidado.
+    """
+    filas_consolidadas = []
     codigos_vistos = set()
 
     for ws in ss_maestra.worksheets():
@@ -123,18 +151,41 @@ def extraer_adjudicadas_de_maestra(ss_maestra):
             continue
 
         cabecera = [str(c).strip().upper() for c in datos[0]]
+        
         idx_cod = -1
+        idx_nom = -1
+        idx_org = -1
         idx_est = -1
+        idx_tipo = -1
+        idx_linea = -1
+        idx_rut_cli = -1
+        idx_filial = -1
+        idx_rut_filial = -1
+
         for idx, col in enumerate(cabecera):
-            if ("CÓDIGO" in col or "CODIGO" in col) and not any(x in col for x in ["OC", "CLIENTE"]):
+            if ("CÓDIGO" in col or "CODIGO" in col) and not any(x in col for x in ["OC", "CLIENTE", "PRESTADOR"]):
                 if idx_cod == -1: idx_cod = idx
+            elif "NOMBRE" in col and "PROCESO" in col:
+                idx_nom = idx
+            elif any(x in col for x in ["ORGANISMO", "COMPRADOR", "INSTITUCIÓN", "INSTITUCION"]):
+                idx_org = idx
             elif "ESTADO" in col and "OFERTA" in col:
                 idx_est = idx
+            elif "TIPO" in col and "PROCESO" in col:
+                idx_tipo = idx
+            elif any(x in col for x in ["CATEGORÍA", "CATEGORIA", "LÍNEA", "LINEA", "PRESTACION"]):
+                idx_linea = idx
+            elif "RUT" in col and "CLIENTE" in col:
+                idx_rut_cli = idx
+            elif "FILIAL" in col and "RUT" not in col:
+                idx_filial = idx
+            elif "RUT" in col and "FILIAL" in col:
+                idx_rut_filial = idx
 
         for fila in datos[1:]:
             cod = fila[idx_cod].strip().upper() if idx_cod != -1 and idx_cod < len(fila) else ""
             if not cod:
-                for celda in fila[:5]:
+                for celda in fila[:4]:
                     m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", str(celda))
                     if m:
                         cod = m[0].upper()
@@ -143,18 +194,74 @@ def extraer_adjudicadas_de_maestra(ss_maestra):
                 continue
 
             est = fila[idx_est].strip().upper() if idx_est != -1 and idx_est < len(fila) else ""
-            # Considerar procesos adjudicados
-            if "ADJUDICAD" in est or any("ADJUDICAD" in str(x).upper() for x in fila):
-                codigos_vistos.add(cod)
-                filas_adjudicadas.append(fila)
+            tipo = fila[idx_tipo].strip().upper() if idx_tipo != -1 and idx_tipo < len(fila) else ""
 
-    print(f"Base Maestra: {len(filas_adjudicadas)} licitaciones adjudicadas identificadas.")
-    return filas_adjudicadas
+            # FILTRO 1: DEBE SER ADJUDICADA
+            es_adjudicada = "ADJUDICAD" in est or any("ADJUDICAD" in str(x).upper() for x in fila)
+            if not es_adjudicada:
+                continue
+
+            # FILTRO 2: EXCLUIR COMPRAS ÁGILES (SOLO LICITACIONES)
+            if not es_licitacion_real(cod, tipo):
+                continue
+
+            codigos_vistos.add(cod)
+
+            # Mapeo a las columnas del Consolidado:
+            # Col A: Categoria Cliente
+            # Col B: Cliente
+            # Col C: Rut Cliente
+            # Col D: Filial
+            # Col E: Rut Filial
+            # Col F: Tipo registro
+            # Col G: Tipo Contrato
+            # Col H: ID licitación
+            # Col I: Prestaciones
+
+            org = fila[idx_org].strip() if idx_org != -1 and idx_org < len(fila) else ""
+            if not org or "INSTITUCIÓN" in org.upper():
+                org = "Servicio de Salud / Hospital Público"
+
+            cat_cliente = deducir_categoria_cliente(org)
+            rut_cli = fila[idx_rut_cli].strip() if idx_rut_cli != -1 and idx_rut_cli < len(fila) else ""
+
+            # Filial y RUT filial
+            rut_filial = fila[idx_rut_filial].strip() if idx_rut_filial != -1 and idx_rut_filial < len(fila) else ""
+            filial = fila[idx_filial].strip() if idx_filial != -1 and idx_filial < len(fila) else ""
+            if not filial and rut_filial in RUTS_REDSALUD_DICT:
+                filial = RUTS_REDSALUD_DICT[rut_filial]
+            elif not filial:
+                filial = "RS Santiago"
+
+            tipo_reg = "Contrato Base"
+            tipo_cont = "Licitación"
+
+            prestaciones = fila[idx_linea].strip() if idx_linea != -1 and idx_linea < len(fila) else ""
+            if not prestaciones:
+                prestaciones = fila[idx_nom].strip() if idx_nom != -1 and idx_nom < len(fila) else "Servicios Asistenciales Médicos"
+            prestaciones = prestaciones.replace("['", "").replace("']", "").replace('["', "").replace('"]', "")
+
+            fila_consolidada = [
+                cat_cliente,      # Col A: Categoria Cliente
+                org,              # Col B: Cliente
+                rut_cli,          # Col C: Rut Cliente
+                filial,           # Col D: Filial
+                rut_filial,       # Col E: Rut Filial
+                tipo_reg,         # Col F: Tipo registro
+                tipo_cont,        # Col G: Tipo Contrato ("Licitación")
+                cod,              # Col H: ID licitación
+                prestaciones      # Col I: Prestaciones
+            ]
+
+            filas_consolidadas.append(fila_consolidada)
+
+    print(f"Base Maestra: {len(filas_consolidadas)} Licitaciones Públicas Adjudicadas (Compras Ágiles excluidas).")
+    return filas_consolidadas
 
 def actualizar_consolidado(ss_consolidado, filas_nuevas):
     """
-    Actualiza la hoja Consolidado protegiendo las filas 1 a 433 y
-    escribiendo los datos nuevos a partir de la fila 434.
+    Actualiza la hoja Consolidado a partir de la fila 435, preservando intactas
+    las filas históricas 1 a 434 y alineando estrictamente las 9 columnas oficiales.
     """
     ws_destino = None
     for ws in ss_consolidado.worksheets():
@@ -166,56 +273,45 @@ def actualizar_consolidado(ss_consolidado, filas_nuevas):
         print(f"Usando hoja '{ws_destino.title}' para Consolidado.")
 
     if not filas_nuevas:
-        print("No hay filas nuevas para actualizar en el Consolidado.")
+        print("Aviso: No se encontraron nuevas licitaciones adjudicadas para agregar.")
         return
 
-    # Leer cabecera oficial del Consolidado para determinar ancho
-    cabecera = ws_destino.row_values(1)
-    num_cols = len(cabecera) if cabecera else len(filas_nuevas[0])
-    col_fin = gspread.utils.rowcol_to_a1(1, num_cols).replace("1", "")
+    num_cols = 9
+    col_fin = "I"
 
-    # Normalizar longitud de columnas por fila
-    filas_ajustadas = []
-    for f in filas_nuevas:
-        if len(f) < num_cols:
-            f_ext = f + [""] * (num_cols - len(f))
-        else:
-            f_ext = f[:num_cols]
-        filas_ajustadas.append(f_ext)
-
-    # Asegurar dimensión de la planilla
-    total_filas = FILA_INICIO_CONSOLIDADO + len(filas_ajustadas) + 50
+    # 1. Dimensionar la hoja
+    total_filas = FILA_INICIO_CONSOLIDADO + len(filas_nuevas) + 50
     if ws_destino.row_count < total_filas:
         print(f"Ampliando Consolidado a {total_filas} filas...")
         ws_destino.resize(rows=total_filas, cols=max(ws_destino.col_count, num_cols))
 
-    # Limpiar rango desde 434 (Filas 1 a 433 totalmente blindadas)
+    # 2. Limpiar registros antiguos desde 435 en adelante (PRESERVANDO FILAS 1 A 434)
     max_filas_actual = max(ws_destino.row_count, total_filas)
     rango_limpieza = f"A{FILA_INICIO_CONSOLIDADO}:{col_fin}{max_filas_actual}"
-    print(f"Protegiendo filas 1 a {FILA_INICIO_CONSOLIDADO - 1}. Limpiando rango de actualización: {rango_limpieza}")
+    print(f"Limpiando datos incorrectos en rango: {rango_limpieza} (Filas 1 a 434 totalmente protegidas)...")
     try:
         ws_destino.batch_clear([rango_limpieza])
     except Exception:
         pass
 
-    # Escritura por lotes desde la fila 434
-    fila_fin = FILA_INICIO_CONSOLIDADO + len(filas_ajustadas) - 1
+    # 3. Escritura por lotes a partir de la fila 435
+    fila_fin = FILA_INICIO_CONSOLIDADO + len(filas_nuevas) - 1
     rango_total = f"A{FILA_INICIO_CONSOLIDADO}:{col_fin}{fila_fin}"
-    print(f"Escribiendo {len(filas_ajustadas)} registros adjudicados en {rango_total}...")
+    print(f"Escribiendo {len(filas_nuevas)} Licitaciones Adjudicadas en {rango_total}...")
 
-    tamano_lote = 500
-    for offset in range(0, len(filas_ajustadas), tamano_lote):
-        lote = filas_ajustadas[offset:offset + tamano_lote]
+    tamano_lote = 300
+    for offset in range(0, len(filas_nuevas), tamano_lote):
+        lote = filas_nuevas[offset:offset + tamano_lote]
         f_ini = FILA_INICIO_CONSOLIDADO + offset
         f_fin_lote = f_ini + len(lote) - 1
         rango_lote = f"A{f_ini}:{col_fin}{f_fin_lote}"
         ws_destino.update(range_name=rango_lote, values=lote)
-        print(f"  -> Lote guardado: filas {f_ini} a {f_fin_lote}")
+        print(f"  -> Lote guardado con éxito: filas {f_ini} a {f_fin_lote}")
 
-    print(f"=== Éxito: Consolidado actualizado desde la fila {FILA_INICIO_CONSOLIDADO} ({len(filas_ajustadas)} registros) ===")
+    print(f"=== Éxito: Consolidado actualizado desde la fila {FILA_INICIO_CONSOLIDADO} con {len(filas_nuevas)} Licitaciones Adjudicadas ===")
 
 def main():
-    print("=== INICIANDO SINCRONIZADOR PRINCIPAL REDSALUD (MAIN.PY) ===")
+    print("=== SINCRONIZADOR PRINCIPAL REDSALUD (MAIN.PY - SOLO LICITACIONES ADJUDICADAS) ===")
     try:
         client, sa_email = obtener_cliente_gspread()
         print(f"Autenticado en Google Sheets como: {sa_email}")
@@ -223,20 +319,20 @@ def main():
         print(f"Error crítico de autenticación: {e}")
         return
 
-    # 1. Conexión a Base Maestra
+    # 1. Base Maestra
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         print(f"Base Maestra conectada: '{ss_maestra.title}'")
-        adjudicadas_maestra = extraer_adjudicadas_de_maestra(ss_maestra)
+        licitaciones_adjudicadas = extraer_licitaciones_adjudicadas_mapeadas(ss_maestra)
     except Exception as e:
         print(f"Error accediendo a Base Maestra: {e}")
-        adjudicadas_maestra = []
+        licitaciones_adjudicadas = []
 
-    # 2. Conexión a Consolidado Sector Público
+    # 2. Consolidado Sector Público
     try:
         ss_consolidado = client.open_by_key(SPREADSHEET_ID_CONSOLIDADO)
         print(f"Consolidado Sector Público conectado: '{ss_consolidado.title}'")
-        actualizar_consolidado(ss_consolidado, adjudicadas_maestra)
+        actualizar_consolidado(ss_consolidado, licitaciones_adjudicadas)
     except Exception as e:
         print(f"Error actualizando Consolidado: {e}")
 
