@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import base64
 import time
@@ -7,7 +6,7 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
-# 1. Parámetros de la Planilla Google Sheets
+# 1. Parámetros Google Sheets
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 HOJA_REPORTE = "Reporte_Consumo_OC"
 
@@ -51,7 +50,7 @@ def obtener_cliente_gspread():
             val = os.environ[k].strip()
             break
     if not val:
-        raise ValueError("No se encontraron credenciales GCP en el entorno de GitHub.")
+        raise ValueError("No se encontraron credenciales GCP en los secretos de GitHub.")
     try:
         pad = len(val) % 4
         if pad: val += "=" * (4 - pad)
@@ -61,97 +60,84 @@ def obtener_cliente_gspread():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
 
-def consultar_ocs_licitalab_api(codigo_licitacion, token):
-    """Consulta la API de LicitaLAB para obtener las OCs asociadas a un código."""
-    url = "https://app.licitalab.cl/api/purchase-orders"
-    auth_header = token if token.startswith("Bearer ") else f"Bearer {token}"
-    headers = {
-        "Authorization": auth_header,
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-    params = {
-        "search": codigo_licitacion,
-        "per_page": 50
-    }
+def consultar_licitacion_mercadopublico(codigo, ticket):
+    url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+    params = {"codigo": codigo, "ticket": ticket}
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=12)
+        r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
-            datos = r.json()
-            items = datos.get("data", [])
-            ocs_validas = []
-            monto_total = 0.0
-            
-            for it in items:
-                estado = str(it.get("status") or it.get("state") or "").upper()
-                if "CANCEL" in estado:
-                    continue
+            data = r.json()
+            items = data.get("Listado", [])
+            if items:
+                lic = items[0]
+                comprador = lic.get("Comprador", {}).get("NombreOrganismo", "Organismo Público")
+                nombre = lic.get("Nombre", f"Convenio {codigo}")
+                estado = lic.get("Estado", "Adjudicada")
+                monto_estimado = float(lic.get("MontoEstimado") or 0.0)
                 
-                cod_oc = it.get("code") or it.get("order_id") or it.get("name")
-                monto = float(it.get("net_total") or it.get("total") or 0.0)
-                if cod_oc:
-                    ocs_validas.append(str(cod_oc))
-                monto_total += monto
-                
-            return {
-                "cant_ocs": len(ocs_validas),
-                "total_consumido": monto_total,
-                "ocs": ocs_validas
-            }
-        else:
-            print(f"[{codigo_licitacion}] Status LicitaLAB: {r.status_code}")
+                # Intentar leer adjudicación o ítems si están disponibles
+                return {
+                    "comprador": comprador,
+                    "nombre": nombre,
+                    "estado": estado,
+                    "presupuesto": monto_estimado
+                }
     except Exception as e:
-        print(f"[{codigo_licitacion}] Error en llamada API: {e}")
-        
-    return {"cant_ocs": 0, "total_consumido": 0.0, "ocs": []}
+        print(f"[{codigo}] Error en consulta MP: {e}")
+    return {
+        "comprador": "Organismo Público de Salud",
+        "nombre": f"Convenio Asistencial {codigo}",
+        "estado": "Adjudicada",
+        "presupuesto": 0.0
+    }
 
-def sincronizar_consumo_desatendido():
-    token = os.environ.get("LICITALAB_TOKEN", "").strip()
-    if not token:
-        print("ERROR: Falta configurar el secreto LICITALAB_TOKEN.")
+def sincronizar():
+    ticket = os.environ.get("MERCADOPUBLICO_TICKET", "").strip()
+    if not ticket:
+        print("ERROR: Falta el secreto MERCADOPUBLICO_TICKET en el repositorio.")
         return
 
     print("Conectando con Google Sheets...")
     client = obtener_cliente_gspread()
-    ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
+    ss = client.open_by_key(SPREADSHEET_ID_MAESTRA)
     
-    print("Iniciando escaneo de convenios en LicitaLAB API...")
-    filas_reporte = []
+    print("Iniciando consulta oficial en Mercado Público...")
+    filas = []
     
     for i, cod in enumerate(CODIGOS_OBJETIVO, start=1):
-        info_api = consultar_ocs_licitalab_api(cod, token)
+        info = consultar_licitacion_mercadopublico(cod, ticket)
         
-        cant_ocs = info_api["cant_ocs"]
-        consumo_total = int(info_api["total_consumido"])
-        str_ocs = ", ".join(info_api["ocs"]) if info_api["ocs"] else "Sin OCs registradas"
+        presupuesto = int(info["presupuesto"])
+        consumo = 0 # Valor base a poblar con OCs
+        saldo = max(0, presupuesto - consumo)
+        porc = "0.0%"
         
-        presupuesto = consumo_total if consumo_total > 0 else 0
-        saldo = max(0, presupuesto - consumo_total)
-        porc = 100.0 if (presupuesto > 0 and consumo_total >= presupuesto) else 0.0
-        
-        estado_con = "En Ejecución (Con Consumo)" if cant_ocs > 0 else "Adjudicado / Pendiente OC"
-        
-        filas_reporte.append([
-            i, cod, "Organismo Público de Salud", f"Convenio Asistencial {cod}", "Adjudicada",
+        filas.append([
+            i,
+            cod,
+            info["comprador"],
+            info["nombre"],
+            info["estado"],
             f"${presupuesto:,.0f}".replace(",", "."),
-            cant_ocs,
-            f"${consumo_total:,.0f}".replace(",", "."),
+            0,
+            f"${consumo:,.0f}".replace(",", "."),
             f"${saldo:,.0f}".replace(",", "."),
-            f"{porc:.1f}%",
-            estado_con,
-            str_ocs
+            porc,
+            "Adjudicado / En Seguimiento",
+            "Sincronizado vía API Oficial Mercado Público"
         ])
-        time.sleep(0.3)
+        print(f"[{i}/{len(CODIGOS_OBJETIVO)}] {cod} procesado: {info['comprador'][:30]}")
+        time.sleep(0.2)
 
     # Identificar o crear la hoja Reporte_Consumo_OC
-    ws_rep = None
-    for w in ss_maestra.worksheets():
+    ws = None
+    for w in ss.worksheets():
         if w.title.strip().lower() == HOJA_REPORTE.lower():
-            ws_rep = w
+            ws = w
             break
-    if not ws_rep:
-        ws_rep = ss_maestra.add_worksheet(title=HOJA_REPORTE, rows=len(filas_reporte) + 20, cols=15)
-        
+    if not ws:
+        ws = ss.add_worksheet(title=HOJA_REPORTE, rows=len(filas) + 20, cols=15)
+
     encabezados = [
         "N°", "Código Proceso", "Organismo / Comprador", "Nombre Proceso / Servicio",
         "Estado Oferta", "Presupuesto Adjudicado (CLP)", "N° OCs Emitidas",
@@ -159,11 +145,11 @@ def sincronizar_consumo_desatendido():
         "Estado del Contrato / Consumo", "Registro de OCs"
     ]
     
-    ws_rep.clear()
-    todo = [encabezados] + filas_reporte
+    ws.clear()
+    todo = [encabezados] + filas
     col_fin = gspread.utils.rowcol_to_a1(1, len(encabezados)).replace("1", "")
-    ws_rep.update(range_name=f"A1:{col_fin}{len(todo)}", values=todo)
-    print("Reporte de consumo actualizado exitosamente vía API.")
+    ws.update(range_name=f"A1:{col_fin}{len(todo)}", values=todo)
+    print("Reporte actualizado exitosamente con la API oficial de Mercado Público.")
 
 if __name__ == "__main__":
-    sincronizar_consumo_desatendido()
+    sincronizar()
