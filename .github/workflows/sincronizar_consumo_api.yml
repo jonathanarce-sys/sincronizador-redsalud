@@ -1,4 +1,4 @@
-name: Sincronización Automática API LicitaLAB
+name: Sincronización Automática API Mercado Público
 
 on:
   schedule:
@@ -23,9 +23,9 @@ jobs:
         run: |
           pip install requests gspread google-auth
 
-      - name: Ejecutar consulta API LicitaLAB
+      - name: Ejecutar consulta API Mercado Público
         env:
           GCP_JSON_BASE64: ${{ secrets.GCP_JSON_BASE64 }}
-          LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
+          MERCADOPUBLICO_TICKET: ${{ secrets.MERCADOPUBLICO_TICKET }}
         run: |
           python consultar_oc_licitalab_api.py
