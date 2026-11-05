@@ -1,0 +1,31 @@
+name: Sincronización Automática API LicitaLAB
+
+on:
+  schedule:
+    # Ejecuta de lunes a viernes a las 07:00 AM hora de Chile (10:00 UTC)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  actualizar-consumo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: |
+          pip install requests gspread google-auth
+
+      - name: Ejecutar consulta API LicitaLAB
+        env:
+          GCP_JSON_BASE64: ${{ secrets.GCP_JSON_BASE64 }}
+          LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
+        run: |
+          python consultar_oc_licitalab_api.py
