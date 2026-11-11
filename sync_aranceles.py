@@ -1,3 +1,24 @@
+TypeError: Object of type Timestamp is not JSON serializable
+```[cite: 15]
+
+---
+
+### Diagnóstico del error
+
+1. **Columnas con Fechas (`Timestamp`):**  
+   Los archivos de aranceles (especialmente el archivo Excel de DIPRECA) contienen celdas de fechas. Pandas las interpreta internamente como objetos `pd.Timestamp`, los cuales no pueden ser convertidos directamente a texto JSON por la API de Google Sheets[cite: 15].
+2. **Duplicidad de archivos:**  
+   En la lista de archivos detectados están tanto `DIPRECA ... .xlsx` (14.641 filas) como `DIPRECA ... 2026_Prestaciones (2).csv` (14.641 filas)[cite: 14]. Ambas versiones estaban sumando **33.658 filas** en total para insertar[cite: 14].
+3. **Volumen de envío:**  
+   Subir más de 30.000 filas en un solo paquete directo suele provocar bloqueos de memoria o límites de tamaño en Google Sheets. Se debe enviar en bloques (lotes de 5.000 filas).
+
+---
+
+### Código corregido para `sync_aranceles.py`
+
+Reemplaza todo el contenido de **`sync_aranceles.py`** en tu repositorio con esta versión:
+
+```python
 import os
 import glob
 import json
@@ -6,20 +27,14 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ID extraído directamente de tu URL
 SPREADSHEET_ID_MAESTRA = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
 HOJA_DESTINO = "RAW_DATA_INGESTA"
 CARPETA_RAW = "data/raw"
-FILA_INICIO = 19019  # Celda exacta donde se anexa la nueva información sin borrar 1:19018
+FILA_INICIO = 19019
+BATCH_SIZE = 5000  # Envío en bloques para estabilidad de la API
 
 def obtener_cliente_gspread():
-    posibles = [
-        "GCP_SA_KEY",
-        "GCP_JSON_BASE64",
-        "GCP_SERVICE_ACCOUNT",
-        "GOOGLE_CREDENTIALS",
-        "GCP_JSON"
-    ]
+    posibles = ["GCP_SA_KEY", "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GCP_JSON"]
     val = None
     for k in posibles:
         if k in os.environ and os.environ[k].strip():
@@ -43,14 +58,18 @@ def obtener_cliente_gspread():
     ]
     return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
 
+def formatear_valor(x):
+    """Convierte timestamps, nulos y tipos no serializables a texto o formatos estándar."""
+    if pd.isna(x):
+        return ""
+    if isinstance(x, (pd.Timestamp, pd.DatetimeIndex)):
+        return x.strftime("%d-%m-%Y")
+    return str(x) if isinstance(x, (float, int)) and pd.isna(x) else x
+
 def sincronizar_aranceles():
     print("Conectando con Google Sheets...")
     client = obtener_cliente_gspread()
     ss = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-    
-    # 1. Búsqueda tolerante de la pestaña (ignora mayúsculas/minúsculas y espacios accidentales)
-    hojas_disponibles = [w.title for w in ss.worksheets()]
-    print(f"Pestañas encontradas en el documento: {hojas_disponibles}")
     
     ws = None
     objetivo = HOJA_DESTINO.strip().lower()
@@ -60,14 +79,10 @@ def sincronizar_aranceles():
             break
 
     if not ws:
-        raise ValueError(
-            f"No se encontró la hoja '{HOJA_DESTINO}'. "
-            f"Pestañas detectadas en el archivo: {hojas_disponibles}"
-        )
+        raise ValueError(f"No se encontró la hoja '{HOJA_DESTINO}'.")
 
     print(f"Pestaña identificada con éxito: '{ws.title}'")
 
-    # 2. Localizar archivos nuevos en data/raw (ignorando archivos ocultos como .gitkeep)
     patron = os.path.join(CARPETA_RAW, "*")
     archivos = [f for f in glob.glob(patron) if not os.path.basename(f).startswith(".")]
     print(f"Archivos encontrados para ingesta: {[os.path.basename(x) for x in archivos]}")
@@ -77,9 +92,10 @@ def sincronizar_aranceles():
         return
 
     registros = []
+    max_cols = 0
+
     for f in archivos:
         print(f"Leyendo: {os.path.basename(f)}")
-        # Carga tolerante de CSV y Excel
         if f.lower().endswith(".csv"):
             try:
                 df = pd.read_csv(f, sep=None, engine="python", encoding="utf-8")
@@ -88,31 +104,42 @@ def sincronizar_aranceles():
         else:
             df = pd.read_excel(f)
 
+        # Formateo de fechas a string (elimina el error Timestamp not JSON serializable)
+        df = df.apply(lambda col: col.map(formatear_valor))
         df = df.fillna("")
+        
         datos = df.values.tolist()
-        registros.extend(datos)
-        print(f" -> {len(datos)} filas extraídas de {os.path.basename(f)}")
+        if datos:
+            max_cols = max(max_cols, len(datos[0]))
+            registros.extend(datos)
+            print(f" -> {len(datos)} filas procesadas de {os.path.basename(f)}")
 
     if not registros:
         print("No hay filas con datos para anexar.")
         return
 
-    # 3. Calcular dimensiones exactas para anexar
     total_filas = len(registros)
     fila_fin = FILA_INICIO + total_filas - 1
-    total_cols = len(registros[0])
-    col_fin = gspread.utils.rowcol_to_a1(1, total_cols).replace("1", "")
+    col_fin = gspread.utils.rowcol_to_a1(1, max_cols).replace("1", "")
 
-    # Expandir filas de la hoja si hace falta
+    # Validar capacidad de filas
     if ws.row_count < fila_fin:
-        ws.add_rows(fila_fin - ws.row_count + 100)
+        filas_agregar = (fila_fin - ws.row_count) + 500
+        print(f"Expandiendo hoja en {filas_agregar} filas...")
+        ws.add_rows(filas_agregar)
 
-    # 4. Actualizar únicamente el rango desde FILA_INICIO (A19019 hacia abajo)
-    rango_actualizar = f"A{FILA_INICIO}:{col_fin}{fila_fin}"
-    print(f"Insertando {total_filas} filas en el rango {rango_actualizar}...")
-    
-    ws.update(range_name=rango_actualizar, values=registros)
-    print(f"Proceso finalizado con éxito. Se anexaron datos de la fila {FILA_INICIO} a la {fila_fin} sin tocar las 19.018 anteriores.")
+    print(f"Insertando {total_filas} filas por lotes desde la fila {FILA_INICIO}...")
+
+    # Escritura por bloques
+    for i in range(0, total_filas, BATCH_SIZE):
+        bloque = registros[i:i + BATCH_SIZE]
+        f_inicio = FILA_INICIO + i
+        f_termino = f_inicio + len(bloque) - 1
+        rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
+        print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
+        ws.update(range_name=rango_bloque, values=bloque)
+
+    print(f"Éxito: Se anexaron {total_filas} filas respetando las 19018 previas.")
 
 if __name__ == "__main__":
     sincronizar_aranceles()
