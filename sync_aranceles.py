@@ -1,20 +1,3 @@
-File "/home/runner/.../sync_aranceles.py", line 1
-  File "/home/runner/.../sync_aranceles.py", line 11
-SyntaxError: invalid syntax
-```[cite: 20]
-
-Esto ocurrió porque en la **línea 1** de `sync_aranceles.py` quedó pegado el propio mensaje de error de la terminal (`File ".../sync_aranceles.py"`)[cite: 20]. Python intenta ejecutar ese texto en la primera línea y se detiene de inmediato por sintaxis inválida[cite: 20].
-
----
-
-### Solución
-
-1. Ve a tu repositorio en GitHub y abre **`sync_aranceles.py`**[cite: 20].
-2. Haz clic en el ícono del **lápiz** (Edit this file).
-3. Selecciona **todo el texto** (`Ctrl + A` en Windows o `Cmd + A` en Mac) y presiona **Supr / Delete** para dejar el editor completamente en blanco[cite: 20].
-4. Pega exactamente el siguiente código (que inicia formalmente con `import os` en la línea 1):
-
-```python
 import os
 import glob
 import json
@@ -92,7 +75,7 @@ def sincronizar_aranceles():
         else:
             df = pd.read_excel(f)
 
-        # Convierte todos los valores a texto para prevenir errores de tipo Timestamp en el JSON
+        # Conversión a texto plano para evitar el error de Timestamp
         df = df.astype(str).replace({"nan": "", "NaT": "", "None": ""})
         
         datos = df.values.tolist()
