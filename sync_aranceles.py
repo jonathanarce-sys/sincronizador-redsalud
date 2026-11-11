@@ -1,18 +1,18 @@
-File "/home/runner/work/sincronizador-redsalud/sincronizador-redsalud/sync_aranceles.py", line 11
-  En la lista de archivos detectados están tanto `DIPRECA ... .xlsx`...
+File "/home/runner/.../sync_aranceles.py", line 1
+  File "/home/runner/.../sync_aranceles.py", line 11
 SyntaxError: invalid syntax
-```[cite: 18]
+```[cite: 20]
 
-En la segunda imagen se confirma que la carpeta `data/raw/` ya quedó depurada con los tres archivos correspondientes (`ARMADA`, `DIPRECA` y `Maestro Aranceles`)[cite: 19].
+Esto ocurrió porque en la **línea 1** de `sync_aranceles.py` quedó pegado el propio mensaje de error de la terminal (`File ".../sync_aranceles.py"`)[cite: 20]. Python intenta ejecutar ese texto en la primera línea y se detiene de inmediato por sintaxis inválida[cite: 20].
 
 ---
 
-### Solución definitiva: Reemplazar `sync_aranceles.py`
+### Solución
 
-1. En tu repositorio en GitHub, entra al archivo **`sync_aranceles.py`**[cite: 18].
+1. Ve a tu repositorio en GitHub y abre **`sync_aranceles.py`**[cite: 20].
 2. Haz clic en el ícono del **lápiz** (Edit this file).
-3. **Borra todo el contenido actual** (para asegurarte de que no quede ninguna línea de texto suelta)[cite: 18].
-4. Pega exclusivamente el siguiente bloque de código:
+3. Selecciona **todo el texto** (`Ctrl + A` en Windows o `Cmd + A` en Mac) y presiona **Supr / Delete** para dejar el editor completamente en blanco[cite: 20].
+4. Pega exactamente el siguiente código (que inicia formalmente con `import os` en la línea 1):
 
 ```python
 import os
@@ -92,7 +92,7 @@ def sincronizar_aranceles():
         else:
             df = pd.read_excel(f)
 
-        # Conversión general a texto plano para evitar objetos Timestamp no serializables en JSON
+        # Convierte todos los valores a texto para prevenir errores de tipo Timestamp en el JSON
         df = df.astype(str).replace({"nan": "", "NaT": "", "None": ""})
         
         datos = df.values.tolist()
