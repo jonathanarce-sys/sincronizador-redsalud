@@ -142,4 +142,18 @@ def sincronizar_aranceles():
     if ws.row_count < total_filas:
         ws.add_rows(total_filas - ws.row_count + 100)
 
-    print(f"Insertando {
+    print(f"Insertando {total_filas} filas totales (encabezado + registros) en bloques...")
+
+    # Inserción por lotes desde la fila 1
+    for i in range(0, total_filas, BATCH_SIZE):
+        bloque = matriz_completa[i:i + BATCH_SIZE]
+        f_inicio = 1 + i
+        f_termino = f_inicio + len(bloque) - 1
+        rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
+        print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
+        ws.update(range_name=rango_bloque, values=bloque)
+
+    print(f"Carga completa exitosa: {total_filas - 1} registros ingresados desde cero.")
+
+if __name__ == "__main__":
+    sincronizar_aranceles()
