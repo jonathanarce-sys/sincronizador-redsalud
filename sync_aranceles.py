@@ -10,10 +10,9 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID_MAESTRA = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
 HOJA_DESTINO = "RAW_DATA_INGESTA"
 CARPETA_RAW = "data/raw"
-FILA_INICIO = 19019
 BATCH_SIZE = 3000
 
-# Hojas exactas que se procesarán del archivo DIPRECA
+# Hojas exactas requeridas de DIPRECA
 HOJAS_DIPRECA = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
 
 def obtener_cliente_gspread():
@@ -78,37 +77,32 @@ def sincronizar_aranceles():
         print("No hay archivos en data/raw para procesar.")
         return
 
-    registros = []
-    max_cols = 0
+    dataframes = []
 
     for f in archivos:
         nombre_base = os.path.basename(f)
         nombre_lower = nombre_base.lower()
 
-        # Caso DIPRECA Excel: extrae exclusivamente las 3 hojas solicitadas
+        # Caso DIPRECA Excel: leer únicamente las 3 pestañas solicitadas
         if "dipreca" in nombre_lower and nombre_lower.endswith((".xlsx", ".xls")):
-            print(f"Procesando libro Excel de DIPRECA: {nombre_base}")
+            print(f"Procesando Excel DIPRECA: {nombre_base}")
             xl = pd.ExcelFile(f)
             hojas_disponibles = xl.sheet_names
-            print(f"  Pestañas detectadas en el libro: {hojas_disponibles}")
 
             for h_req in HOJAS_DIPRECA:
                 h_real = next((s for s in hojas_disponibles if s.strip().lower() == h_req.strip().lower()), None)
                 if h_real:
-                    print(f"  -> Extrayendo datos de la pestaña '{h_real}'...")
+                    print(f"  -> Extrayendo hoja: '{h_real}'...")
                     df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
-                    
-                    for fila in df.values.tolist():
-                        fila_limpia = [limpiar_celda(c) for c in fila]
-                        registros.append(fila_limpia)
-                        max_cols = max(max_cols, len(fila_limpia))
-                    print(f"     OK: {len(df)} filas extraídas de {h_real}.")
+                    df["ORIGEN_CONVENIO"] = f"DIPRECA_{h_real}"
+                    dataframes.append(df)
+                    print(f"     OK: {len(df)} filas extraídas de '{h_real}'.")
                 else:
-                    print(f"  -> AVISO: No se encontro la pestaña '{h_req}' en {nombre_base}.")
+                    print(f"  -> AVISO: Pestaña '{h_req}' no encontrada.")
 
-        # Para los demás archivos (ARMADA, Maestro Aranceles, etc.)
+        # Demás archivos (ARMADA, Maestro, etc.)
         else:
-            print(f"Procesando insumo: {nombre_base}")
+            print(f"Procesando archivo: {nombre_base}")
             if nombre_lower.endswith(".csv"):
                 try:
                     df = pd.read_csv(f, sep=None, engine="python", encoding="utf-8", dtype=object)
@@ -117,37 +111,35 @@ def sincronizar_aranceles():
             else:
                 df = pd.read_excel(f, dtype=object)
 
-            for fila in df.values.tolist():
-                fila_limpia = [limpiar_celda(c) for c in fila]
-                registros.append(fila_limpia)
-                max_cols = max(max_cols, len(fila_limpia))
-            print(f"  OK: {len(df)} filas extraídas de {nombre_base}.")
+            etiqueta = os.path.splitext(nombre_base)[0]
+            df["ORIGEN_CONVENIO"] = etiqueta
+            dataframes.append(df)
+            print(f"  OK: {len(df)} filas extraídas de '{nombre_base}'.")
 
-    if not registros:
-        print("No hay registros para anexar.")
+    if not dataframes:
+        print("No se extrajeron registros.")
         return
 
-    total_filas = len(registros)
-    fila_fin = FILA_INICIO + total_filas - 1
-    col_fin = gspread.utils.rowcol_to_a1(1, max_cols).replace("1", "")
+    # Unificación y alineación de columnas de todos los orígenes
+    df_consolidado = pd.concat(dataframes, ignore_index=True)
+    df_consolidado = df_consolidado.fillna("")
 
-    # Expandir filas de la hoja si hace falta
-    if ws.row_count < fila_fin:
-        filas_agregar = (fila_fin - ws.row_count) + 500
-        print(f"Expandiendo hoja en {filas_agregar} filas...")
-        ws.add_rows(filas_agregar)
+    encabezados = [str(c) for c in df_consolidado.columns.tolist()]
+    filas_sanitizadas = []
+    for fila in df_consolidado.values.tolist():
+        filas_sanitizadas.append([limpiar_celda(c) for c in fila])
 
-    print(f"Insertando {total_filas} filas por lotes desde la fila {FILA_INICIO}...")
+    matriz_completa = [encabezados] + filas_sanitizadas
+    total_filas = len(matriz_completa)
+    total_cols = len(encabezados)
+    col_fin = gspread.utils.rowcol_to_a1(1, total_cols).replace("1", "")
 
-    for i in range(0, total_filas, BATCH_SIZE):
-        bloque = registros[i:i + BATCH_SIZE]
-        f_inicio = FILA_INICIO + i
-        f_termino = f_inicio + len(bloque) - 1
-        rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
-        print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
-        ws.update(range_name=rango_bloque, values=bloque)
+    # Limpieza total de la pestaña para iniciar desde cero
+    print(f"Limpiando hoja '{ws.title}' para carga limpia desde celda A1...")
+    ws.clear()
 
-    print(f"Exito: Se anexaron {total_filas} filas respetando las 19018 previas.")
+    # Redimensionar la hoja para alojar el consolidado
+    if ws.row_count < total_filas:
+        ws.add_rows(total_filas - ws.row_count + 100)
 
-if __name__ == "__main__":
-    sincronizar_aranceles()
+    print(f"Insertando {
