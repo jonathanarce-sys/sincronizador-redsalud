@@ -94,7 +94,10 @@ def sincronizar_aranceles():
                 if h_real:
                     print(f"  -> Extrayendo hoja: '{h_real}'...")
                     df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
-                    df["ORIGEN_CONVENIO"] = f"DIPRECA_{h_real}"
+                    
+                    # Rellenar la columna exacta requerida
+                    etiqueta_dipreca = f"DIPRECA_{h_real}"
+                    df["archivo_respaldo_carga"] = etiqueta_dipreca
                     dataframes.append(df)
                     print(f"     OK: {len(df)} filas extraídas de '{h_real}'.")
                 else:
@@ -111,8 +114,8 @@ def sincronizar_aranceles():
             else:
                 df = pd.read_excel(f, dtype=object)
 
-            etiqueta = os.path.splitext(nombre_base)[0]
-            df["ORIGEN_CONVENIO"] = etiqueta
+            # Rellenar la columna exacta con el nombre del archivo
+            df["archivo_respaldo_carga"] = nombre_base
             dataframes.append(df)
             print(f"  OK: {len(df)} filas extraídas de '{nombre_base}'.")
 
@@ -120,7 +123,7 @@ def sincronizar_aranceles():
         print("No se extrajeron registros.")
         return
 
-    # Unificación y alineación de columnas de todos los orígenes
+    # Unificación respetando nombres de columnas
     df_consolidado = pd.concat(dataframes, ignore_index=True)
     df_consolidado = df_consolidado.fillna("")
 
@@ -134,17 +137,14 @@ def sincronizar_aranceles():
     total_cols = len(encabezados)
     col_fin = gspread.utils.rowcol_to_a1(1, total_cols).replace("1", "")
 
-    # Limpieza total de la pestaña para iniciar desde cero
-    print(f"Limpiando hoja '{ws.title}' para carga limpia desde celda A1...")
+    print(f"Limpiando hoja '{ws.title}' para recarga limpia...")
     ws.clear()
 
-    # Redimensionar la hoja para alojar el consolidado
     if ws.row_count < total_filas:
         ws.add_rows(total_filas - ws.row_count + 100)
 
-    print(f"Insertando {total_filas} filas totales (encabezado + registros) en bloques...")
+    print(f"Insertando {total_filas} filas por lotes desde la fila 1...")
 
-    # Inserción por lotes desde la fila 1
     for i in range(0, total_filas, BATCH_SIZE):
         bloque = matriz_completa[i:i + BATCH_SIZE]
         f_inicio = 1 + i
@@ -153,7 +153,7 @@ def sincronizar_aranceles():
         print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
         ws.update(range_name=rango_bloque, values=bloque)
 
-    print(f"Carga completa exitosa: {total_filas - 1} registros ingresados desde cero.")
+    print(f"Carga completa exitosa: {total_filas - 1} registros consolidados con trazabilidad.")
 
 if __name__ == "__main__":
     sincronizar_aranceles()
