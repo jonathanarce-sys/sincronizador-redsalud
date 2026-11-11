@@ -1,127 +1,32 @@
-import os
-import glob
-import json
-import base64
-import math
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
 
-SPREADSHEET_ID_MAESTRA = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
-HOJA_DESTINO = "RAW_DATA_INGESTA"
-CARPETA_RAW = "data/raw"
-FILA_INICIO = 19019
-BATCH_SIZE = 3000
+ARCHIVO_DIPRECA = "data/raw/DIPRECA _ Arancel Consolidado [Clientes Sector Público].xlsx"
+HOJAS_REQUERIDAS = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
 
-def obtener_cliente_gspread():
-    posibles = ["GCP_SA_KEY", "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GCP_JSON"]
-    val = None
-    for k in posibles:
-        if k in os.environ and os.environ[k].strip():
-            val = os.environ[k].strip()
-            break
-            
-    if not val:
-        raise ValueError("No se encontraron credenciales de Google Cloud en GitHub Secrets.")
-
-    try:
-        pad = len(val) % 4
-        if pad:
-            val += "=" * (4 - pad)
-        creds_dict = json.loads(base64.b64decode(val).decode("utf-8"))
-    except Exception:
-        creds_dict = json.loads(val)
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
-
-def limpiar_celda(v):
-    if v is None:
-        return ""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return ""
-    if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
-        return v.strftime("%d-%m-%Y")
-    txt = str(v).strip()
-    if txt.lower() in ("nan", "nat", "none", "<na>", "inf", "-inf"):
-        return ""
-    return txt
-
-def sincronizar_aranceles():
-    print("Conectando con Google Sheets...")
-    client = obtener_cliente_gspread()
-    ss = client.open_by_key(SPREADSHEET_ID_MAESTRA)
+def extraer_hojas_dipreca(ruta_archivo):
+    xl = pd.ExcelFile(ruta_archivo)
+    print("Hojas disponibles en el archivo:", xl.sheet_names)
     
-    ws = None
-    objetivo = HOJA_DESTINO.strip().lower()
-    for w in ss.worksheets():
-        if w.title.strip().lower() == objetivo:
-            ws = w
-            break
-
-    if not ws:
-        raise ValueError(f"No se encontro la hoja '{HOJA_DESTINO}'.")
-
-    print(f"Pestana identificada con exito: '{ws.title}'")
-
-    patron = os.path.join(CARPETA_RAW, "*")
-    archivos = [f for f in glob.glob(patron) if not os.path.basename(f).startswith(".")]
-    print(f"Archivos encontrados para ingesta: {[os.path.basename(x) for x in archivos]}")
-
-    if not archivos:
-        print("No hay archivos nuevos en data/raw para anexar.")
-        return
-
-    registros = []
-    max_cols = 0
-
-    for f in archivos:
-        print(f"Leyendo: {os.path.basename(f)}")
-        if f.lower().endswith(".csv"):
-            try:
-                df = pd.read_csv(f, sep=None, engine="python", encoding="utf-8", dtype=object)
-            except Exception:
-                df = pd.read_csv(f, sep=None, engine="python", encoding="latin1", dtype=object)
+    datos_extraidos = {}
+    
+    for hoja in HOJAS_REQUERIDAS:
+        # Búsqueda tolerante por si los nombres traen espacios adicionales
+        nombre_real = next((s for s in xl.sheet_names if s.strip().lower() == hoja.strip().lower()), None)
+        
+        if nombre_real:
+            print(f"Cargando hoja: {nombre_real}...")
+            df = pd.read_excel(xl, sheet_name=nombre_real, dtype=object)
+            df = df.fillna("")
+            
+            # Etiqueta de trazabilidad para saber a qué sección de DIPRECA corresponde cada fila
+            df["tipo_arancel_dipreca"] = hoja
+            
+            datos_extraidos[hoja] = df
+            print(f" -> {len(df)} registros cargados de {hoja}. Columnas: {list(df.columns[:5])}...")
         else:
-            df = pd.read_excel(f, dtype=object)
-
-        datos_limpios = []
-        for fila in df.values.tolist():
-            fila_limpia = [limpiar_celda(celda) for celda in fila]
-            datos_limpios.append(fila_limpia)
-
-        if datos_limpios:
-            max_cols = max(max_cols, len(datos_limpios[0]))
-            registros.extend(datos_limpios)
-            print(f" -> {len(datos_limpios)} filas procesadas de {os.path.basename(f)}")
-
-    if not registros:
-        print("No hay filas con datos para anexar.")
-        return
-
-    total_filas = len(registros)
-    fila_fin = FILA_INICIO + total_filas - 1
-    col_fin = gspread.utils.rowcol_to_a1(1, max_cols).replace("1", "")
-
-    if ws.row_count < fila_fin:
-        filas_agregar = (fila_fin - ws.row_count) + 500
-        print(f"Expandiendo hoja en {filas_agregar} filas...")
-        ws.add_rows(filas_agregar)
-
-    print(f"Insertando {total_filas} filas por lotes desde la fila {FILA_INICIO}...")
-
-    for i in range(0, total_filas, BATCH_SIZE):
-        bloque = registros[i:i + BATCH_SIZE]
-        f_inicio = FILA_INICIO + i
-        f_termino = f_inicio + len(bloque) - 1
-        rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
-        print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
-        ws.update(range_name=rango_bloque, values=bloque)
-
-    print(f"Exito: Se anexaron {total_filas} filas respetando las 19018 previas.")
+            print(f"Aviso: La hoja '{hoja}' no se encontró en el archivo.")
+            
+    return datos_extraidos
 
 if __name__ == "__main__":
-    sincronizar_aranceles()
+    tablas = extraer_hojas_dipreca(ARCHIVO_DIPRECA)
