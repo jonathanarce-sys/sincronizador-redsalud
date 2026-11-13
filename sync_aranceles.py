@@ -25,7 +25,7 @@ BATCH_SIZE = 3000
 # Filtrar solo año vigente (True = descarta vigencias vencidas 2023-2025 de ISL para ahorrar celdas)
 SOLO_VIGENCIA_2026 = True
 
-# 2. Esquema estándar calibrado de 37 columnas (25 base + 12 valores/tipos por ámbito y horario)
+# 2. Esquema estándar calibrado de 39 columnas (incluye código_fonasa, código_dipreca y código_prestador separados)
 COLUMNAS_CALIBRADAS = [
     "filial",
     "sociedad",
@@ -39,6 +39,8 @@ COLUMNAS_CALIBRADAS = [
     "código",
     "_cliente",
     "código_fonasa",
+    "código_dipreca",
+    "código_prestador",
     "glosa prestación",
     "tipo prestación",
     "Indexador",
@@ -143,6 +145,7 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
         if "codigo_prestacion" in cols_raw_norm:
             col_cod = cols_raw_norm["codigo_prestacion"]
             df_out["código"] = df_raw[col_cod]
+            df_out["código_prestador"] = df_raw[col_cod]
             if "tipo_arancel" in cols_raw_norm:
                 col_ta = cols_raw_norm["tipo_arancel"]
                 mask_fonasa = df_raw[col_ta].astype(str).str.upper().str.contains("FONASA")
@@ -182,12 +185,27 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
     for col_orig_real in df_raw.columns:
         c_norm = normalizar_texto(col_orig_real)
 
-        # 1. Coincidencia exacta tras normalizar (incluye los 12 encabezados nuevos)
+        # 1. Separación explícita en 3 encabezados independientes: código_fonasa, código_dipreca y código_prestador
+        if "fonasa" in c_norm and any(k in c_norm for k in ["cod", "código"]):
+            df_out["código_fonasa"] = df_raw[col_orig_real]
+            continue
+        elif "dipreca" in c_norm and any(k in c_norm for k in ["cod", "código"]):
+            df_out["código_dipreca"] = df_raw[col_orig_real]
+            if df_out["código"].replace("", pd.NA).isna().all():
+                df_out["código"] = df_raw[col_orig_real]
+            continue
+        elif "prestador" in c_norm and any(k in c_norm for k in ["cod", "código"]):
+            df_out["código_prestador"] = df_raw[col_orig_real]
+            if df_out["código"].replace("", pd.NA).isna().all():
+                df_out["código"] = df_raw[col_orig_real]
+            continue
+
+        # 2. Coincidencia exacta tras normalizar
         if c_norm in dest_norm:
             df_out[dest_norm[c_norm]] = df_raw[col_orig_real]
             continue
 
-        # 2. Coincidencia flexible para los 12 campos de Valor / Tipo de arancel por ámbito y horario
+        # 3. Coincidencia flexible para los 12 campos de Valor / Tipo de arancel por ámbito y horario
         if "ambulatorio" in c_norm and "inhabil" in c_norm:
             if "tipo" in c_norm:
                 df_out["Tipo de arancel ambulatorio Inhábil"] = df_raw[col_orig_real]
@@ -225,7 +243,7 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
                 df_out["Valor de Urgencia Hábil 2026"] = df_raw[col_orig_real]
             continue
 
-        # 3. Coincidencia para los 25 campos base
+        # 4. Coincidencia para los campos base
         if any(k in c_norm for k in ["filial", "sede"]):
             df_out["filial"] = df_raw[col_orig_real]
         elif "sociedad" in c_norm or "razon" in c_norm:
@@ -334,7 +352,7 @@ def leer_archivo_generico(ruta):
         return pd.read_excel(ruta, dtype=object)
 
 def sincronizar_aranceles():
-    print("Iniciando consolidación calibrada de aranceles (37 columnas)...")
+    print("Iniciando consolidación calibrada de aranceles (39 columnas)...")
     client = obtener_cliente_gspread()
 
     for z in glob.glob(os.path.join(CARPETA_RAW, "*.zip")):
