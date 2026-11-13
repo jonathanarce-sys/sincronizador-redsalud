@@ -232,20 +232,21 @@ def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_he
             break
             
     cols = columnas_header if columnas_header else list(df_datos.columns)
+    num_cols = len(cols)
     if not ws:
-        ws = ss.add_worksheet(title=nombre_hoja, rows=1000, cols=len(cols))
+        ws = ss.add_worksheet(title=nombre_hoja, rows=1000, cols=num_cols)
 
     df_datos = df_datos.fillna("")
     filas_sanitizadas = [[limpiar_celda(c) for c in fila] for fila in df_datos.values.tolist()]
     matriz_final = [cols] + filas_sanitizadas
 
     total_filas = len(matriz_final)
-    col_fin = gspread.utils.rowcol_to_a1(1, len(cols)).replace("1", "")
+    col_fin = gspread.utils.rowcol_to_a1(1, num_cols).replace("1", "")
 
-    print(f"Limpiando '{nombre_hoja}' y cargando {total_filas - 1} registros...")
+    print(f"Limpiando '{nombre_hoja}' y ajustando dimensiones ({total_filas} filas x {num_cols} cols)...")
     ws.clear()
-    if ws.row_count < total_filas:
-        ws.add_rows(total_filas - ws.row_count + 100)
+    # Ajustar filas Y columnas exactas para eliminar columnas vacías excedentes y liberar millones de celdas
+    ws.resize(rows=total_filas + 10, cols=num_cols)
 
     for i in range(0, total_filas, BATCH_SIZE):
         bloque = matriz_final[i:i + BATCH_SIZE]
@@ -271,7 +272,6 @@ def sincronizar_aranceles():
     print("Iniciando consolidación calibrada de aranceles...")
     client = obtener_cliente_gspread()
 
-    # Descomprimir automáticamente si hay archivos ZIP en data/raw
     for z in glob.glob(os.path.join(CARPETA_RAW, "*.zip")):
         print(f"Descomprimiendo: {os.path.basename(z)}")
         with zipfile.ZipFile(z, "r") as zip_ref:
