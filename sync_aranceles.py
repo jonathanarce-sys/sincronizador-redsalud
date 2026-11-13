@@ -15,7 +15,7 @@ SPREADSHEET_ID_PRESTACIONES = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
 HOJA_PRESTACIONES = "RAW_DATA_INGESTA"
 HOJA_MAESTRO_HIS = "MAESTRO_HOMOLOGACION_HIS"
 
-# Opcional: ID de un segundo Google Sheet si deseas guardar allí los ítems M&I (Materiales e Insumos)
+# Opcional: ID de un segundo Google Sheet para Materiales e Insumos (M&I)
 SPREADSHEET_ID_INSUMOS = "" 
 HOJA_INSUMOS = "RAW_DATA_MI"
 
@@ -25,7 +25,7 @@ BATCH_SIZE = 3000
 # Filtrar solo año vigente (True = descarta vigencias vencidas 2023-2025 de ISL para ahorrar celdas)
 SOLO_VIGENCIA_2026 = True
 
-# 2. Esquema estándar calibrado de 25 columnas
+# 2. Esquema estándar calibrado de 37 columnas (25 base + 12 valores/tipos por ámbito y horario)
 COLUMNAS_CALIBRADAS = [
     "filial",
     "sociedad",
@@ -51,14 +51,27 @@ COLUMNAS_CALIBRADAS = [
     "id_convenio",
     "cliente Convenio_redsalud",
     "códig",
-    "lugar_his"
+    "lugar_his",
+    "Valor Ambulatorio Hábil 2026",
+    "Tipo de arancel ambulatorio Hábil",
+    "Valor Ambulatorio Inhábil 2026",
+    "Tipo de arancel ambulatorio Inhábil",
+    "Valor Hospitalizado Hábil 2026",
+    "Tipo de arancel hospitalizado Hábil",
+    "Valor Hospitalizado Inhábil 2026",
+    "Tipo de arancel hospitalizado Inhábil",
+    "Valor de Urgencia Hábil 2026",
+    "Tipo de arancel urgencia Hábil",
+    "Valor de Urgencia Inhábil 2026",
+    "Tipo de arancel urgencia Inhábil"
 ]
 
 HOJAS_DIPRECA = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
 
 def normalizar_texto(texto):
     s = str(texto).strip().lower()
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s)
 
 def obtener_cliente_gspread():
     posibles = ["GCP_SA_KEY", "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GCP_JSON"]
@@ -137,11 +150,17 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
         if "glosa" in cols_raw_norm:
             df_out["glosa prestación"] = df_raw[cols_raw_norm["glosa"]]
         if "tipo_arancel" in cols_raw_norm:
-            df_out["tipo prestación"] = df_raw[cols_raw_norm["tipo_arancel"]]
+            col_ta = cols_raw_norm["tipo_arancel"]
+            df_out["tipo prestación"] = df_raw[col_ta]
+            df_out["Tipo de arancel ambulatorio Hábil"] = df_raw[col_ta]
+            df_out["Tipo de arancel hospitalizado Hábil"] = df_raw[col_ta]
         if "valor_nuevo" in cols_raw_norm:
             df_out["precio_total"] = df_raw[cols_raw_norm["valor_nuevo"]]
-        elif "valor_hospitalizado" in cols_raw_norm:
-            df_out["precio_total"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
+            df_out["Valor Ambulatorio Hábil 2026"] = df_raw[cols_raw_norm["valor_nuevo"]]
+        if "valor_hospitalizado" in cols_raw_norm:
+            df_out["Valor Hospitalizado Hábil 2026"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
+            if df_out["precio_total"].replace("", pd.NA).isna().all():
+                df_out["precio_total"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
         if "tipo_recargo" in cols_raw_norm and "recargo" in cols_raw_norm:
             col_tr = cols_raw_norm["tipo_recargo"]
             col_rec = cols_raw_norm["recargo"]
@@ -163,10 +182,50 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
     for col_orig_real in df_raw.columns:
         c_norm = normalizar_texto(col_orig_real)
 
+        # 1. Coincidencia exacta tras normalizar (incluye los 12 encabezados nuevos)
         if c_norm in dest_norm:
             df_out[dest_norm[c_norm]] = df_raw[col_orig_real]
             continue
 
+        # 2. Coincidencia flexible para los 12 campos de Valor / Tipo de arancel por ámbito y horario
+        if "ambulatorio" in c_norm and "inhabil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel ambulatorio Inhábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor Ambulatorio Inhábil 2026"] = df_raw[col_orig_real]
+            continue
+        elif "ambulatorio" in c_norm and "habil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel ambulatorio Hábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor Ambulatorio Hábil 2026"] = df_raw[col_orig_real]
+            continue
+        elif "hospitalizado" in c_norm and "inhabil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel hospitalizado Inhábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor Hospitalizado Inhábil 2026"] = df_raw[col_orig_real]
+            continue
+        elif "hospitalizado" in c_norm and "habil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel hospitalizado Hábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor Hospitalizado Hábil 2026"] = df_raw[col_orig_real]
+            continue
+        elif "urgencia" in c_norm and "inhabil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel urgencia Inhábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor de Urgencia Inhábil 2026"] = df_raw[col_orig_real]
+            continue
+        elif "urgencia" in c_norm and "habil" in c_norm:
+            if "tipo" in c_norm:
+                df_out["Tipo de arancel urgencia Hábil"] = df_raw[col_orig_real]
+            else:
+                df_out["Valor de Urgencia Hábil 2026"] = df_raw[col_orig_real]
+            continue
+
+        # 3. Coincidencia para los 25 campos base
         if any(k in c_norm for k in ["filial", "sede"]):
             df_out["filial"] = df_raw[col_orig_real]
         elif "sociedad" in c_norm or "razon" in c_norm:
@@ -227,8 +286,6 @@ def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_he
         return
 
     ss = client.open_by_key(spreadsheet_id)
-    
-    # Mostrar cuántas celdas ocupan las demás pestañas del libro
     celdas_otras = sum(w.row_count * w.col_count for w in ss.worksheets() if w.title.strip().lower() != nombre_hoja.strip().lower())
     print(f"Celdas ocupadas por otras pestañas en el libro: {celdas_otras:,}")
 
@@ -277,7 +334,7 @@ def leer_archivo_generico(ruta):
         return pd.read_excel(ruta, dtype=object)
 
 def sincronizar_aranceles():
-    print("Iniciando consolidación calibrada de aranceles...")
+    print("Iniciando consolidación calibrada de aranceles (37 columnas)...")
     client = obtener_cliente_gspread()
 
     for z in glob.glob(os.path.join(CARPETA_RAW, "*.zip")):
@@ -301,7 +358,6 @@ def sincronizar_aranceles():
         nombre_base = os.path.basename(f)
         nombre_lower = nombre_base.lower()
 
-        # 1. Maestro Consolidado HIS-FONASA (pestaña separada)
         if "consolidado_master" in nombre_lower or "master_2026" in nombre_lower:
             print(f"Procesando Maestro HIS-FONASA: {nombre_base}")
             df_m = leer_archivo_generico(f).drop_duplicates().fillna("")
@@ -309,7 +365,6 @@ def sincronizar_aranceles():
             print(f"  -> {len(df_m)} registros únicos preparados para '{HOJA_MAESTRO_HIS}'.")
             continue
 
-        # 2. DIPRECA Excel (3 pestañas exactas)
         if "dipreca" in nombre_lower and nombre_lower.endswith((".xlsx", ".xls")):
             print(f"Procesando Excel DIPRECA: {nombre_base}")
             xl = pd.ExcelFile(f)
@@ -321,8 +376,6 @@ def sincronizar_aranceles():
                     df_cal = mapear_a_esquema(df, "DIPRECA", f"DIPRECA_{h_real}", nombre_base, tipo)
                     lista_dfs_convenios.append(df_cal)
                     print(f"  -> {h_real}: {len(df_cal)} filas mapeadas.")
-        
-        # 3. ISL por filial, ARMADA y Maestro RedSalud
         else:
             print(f"Procesando insumo: {nombre_base}")
             df = leer_archivo_generico(f)
@@ -333,11 +386,9 @@ def sincronizar_aranceles():
             filial_det = df_cal["filial"].iloc[0] if len(df_cal) > 0 and df_cal["filial"].iloc[0] else "General"
             print(f"  -> {cliente} ({filial_det}): {len(df_cal)} filas mapeadas.")
 
-    # Consolidar y segmentar Prestaciones vs Insumos (M&I)
     if lista_dfs_convenios:
         df_total = pd.concat(lista_dfs_convenios, ignore_index=True)
         
-        # Filtrar vigencias históricas vencidas (2023-2025) para mantener solo el año vigente
         if SOLO_VIGENCIA_2026:
             antes = len(df_total)
             df_total = df_total[df_total["año"].astype(str).str.strip().isin(["2026", ""])].copy()
@@ -359,7 +410,6 @@ def sincronizar_aranceles():
         else:
             print("Nota: SPREADSHEET_ID_INSUMOS vacío; los ítems M&I se mantuvieron excluidos de la hoja principal.")
 
-    # Consolidar Maestro HIS-FONASA si existe en data/raw
     if lista_dfs_maestro_his:
         df_maestro_final = pd.concat(lista_dfs_maestro_his, ignore_index=True).drop_duplicates()
         escribir_en_sheet(client, SPREADSHEET_ID_PRESTACIONES, HOJA_MAESTRO_HIS, df_maestro_final, list(df_maestro_final.columns))
