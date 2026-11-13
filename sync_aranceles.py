@@ -22,6 +22,9 @@ HOJA_INSUMOS = "RAW_DATA_MI"
 CARPETA_RAW = "data/raw"
 BATCH_SIZE = 3000
 
+# Filtrar solo año vigente (True = descarta vigencias vencidas 2023-2025 de ISL para ahorrar celdas)
+SOLO_VIGENCIA_2026 = True
+
 # 2. Esquema estándar calibrado de 25 columnas
 COLUMNAS_CALIBRADAS = [
     "filial",
@@ -120,7 +123,7 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
     dest_norm = {normalizar_texto(col): col for col in COLUMNAS_CALIBRADAS}
     cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
 
-    # Reglas específicas para los 9 archivos de ISL
+    # Reglas específicas para los archivos de ISL
     if cliente_nombre == "ISL":
         if "razon_social" in cols_raw_norm:
             df_out["sociedad"] = df_raw[cols_raw_norm["razon_social"]]
@@ -224,6 +227,11 @@ def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_he
         return
 
     ss = client.open_by_key(spreadsheet_id)
+    
+    # Mostrar cuántas celdas ocupan las demás pestañas del libro
+    celdas_otras = sum(w.row_count * w.col_count for w in ss.worksheets() if w.title.strip().lower() != nombre_hoja.strip().lower())
+    print(f"Celdas ocupadas por otras pestañas en el libro: {celdas_otras:,}")
+
     ws = None
     objetivo = nombre_hoja.strip().lower()
     for w in ss.worksheets():
@@ -234,7 +242,7 @@ def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_he
     cols = columnas_header if columnas_header else list(df_datos.columns)
     num_cols = len(cols)
     if not ws:
-        ws = ss.add_worksheet(title=nombre_hoja, rows=1000, cols=num_cols)
+        ws = ss.add_worksheet(title=nombre_hoja, rows=10, cols=num_cols)
 
     df_datos = df_datos.fillna("")
     filas_sanitizadas = [[limpiar_celda(c) for c in fila] for fila in df_datos.values.tolist()]
@@ -245,8 +253,8 @@ def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_he
 
     print(f"Limpiando '{nombre_hoja}' y ajustando dimensiones ({total_filas} filas x {num_cols} cols)...")
     ws.clear()
-    # Ajustar filas Y columnas exactas para eliminar columnas vacías excedentes y liberar millones de celdas
-    ws.resize(rows=total_filas + 10, cols=num_cols)
+    ws.resize(rows=2, cols=1)
+    ws.resize(rows=total_filas + 5, cols=num_cols)
 
     for i in range(0, total_filas, BATCH_SIZE):
         bloque = matriz_final[i:i + BATCH_SIZE]
@@ -328,6 +336,13 @@ def sincronizar_aranceles():
     # Consolidar y segmentar Prestaciones vs Insumos (M&I)
     if lista_dfs_convenios:
         df_total = pd.concat(lista_dfs_convenios, ignore_index=True)
+        
+        # Filtrar vigencias históricas vencidas (2023-2025) para mantener solo el año vigente
+        if SOLO_VIGENCIA_2026:
+            antes = len(df_total)
+            df_total = df_total[df_total["año"].astype(str).str.strip().isin(["2026", ""])].copy()
+            print(f"Filtro vigencia 2026 aplicado: {antes} -> {len(df_total)} filas activas.")
+
         mascara_insumos = df_total["tipo prestación"].astype(str).str.upper().str.contains("M&I|INSUMO|FARMACO", regex=True)
         
         df_prestaciones = df_total[~mascara_insumos].copy()
