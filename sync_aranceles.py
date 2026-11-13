@@ -1,18 +1,28 @@
 import os
+import re
 import glob
 import json
 import base64
 import math
+import zipfile
+import unicodedata
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-SPREADSHEET_ID_MAESTRA = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
-HOJA_DESTINO = "RAW_DATA_INGESTA"
+# 1. Configuración de destinos en Google Sheets
+SPREADSHEET_ID_PRESTACIONES = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
+HOJA_PRESTACIONES = "RAW_DATA_INGESTA"
+HOJA_MAESTRO_HIS = "MAESTRO_HOMOLOGACION_HIS"
+
+# Opcional: ID de un segundo Google Sheet si deseas guardar allí los ítems M&I (Materiales e Insumos)
+SPREADSHEET_ID_INSUMOS = "" 
+HOJA_INSUMOS = "RAW_DATA_MI"
+
 CARPETA_RAW = "data/raw"
 BATCH_SIZE = 3000
 
-# 1. Esquema exacto de columnas solicitado para calibrar la hoja
+# 2. Esquema estándar calibrado de 25 columnas
 COLUMNAS_CALIBRADAS = [
     "filial",
     "sociedad",
@@ -42,6 +52,10 @@ COLUMNAS_CALIBRADAS = [
 ]
 
 HOJAS_DIPRECA = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
+
+def normalizar_texto(texto):
+    s = str(texto).strip().lower()
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def obtener_cliente_gspread():
     posibles = ["GCP_SA_KEY", "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GCP_JSON"]
@@ -78,162 +92,264 @@ def limpiar_celda(v):
     txt = str(v).strip()
     if txt.lower() in ("nan", "nat", "none", "<na>", "inf", "-inf"):
         return ""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})\s+00:00:00", txt)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
     return txt
 
-def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, tipo_prestacion=""):
-    """
-    Homologa y traspasa automáticamente las columnas del archivo original 
-    hacia las 25 columnas maestras calibradas.
-    """
+def extraer_filial_isl(nombre_archivo):
+    base = os.path.splitext(nombre_archivo)[0]
+    if " - " in base:
+        return base.split(" - ")[-1].strip().upper()
+    if "_" in base:
+        return base.split("_")[-1].strip().upper()
+    return ""
+
+def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="", tipo_prestacion_fijo=""):
     df_out = pd.DataFrame("", index=range(len(df_raw)), columns=COLUMNAS_CALIBRADAS)
     
-    # Metadatos fijos
     df_out["cliente"] = cliente_nombre
     df_out["año"] = "2026"
     df_out["tipo_arancel [origen]"] = origen_etiqueta
-    df_out["tipo prestación"] = tipo_prestacion
-    
-    # Mapeo inteligente según coincidencias en los encabezados del insumo
-    cols_origen = {str(c).strip().lower(): c for c in df_raw.columns}
+    if tipo_prestacion_fijo:
+        df_out["tipo prestación"] = tipo_prestacion_fijo
 
-    for col_orig_lower, col_orig_real in cols_origen.items():
-        # Código Fonasa
-        if "fonasa" in col_orig_lower:
+    if cliente_nombre == "ISL" and nombre_archivo:
+        df_out["filial"] = extraer_filial_isl(nombre_archivo)
+
+    dest_norm = {normalizar_texto(col): col for col in COLUMNAS_CALIBRADAS}
+    cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
+
+    # Reglas específicas para los 9 archivos de ISL
+    if cliente_nombre == "ISL":
+        if "razon_social" in cols_raw_norm:
+            df_out["sociedad"] = df_raw[cols_raw_norm["razon_social"]]
+        if "codigo_prestacion" in cols_raw_norm:
+            col_cod = cols_raw_norm["codigo_prestacion"]
+            df_out["código"] = df_raw[col_cod]
+            if "tipo_arancel" in cols_raw_norm:
+                col_ta = cols_raw_norm["tipo_arancel"]
+                mask_fonasa = df_raw[col_ta].astype(str).str.upper().str.contains("FONASA")
+                df_out.loc[mask_fonasa, "código_fonasa"] = df_raw.loc[mask_fonasa, col_cod]
+        if "glosa" in cols_raw_norm:
+            df_out["glosa prestación"] = df_raw[cols_raw_norm["glosa"]]
+        if "tipo_arancel" in cols_raw_norm:
+            df_out["tipo prestación"] = df_raw[cols_raw_norm["tipo_arancel"]]
+        if "valor_nuevo" in cols_raw_norm:
+            df_out["precio_total"] = df_raw[cols_raw_norm["valor_nuevo"]]
+        elif "valor_hospitalizado" in cols_raw_norm:
+            df_out["precio_total"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
+        if "tipo_recargo" in cols_raw_norm and "recargo" in cols_raw_norm:
+            col_tr = cols_raw_norm["tipo_recargo"]
+            col_rec = cols_raw_norm["recargo"]
+            mask_pct = df_raw[col_tr].astype(str).str.strip() == "%"
+            df_out.loc[mask_pct, "%_recargo"] = df_raw.loc[mask_pct, col_rec]
+            df_out.loc[~mask_pct, "recargo"] = df_raw.loc[~mask_pct, col_rec]
+        if "desde" in cols_raw_norm:
+            df_out["vigencia desde"] = df_raw[cols_raw_norm["desde"]]
+        if "hasta" in cols_raw_norm:
+            col_hasta = cols_raw_norm["hasta"]
+            df_out["vigencia_hasta"] = df_raw[col_hasta]
+            years = df_raw[col_hasta].astype(str).str.extract(r"^(\d{4})")[0].fillna("")
+            df_out["año"] = years.replace("", "2026")
+        if "id_convenio" in cols_raw_norm:
+            df_out["id_convenio"] = df_raw[cols_raw_norm["id_convenio"]].astype(str).str.replace(r"\.0$", "", regex=True)
+        return df_out
+
+    # Reglas generales para DIPRECA, ARMADA y Maestro RedSalud
+    for col_orig_real in df_raw.columns:
+        c_norm = normalizar_texto(col_orig_real)
+
+        if c_norm in dest_norm:
+            df_out[dest_norm[c_norm]] = df_raw[col_orig_real]
+            continue
+
+        if any(k in c_norm for k in ["filial", "sede"]):
+            df_out["filial"] = df_raw[col_orig_real]
+        elif "sociedad" in c_norm or "razon" in c_norm:
+            df_out["sociedad"] = df_raw[col_orig_real]
+        elif "contrato" in c_norm:
+            df_out["contrato"] = df_raw[col_orig_real]
+        elif "licitacion" in c_norm:
+            df_out["id_licitación"] = df_raw[col_orig_real]
+        elif "centro" in c_norm or "unidad_negocio" in c_norm:
+            df_out["centro"] = df_raw[col_orig_real]
+        elif "fonasa" in c_norm:
             df_out["código_fonasa"] = df_raw[col_orig_real]
-        # Código RedSalud
-        elif "redsalud" in col_orig_lower and ("cod" in col_orig_lower or "código" in col_orig_lower):
+        elif "redsalud" in c_norm and ("cod" in c_norm or "no tc" in c_norm or "item" in c_norm):
             df_out["código_redsalud [no TC]"] = df_raw[col_orig_real]
-        # Código Cliente / Prestación
-        elif any(k in col_orig_lower for k in ["codigo", "código", "cod_"]):
-            if "cliente" in col_orig_lower:
+        elif "convenio" in c_norm and "id" in c_norm:
+            df_out["id_convenio"] = df_raw[col_orig_real]
+        elif "convenio" in c_norm and "redsalud" in c_norm:
+            df_out["cliente Convenio_redsalud"] = df_raw[col_orig_real]
+        elif "lugar" in c_norm or "his" in c_norm:
+            df_out["lugar_his"] = df_raw[col_orig_real]
+        elif "indexador" in c_norm:
+            df_out["Indexador"] = df_raw[col_orig_real]
+        elif ("tipo" in c_norm and ("prestacion" in c_norm or "arancel" in c_norm)) and not tipo_prestacion_fijo:
+            df_out["tipo prestación"] = df_raw[col_orig_real]
+        elif any(k in c_norm for k in ["codigo", "cod_"]):
+            if "cliente" in c_norm:
                 df_out["_cliente"] = df_raw[col_orig_real]
             elif df_out["código"].replace("", pd.NA).isna().all():
                 df_out["código"] = df_raw[col_orig_real]
-        # Glosa / Descripción de la prestación
-        elif any(k in col_orig_lower for k in ["glosa", "prestacion", "prestación", "descripcion", "descripción"]):
-            df_out["glosa prestación"] = df_raw[col_orig_real]
-        # Precio / Valor / Arancel
-        elif any(k in col_orig_lower for k in ["precio", "total", "arancel", "valor", "tarifa"]):
+        elif any(k in c_norm for k in ["glosa", "prestacion", "descripcion"]):
+            if df_out["glosa prestación"].replace("", pd.NA).isna().all():
+                df_out["glosa prestación"] = df_raw[col_orig_real]
+        elif any(k in c_norm for k in ["precio", "total", "arancel", "valor", "tarifa"]):
             if df_out["precio_total"].replace("", pd.NA).isna().all():
                 df_out["precio_total"] = df_raw[col_orig_real]
-        # Ámbito
-        elif "ambito" in col_orig_lower or "ámbito" in col_orig_lower:
+        elif "ambito" in c_norm:
             df_out["ámbito"] = df_raw[col_orig_real]
-        # Recargos
-        elif "%" in col_orig_lower and "recargo" in col_orig_lower:
+        elif "%" in c_norm and "recargo" in c_norm:
             df_out["%_recargo"] = df_raw[col_orig_real]
-        elif "recargo" in col_orig_lower:
+        elif "recargo" in c_norm:
             df_out["recargo"] = df_raw[col_orig_real]
-        # Fechas de vigencia
-        elif "desde" in col_orig_lower or "inicio" in col_orig_lower:
+        elif "desde" in c_norm or "inicio" in c_norm:
             df_out["vigencia desde"] = df_raw[col_orig_real]
-        elif "hasta" in col_orig_lower or "fin" in col_orig_lower or "termino" in col_orig_lower:
+        elif "hasta" in c_norm or "fin" in c_norm or "termino" in c_norm:
             df_out["vigencia_hasta"] = df_raw[col_orig_real]
+
+    df_out["tipo_arancel [origen]"] = origen_etiqueta
+    if df_out["cliente"].replace("", pd.NA).isna().all():
+        df_out["cliente"] = cliente_nombre
+    if df_out["año"].replace("", pd.NA).isna().all():
+        df_out["año"] = "2026"
 
     return df_out
 
-def sincronizar_aranceles():
-    print("Conectando con Google Sheets...")
-    client = obtener_cliente_gspread()
-    ss = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-    
+def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_header=None):
+    if df_datos.empty:
+        print(f"Sin datos para escribir en '{nombre_hoja}'.")
+        return
+
+    ss = client.open_by_key(spreadsheet_id)
     ws = None
-    objetivo = HOJA_DESTINO.strip().lower()
+    objetivo = nombre_hoja.strip().lower()
     for w in ss.worksheets():
         if w.title.strip().lower() == objetivo:
             ws = w
             break
-
+            
+    cols = columnas_header if columnas_header else list(df_datos.columns)
     if not ws:
-        raise ValueError(f"No se encontro la hoja '{HOJA_DESTINO}'.")
+        ws = ss.add_worksheet(title=nombre_hoja, rows=1000, cols=len(cols))
 
-    print(f"Pestaña identificada con exito: '{ws.title}'")
+    df_datos = df_datos.fillna("")
+    filas_sanitizadas = [[limpiar_celda(c) for c in fila] for fila in df_datos.values.tolist()]
+    matriz_final = [cols] + filas_sanitizadas
 
-    patron = os.path.join(CARPETA_RAW, "*")
-    archivos = [f for f in glob.glob(patron) if not os.path.basename(f).startswith(".")]
-    print(f"Archivos encontrados: {[os.path.basename(x) for x in archivos]}")
-
-    if not archivos:
-        print("No hay archivos en data/raw para procesar.")
-        return
-
-    dataframes_calibrados = []
-
-    for f in archivos:
-        nombre_base = os.path.basename(f)
-        nombre_lower = nombre_base.lower()
-
-        # 1. Caso DIPRECA Excel (3 pestañas requeridas)
-        if "dipreca" in nombre_lower and nombre_lower.endswith((".xlsx", ".xls")):
-            print(f"Procesando Excel DIPRECA: {nombre_base}")
-            xl = pd.ExcelFile(f)
-            hojas_disponibles = xl.sheet_names
-
-            for h_req in HOJAS_DIPRECA:
-                h_real = next((s for s in hojas_disponibles if s.strip().lower() == h_req.strip().lower()), None)
-                if h_real:
-                    print(f"  -> Extrayendo hoja DIPRECA: '{h_real}'...")
-                    df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
-                    
-                    # Identificar tipo según pestaña
-                    tipo = "HMQ" if "hmq" in h_real.lower() else ("Paquetes" if "paquetes" in h_real.lower() else "Prestaciones")
-                    df_cal = mapear_a_esquema(df, cliente_nombre="DIPRECA", origen_etiqueta=f"DIPRECA_{h_real}", tipo_prestacion=tipo)
-                    dataframes_calibrados.append(df_cal)
-                    print(f"     {len(df_cal)} filas mapeadas al esquema.")
-                else:
-                    print(f"  -> AVISO: Pestaña '{h_req}' no encontrada.")
-
-        # 2. Caso ARMADA y Maestro Aranceles
-        else:
-            print(f"Procesando insumo: {nombre_base}")
-            if nombre_lower.endswith(".csv"):
-                try:
-                    df = pd.read_csv(f, sep=None, engine="python", encoding="utf-8", dtype=object)
-                except Exception:
-                    df = pd.read_csv(f, sep=None, engine="python", encoding="latin1", dtype=object)
-            else:
-                df = pd.read_excel(f, dtype=object)
-
-            cliente = "ARMADA" if "armada" in nombre_lower else ("Maestro RedSalud" if "maestro" in nombre_lower else nombre_base)
-            etiqueta = os.path.splitext(nombre_base)[0]
-            df_cal = mapear_a_esquema(df, cliente_nombre=cliente, origen_etiqueta=etiqueta)
-            dataframes_calibrados.append(df_cal)
-            print(f"     {len(df_cal)} filas mapeadas al esquema.")
-
-    if not dataframes_calibrados:
-        print("No hay registros para consolidar.")
-        return
-
-    # Consolidar todas las tablas bajo el mismo estándar de 25 columnas
-    df_final = pd.concat(dataframes_calibrados, ignore_index=True)
-    df_final = df_final.fillna("")
-
-    filas_sanitizadas = []
-    for fila in df_final.values.tolist():
-        filas_sanitizadas.append([limpiar_celda(c) for c in fila])
-
-    # Fila 1: Encabezados exactos; Fila 2+: Datos mapeados
-    matriz_final = [COLUMNAS_CALIBRADAS] + filas_sanitizadas
     total_filas = len(matriz_final)
-    col_fin = gspread.utils.rowcol_to_a1(1, len(COLUMNAS_CALIBRADAS)).replace("1", "")
+    col_fin = gspread.utils.rowcol_to_a1(1, len(cols)).replace("1", "")
 
-    print(f"Limpiando hoja '{ws.title}'...")
+    print(f"Limpiando '{nombre_hoja}' y cargando {total_filas - 1} registros...")
     ws.clear()
-
     if ws.row_count < total_filas:
         ws.add_rows(total_filas - ws.row_count + 100)
-
-    print(f"Insertando {total_filas} filas calibradas (encabezado + datos) en la hoja...")
 
     for i in range(0, total_filas, BATCH_SIZE):
         bloque = matriz_final[i:i + BATCH_SIZE]
         f_inicio = 1 + i
         f_termino = f_inicio + len(bloque) - 1
         rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
-        print(f"  Escribiendo bloque: {rango_bloque} ({len(bloque)} registros)...")
+        print(f"  [{nombre_hoja}] Escribiendo bloque {rango_bloque}...")
         ws.update(range_name=rango_bloque, values=bloque)
 
-    print(f"Carga finalizada con éxito: {total_filas - 1} registros calibrados bajo los 25 encabezados solicitados.")
+def leer_archivo_generico(ruta):
+    nombre_lower = ruta.lower()
+    if nombre_lower.endswith(".csv"):
+        try:
+            return pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8", dtype=object)
+        except Exception:
+            return pd.read_csv(ruta, sep=None, engine="python", encoding="latin1", dtype=object)
+    elif nombre_lower.endswith(".parquet"):
+        return pd.read_parquet(ruta)
+    else:
+        return pd.read_excel(ruta, dtype=object)
+
+def sincronizar_aranceles():
+    print("Iniciando consolidación calibrada de aranceles...")
+    client = obtener_cliente_gspread()
+
+    # Descomprimir automáticamente si hay archivos ZIP en data/raw
+    for z in glob.glob(os.path.join(CARPETA_RAW, "*.zip")):
+        print(f"Descomprimiendo: {os.path.basename(z)}")
+        with zipfile.ZipFile(z, "r") as zip_ref:
+            zip_ref.extractall(CARPETA_RAW)
+        os.remove(z)
+
+    patron = os.path.join(CARPETA_RAW, "*")
+    archivos = [f for f in glob.glob(patron) if not os.path.basename(f).startswith(".") and os.path.isfile(f)]
+    print(f"Total archivos a procesar ({len(archivos)}): {[os.path.basename(x) for x in archivos]}")
+
+    if not archivos:
+        print("No hay archivos en data/raw para procesar.")
+        return
+
+    lista_dfs_convenios = []
+    lista_dfs_maestro_his = []
+
+    for f in archivos:
+        nombre_base = os.path.basename(f)
+        nombre_lower = nombre_base.lower()
+
+        # 1. Maestro Consolidado HIS-FONASA (pestaña separada)
+        if "consolidado_master" in nombre_lower or "master_2026" in nombre_lower:
+            print(f"Procesando Maestro HIS-FONASA: {nombre_base}")
+            df_m = leer_archivo_generico(f).drop_duplicates().fillna("")
+            lista_dfs_maestro_his.append(df_m)
+            print(f"  -> {len(df_m)} registros únicos preparados para '{HOJA_MAESTRO_HIS}'.")
+            continue
+
+        # 2. DIPRECA Excel (3 pestañas exactas)
+        if "dipreca" in nombre_lower and nombre_lower.endswith((".xlsx", ".xls")):
+            print(f"Procesando Excel DIPRECA: {nombre_base}")
+            xl = pd.ExcelFile(f)
+            for h_req in HOJAS_DIPRECA:
+                h_real = next((s for s in xl.sheet_names if s.strip().lower() == h_req.strip().lower()), None)
+                if h_real:
+                    df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
+                    tipo = "HMQ" if "hmq" in h_real.lower() else ("Paquetes" if "paquetes" in h_real.lower() else "Prestaciones")
+                    df_cal = mapear_a_esquema(df, "DIPRECA", f"DIPRECA_{h_real}", nombre_base, tipo)
+                    lista_dfs_convenios.append(df_cal)
+                    print(f"  -> {h_real}: {len(df_cal)} filas mapeadas.")
+        
+        # 3. ISL por filial, ARMADA y Maestro RedSalud
+        else:
+            print(f"Procesando insumo: {nombre_base}")
+            df = leer_archivo_generico(f)
+            cliente = "ISL" if "isl" in nombre_lower else ("ARMADA" if "armada" in nombre_lower else ("Maestro RedSalud" if "maestro" in nombre_lower else nombre_base))
+            etiqueta = os.path.splitext(nombre_base)[0]
+            df_cal = mapear_a_esquema(df, cliente, etiqueta, nombre_base)
+            lista_dfs_convenios.append(df_cal)
+            filial_det = df_cal["filial"].iloc[0] if len(df_cal) > 0 and df_cal["filial"].iloc[0] else "General"
+            print(f"  -> {cliente} ({filial_det}): {len(df_cal)} filas mapeadas.")
+
+    # Consolidar y segmentar Prestaciones vs Insumos (M&I)
+    if lista_dfs_convenios:
+        df_total = pd.concat(lista_dfs_convenios, ignore_index=True)
+        mascara_insumos = df_total["tipo prestación"].astype(str).str.upper().str.contains("M&I|INSUMO|FARMACO", regex=True)
+        
+        df_prestaciones = df_total[~mascara_insumos].copy()
+        df_insumos = df_total[mascara_insumos].copy()
+
+        print("=== RESUMEN CONSOLIDACIÓN ===")
+        print(f"Prestaciones Clínicas (destinado a {HOJA_PRESTACIONES}): {len(df_prestaciones)} filas")
+        print(f"Materiales e Insumos M&I (separados): {len(df_insumos)} filas")
+
+        escribir_en_sheet(client, SPREADSHEET_ID_PRESTACIONES, HOJA_PRESTACIONES, df_prestaciones, COLUMNAS_CALIBRADAS)
+
+        if SPREADSHEET_ID_INSUMOS.strip():
+            escribir_en_sheet(client, SPREADSHEET_ID_INSUMOS.strip(), HOJA_INSUMOS, df_insumos, COLUMNAS_CALIBRADAS)
+        else:
+            print("Nota: SPREADSHEET_ID_INSUMOS vacío; los ítems M&I se mantuvieron excluidos de la hoja principal.")
+
+    # Consolidar Maestro HIS-FONASA si existe en data/raw
+    if lista_dfs_maestro_his:
+        df_maestro_final = pd.concat(lista_dfs_maestro_his, ignore_index=True).drop_duplicates()
+        escribir_en_sheet(client, SPREADSHEET_ID_PRESTACIONES, HOJA_MAESTRO_HIS, df_maestro_final, list(df_maestro_final.columns))
+
+    print("Consolidación finalizada con éxito.")
 
 if __name__ == "__main__":
     sincronizar_aranceles()
