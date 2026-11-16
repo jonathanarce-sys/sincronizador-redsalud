@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
+
+# Fila 434 contiene "San Antonio"; las nuevas cargas parten en la fila 434
 FILA_INICIO_OBJETIVO = 434
 
 LICITALAB_TOKEN = (
@@ -23,13 +25,19 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
+MERCADOPUBLICO_TICKET = (
+    os.environ.get("MERCADOPUBLICO_TICKET") or
+    os.environ.get("MP_TICKET") or
+    ""
+).strip()
+
 LICITALAB_API_URL = os.environ.get(
     "LICITALAB_API_URL", 
     "https://biapi.licitalab.cl/bi/v2/opportunities"
 ).strip()
 
 # ==========================================
-# 2. LISTA BLANCA OFICIAL RUTS REDSALUD
+# 2. LISTA BLANCA OFICIAL RUTS Y ADJUDICACIONES CONFIRMADAS
 # ==========================================
 RUTS_REDSALUD_WHITELIST = {
     "96856000", "76458120", "96536000", "96543000", "99568700",
@@ -39,6 +47,35 @@ RUTS_REDSALUD_WHITELIST = {
     "88611600", "76124062", "99568720", "96680980", "76110809",
     "76046416", "78040520", "78053560"
 }
+
+# Las 25 adjudicaciones confirmadas que deben incorporarse en el consolidado
+ADJUDICACIONES_FORZADAS_REDSALUD = [
+    "2145-65-LE26",
+    "2704-72-LE26",
+    "2548-81-LE26",
+    "1057489-264-LE26",
+    "2101-140-LE26",
+    "5594-10-LR26",
+    "1057404-77-LR26",
+    "2704-58-L126",
+    "3130-23-LE26",
+    "5594-8-LP26",
+    "3934-20-L126",
+    "3934-19-CO26",
+    "2792-8-LE26",
+    "1057547-323-LP26",
+    "1667-19-LP26",
+    "5056-82-LP26",
+    "1952-55-LP26",
+    "1017312-11-LE26",
+    "1017312-10-LP26",
+    "1017312-9-LP26",
+    "1057492-84-LR26",
+    "1240099-5-LR26",
+    "812261-32-LR26",
+    "2446-139-LE26",
+    "1057492-2-LR25"
+]
 
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
     "1464-65-LE26", "3283-9-LE26", "359-115-LE26", "2770-153-LE26",
@@ -95,7 +132,97 @@ def normalizar_tipo_proceso(tipo_raw, codigo):
     return "Licitación Pública"
 
 # ==========================================
-# 4. FASE 1: DESCARGA CON CAMPOS EXACTOS DE LICITALAB BI API
+# 4. CONSULTA PUNTUAL A MERCADO PUBLICO / LICITALAB PARA IDs FALTANTES
+# ==========================================
+def consultar_detalle_mercado_publico(codigo_lic):
+    if not MERCADOPUBLICO_TICKET:
+        return None
+    url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+    params = {"codigo": codigo_lic, "ticket": MERCADOPUBLICO_TICKET}
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            listado = data.get("Listado") or []
+            if listado and isinstance(listado, list):
+                lic = listado[0]
+                comp_obj = lic.get("Comprador") or {}
+                nombre_org = str(comp_obj.get("NombreOrganismo") or comp_obj.get("NombreUnidad") or "").strip()
+                region_org = str(comp_obj.get("RegionUnidad") or "").strip()
+                rut_org = str(comp_obj.get("RutUnidad") or "").strip()
+                nombre_lic = str(lic.get("Nombre") or "").strip()
+                estado_lic = str(lic.get("Estado") or "Adjudicada").strip()
+                
+                adj_nombre = ""
+                monto_total = ""
+                items_obj = lic.get("Items") or {}
+                listado_items = items_obj.get("Listado") or []
+                suma_monto = 0
+                for it in listado_items:
+                    adj = it.get("Adjudicacion") or {}
+                    if adj:
+                        prov = str(adj.get("NombreProveedor") or "").strip()
+                        rut_p = str(adj.get("RutProveedor") or "").strip()
+                        if prov and prov not in adj_nombre:
+                            adj_nombre = f"{adj_nombre} | {prov} ({rut_p})".strip(" |")
+                        m_unit = adj.get("MontoUnitario") or 0
+                        cant = adj.get("Cantidad") or 1
+                        try:
+                            suma_monto += float(m_unit) * float(cant)
+                        except Exception:
+                            pass
+                if suma_monto > 0:
+                    monto_total = str(int(round(suma_monto)))
+
+                return {
+                    "codigo": codigo_lic.upper(),
+                    "nombre": nombre_lic,
+                    "comprador": nombre_org,
+                    "rut_comprador": rut_org,
+                    "region": region_org,
+                    "estado": estado_lic,
+                    "adjudicatario": adj_nombre,
+                    "monto": monto_total
+                }
+    except Exception as e:
+        print(f"  [MP API] Error consultando {codigo_lic}: {repr(e)}", flush=True)
+    return None
+
+def consultar_detalle_licitalab(codigo_lic):
+    if not LICITALAB_TOKEN:
+        return None
+    headers = {
+        "x-api-key": LICITALAB_TOKEN,
+        "Accept": "application/json",
+        "User-Agent": "RedSalud-Sync/1.0"
+    }
+    for param_key in ("code", "search", "q"):
+        try:
+            resp = requests.get(LICITALAB_API_URL, headers=headers, params={param_key: codigo_lic}, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data if isinstance(data, list) else (data.get("data") or data.get("opportunities") or data.get("items") or data.get("results") or [])
+                for it in items:
+                    c = str(it.get("OPPORTUNITY_CODE") or it.get("code") or it.get("codigo") or "").strip().upper()
+                    if c == codigo_lic.upper():
+                        monto_raw = it.get("TOTAL_AWARDED_AMOUNT") if it.get("TOTAL_AWARDED_AMOUNT") is not None else it.get("AVAILABLE_AMOUNT")
+                        monto = str(int(monto_raw)) if isinstance(monto_raw, (int, float)) else str(monto_raw or "").strip()
+                        return {
+                            "codigo": c,
+                            "nombre": str(it.get("OPPORTUNITY_NAME") or it.get("name") or "").strip(),
+                            "comprador": str(it.get("ORGANISM") or it.get("buyer") or "").strip(),
+                            "rut_comprador": "",
+                            "region": str(it.get("REGION") or it.get("region") or "").strip(),
+                            "estado": str(it.get("OPPORTUNITY_STATUS") or it.get("status") or "Adjudicada").strip(),
+                            "adjudicatario": str(it.get("AWARDED_PROVIDERS") or it.get("award") or "").strip(),
+                            "monto": monto
+                        }
+        except Exception:
+            pass
+    return None
+
+# ==========================================
+# 5. FASE 1: DESCARGA CON CAMPOS EXACTOS DE LICITALAB BI API
 # ==========================================
 def actualizar_base_madre_licitalab(sheet_maestra):
     print("--- FASE 1: Conectando a LicitaLAB API BI ---", flush=True)
@@ -111,7 +238,6 @@ def actualizar_base_madre_licitalab(sheet_maestra):
     cabecera = datos_actuales[0]
     total_cols = max(len(cabecera), 20)
 
-    # Relevamiento de códigos existentes (Col B / Col 1)
     codigos_existentes = set()
     for fila in datos_actuales[1:]:
         if len(fila) > 1 and fila[1].strip():
@@ -129,7 +255,6 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         "User-Agent": "RedSalud-Sync/1.0"
     }
 
-    # Consultamos API BI por las oportunidades delta de los ultimos 7 dias
     fecha_delta = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
     params = {"since": fecha_delta}
 
@@ -146,7 +271,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         print(f"Error consultando LicitaLAB: {repr(e)}", flush=True)
 
     if not items_licitalab:
-        print("Fase 1: No se recibieron datos de LicitaLAB.", flush=True)
+        print("Fase 1: No se recibieron datos nuevos de LicitaLAB.", flush=True)
         return
 
     filas_nuevas = []
@@ -190,26 +315,19 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         monto = str(int(monto_raw)) if isinstance(monto_raw, (int, float)) else str(monto_raw or "").strip()
 
         fila_20 = [""] * total_cols
-        fila_20[0] = item_id             # Col A: ID Proceso
-        fila_20[1] = cod                 # Col B: Código Proceso
-        fila_20[2] = nombre              # Col C: Nombre Proceso
-        fila_20[3] = categoria           # Col D: Categoría / Línea de Servicio
-        fila_20[4] = fecha_pub           # Col E: Fecha Publicación
-        fila_20[5] = fecha_cie           # Col F: Fecha de Cierre
-        fila_20[6] = fecha_2do           # Col G: Fecha Cierre 2do Llamado
-        fila_20[7] = tipo_proc           # Col H: Tipo Proceso ('Compra Ágil' o 'Licitación Pública')
-        fila_20[8] = comprador           # Col I: Institución Compradora
-        fila_20[9] = region              # Col J: Región / Territorio
-        fila_20[10] = estado             # Col K: Estado de la Oferta
-        fila_20[11] = adj                # Col L: Adjudicatario (Proveedor Ganador)
-        fila_20[12] = monto              # Col M: Monto Presupuesto Total + IVA (CLP)
-        fila_20[13] = ""                 # Col N: Comentarios / Observaciones
-        fila_20[14] = ""                 # Col O: Código OC
-        fila_20[15] = ""                 # Col P: Estado OC
-        fila_20[16] = ""                 # Col Q: Organismo Emisor OC
-        fila_20[17] = ""                 # Col R: Monto Neto OC (CLP)
-        fila_20[18] = ""                 # Col S: Monto IVA OC (CLP)
-        fila_20[19] = ""                 # Col T: Monto Bruto Facturable OC (CLP)
+        fila_20[0] = item_id
+        fila_20[1] = cod
+        fila_20[2] = nombre
+        fila_20[3] = categoria
+        fila_20[4] = fecha_pub
+        fila_20[5] = fecha_cie
+        fila_20[6] = fecha_2do
+        fila_20[7] = tipo_proc
+        fila_20[8] = comprador
+        fila_20[9] = region
+        fila_20[10] = estado
+        fila_20[11] = adj
+        fila_20[12] = monto
 
         filas_nuevas.append(fila_20)
         codigos_existentes.add(cod)
@@ -221,11 +339,9 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         print(f"Insertando {len(filas_nuevas)} licitaciones 100% completas en Fila 2 de la Base Madre...", flush=True)
         sheet_maestra.insert_rows(filas_nuevas, row=2)
         print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones completas y alineadas en Base Madre.", flush=True)
-    else:
-        print("Base Madre al dia: No hay licitaciones nuevas pendientes.", flush=True)
 
 # ==========================================
-# 5. FASE 2: FILTRADO HACIA 'CONSOLIDADO'
+# 6. FASE 2: FILTRADO + RESCATE DE ADJUDICACIONES HACIA 'CONSOLIDADO'
 # ==========================================
 def calcular_dv_chileno(num):
     mults = [2, 3, 4, 5, 6, 7]
@@ -293,7 +409,7 @@ def determinar_filial(cat, reg, comp, adj="", codigo=""):
         return "Centros Médicos RedSalud Biobío", "96.856.000-2"
     if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u:
         return "Centros Médicos RedSalud Maule", "96.856.000-2"
-    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u:
+    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u or "1017312-" in cod_u or "2145-" in cod_u:
         return "Centros Médicos RedSalud Iquique", "96.856.000-2"
     if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u:
         return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
@@ -327,7 +443,7 @@ def parsear_fechas_fila(fila):
     return fechas
 
 def cumple_filtro_periodo(fila_raw, codigo):
-    if re.search(r"-[A-Za-z]+26\b", str(codigo)):
+    if re.search(r"-[A-Za-z0-9]+26\b", str(codigo)):
         return True
     fechas = parsear_fechas_fila(fila_raw)
     for y, m, d in fechas:
@@ -413,8 +529,35 @@ def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_compr
 
     return False
 
+def construir_fila_consolidado(codigo, comprador, rut_comprador, region, categoria, prestacion, monto, adj_celda=""):
+    cat_cliente = clasificar_categoria_cliente(comprador)
+    rut_cli = rut_comprador if rut_comprador else resolver_rut_cliente(comprador, codigo)
+    filial, rut_filial = determinar_filial(categoria, region, comprador, adj=adj_celda, codigo=codigo)
+    tipo_reg = "Compra Ágil" if "-CO" in codigo.upper() else "Licitación"
+    return [
+        cat_cliente,
+        comprador if comprador else "Institución Pública (Por confirmar)",
+        rut_cli,
+        filial,
+        rut_filial,
+        "Contrato Base",
+        tipo_reg,
+        codigo.upper(),
+        prestacion if prestacion else "Prestación Médica Asistencial",
+        "",
+        "",
+        12,
+        monto,
+        "",
+        "",
+        "",
+        "En gestión",
+        "Sí",
+        ""
+    ]
+
 # ==========================================
-# 6. ORQUESTADOR COMPLETO
+# 7. ORQUESTADOR COMPLETO
 # ==========================================
 def sincronizar_todo():
     print("=== INICIANDO SINCRONIZADOR INTEGRAL LICITALAB -> REDSALUD ===", flush=True)
@@ -425,7 +568,6 @@ def sincronizar_todo():
         print(f"Error de conexión: {repr(e)}", flush=True)
         return
 
-    # 1. Base Madre
     try:
         ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
         sheet_maestra = ss_maestra.sheet1
@@ -433,10 +575,8 @@ def sincronizar_todo():
         print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
         return
 
-    # Fase 1: Descargar desde LicitaLAB hacia Base Madre con campos mapeados exactamente
     actualizar_base_madre_licitalab(sheet_maestra)
 
-    # Fase 2: Filtrar Base Madre hacia 'consolidado'
     print("\n--- FASE 2: Sincronizando hacia consolidado ---", flush=True)
     valores_maestra = sheet_maestra.get_all_values()
     print(f"Total filas en Base Madre: {len(valores_maestra)}", flush=True)
@@ -457,121 +597,4 @@ def sincronizar_todo():
         if ("CÓDIGO" in t or "CODIGO" in t or "ID" in t) and not any(x in t for x in ["OC", "ORDEN", "FACTURABLE", "COMPRA"]):
             idx_codigo = idx
         elif "NOMBRE" in t and "PROCESO" in t:
-            idx_nombre = idx
-        elif "CATEGOR" in t:
-            idx_categoria = idx
-        elif "TIPO" in t:
-            idx_tipo = idx
-        elif "COMPRADOR" in t or "INSTITUCI" in t:
-            idx_comprador = idx
-        elif "REGI" in t:
-            idx_region = idx
-        elif "ESTADO" in t and "OFERTA" in t:
-            idx_estado = idx
-        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
-            idx_adjudicatario = idx
-        elif "MONTO" in t:
-            idx_monto = idx
-
-    try:
-        ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
-    except Exception:
-        url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
-        ss_contratos = client.open_by_url(url)
-
-    ws_contratos = None
-    for ws in ss_contratos.worksheets():
-        if ws.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower():
-            ws_contratos = ws
-            break
-    if not ws_contratos:
-        print(f"Error: Hoja '{NOMBRE_HOJA_CONTRATOS}' no encontrada.", flush=True)
-        return
-
-    datos_existentes = ws_contratos.get_all_values()
-    print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
-
-    ids_historicos = set()
-    limite_historico = min(FILA_INICIO_OBJETIVO - 1, len(datos_existentes))
-    for row in datos_existentes[:limite_historico]:
-        if len(row) > 7 and row[7].strip():
-            ids_historicos.add(row[7].strip().upper())
-        if len(row) > 1 and row[1].strip():
-            ids_historicos.add(row[1].strip().upper())
-
-    filas_nuevas = []
-    ids_nuevos = set()
-
-    if len(valores_maestra) > 1:
-        for r in valores_maestra[1:]:
-            fila = list(r) + [""] * (25 - len(r))
-            categoria = fila[idx_categoria].strip() if idx_categoria < len(fila) else ""
-            tipo_proc = fila[idx_tipo].strip() if idx_tipo < len(fila) else ""
-            comprador = fila[idx_comprador].strip() if idx_comprador < len(fila) else ""
-            region = fila[idx_region].strip() if idx_region < len(fila) else ""
-            estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
-            monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
-            adjudicatario_celda = fila[idx_adjudicatario].strip() if idx_adjudicatario < len(fila) else ""
-
-            codigo = extraer_id_licitacion(fila, idx_codigo)
-            if not codigo or codigo.upper() in LICITACIONES_DESCARTADAS_EXPLICITAS:
-                continue
-
-            if "AGIL" in tipo_proc.upper() or "COT" in codigo.upper():
-                continue
-
-            es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
-            if not es_adj:
-                continue
-
-            if not verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
-                continue
-
-            if not cumple_filtro_periodo(fila, codigo):
-                continue
-
-            cod_u = codigo.upper()
-            if cod_u in ids_historicos or cod_u in ids_nuevos:
-                continue
-
-            cat_cliente = clasificar_categoria_cliente(comprador)
-            prestacion = extraer_prestacion(fila, idx_nombre)
-            rut_cliente = resolver_rut_cliente(comprador, codigo)
-            filial, rut_filial = determinar_filial(categoria, region, comprador, adj=adjudicatario_celda, codigo=codigo)
-
-            filas_nuevas.append([
-                cat_cliente, comprador, rut_cliente, filial, rut_filial,
-                "", "Licitación", codigo, prestacion, "", "", 12, monto,
-                "", "", "", "En gestión", "Sí", ""
-            ])
-            ids_nuevos.add(cod_u)
-
-    tot_nuevas = len(filas_nuevas)
-    print(f"Licitaciones VERDADERAMENTE adjudicadas a RedSalud: {tot_nuevas}", flush=True)
-
-    fila_inicio = FILA_INICIO_OBJETIVO
-    filas_totales_actuales = max(len(datos_existentes), fila_inicio)
-
-    if filas_totales_actuales >= fila_inicio:
-        print(f"Purgando filas erróneas desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
-        ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
-
-    if tot_nuevas > 0:
-        fila_fin = fila_inicio + tot_nuevas - 1
-        filas_necesarias = max(fila_fin + 50, 450)
-        ws_contratos.resize(rows=filas_necesarias, cols=25)
-
-        for s in range(0, tot_nuevas, 1000):
-            e = min(s + 1000, tot_nuevas)
-            r_ini = fila_inicio + s
-            r_fin = fila_inicio + e - 1
-            ws_contratos.update(
-                range_name=f"A{r_ini}:S{r_fin}",
-                values=filas_nuevas[s:e]
-            )
-        print(f"Éxito: Se escribieron {tot_nuevas} licitaciones legítimas de RedSalud desde la fila {fila_inicio}.", flush=True)
-    else:
-        print("RESULTADO: Ninguna licitación ajena fue insertada. Rango consolidado purgado.", flush=True)
-
-if __name__ == "__main__":
-    sincronizar_todo()
+            idx_nombre
