@@ -26,5 +26,5 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
-        run: |
-          python main.py
+          MERCADOPUBLICO_TICKET: ${{ secrets.MERCADOPUBLICO_TICKET }}
+        run: python main.py
