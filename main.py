@@ -15,8 +15,8 @@ SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
 SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 
-# Fila 434 contiene "San Antonio"; las nuevas cargas parten en la fila 434
-FILA_INICIO_OBJETIVO = 434
+# Fila 434 contiene "San Antonio"; las nuevas cargas parten en la fila 435
+FILA_INICIO_OBJETIVO = 435
 
 LICITALAB_TOKEN = (
     os.environ.get("LICITALAB_TOKEN") or 
@@ -48,7 +48,6 @@ RUTS_REDSALUD_WHITELIST = {
     "76046416", "78040520", "78053560"
 }
 
-# Las 25 adjudicaciones confirmadas que deben incorporarse en el consolidado
 ADJUDICACIONES_FORZADAS_REDSALUD = [
     "2145-65-LE26",
     "2704-72-LE26",
@@ -597,4 +596,155 @@ def sincronizar_todo():
         if ("CÓDIGO" in t or "CODIGO" in t or "ID" in t) and not any(x in t for x in ["OC", "ORDEN", "FACTURABLE", "COMPRA"]):
             idx_codigo = idx
         elif "NOMBRE" in t and "PROCESO" in t:
-            idx_nombre
+            idx_nombre = idx
+        elif "CATEGOR" in t:
+            idx_categoria = idx
+        elif "TIPO" in t:
+            idx_tipo = idx
+        elif "COMPRADOR" in t or "INSTITUCI" in t:
+            idx_comprador = idx
+        elif "REGI" in t:
+            idx_region = idx
+        elif "ESTADO" in t and "OFERTA" in t:
+            idx_estado = idx
+        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
+            idx_adjudicatario = idx
+        elif "MONTO" in t:
+            idx_monto = idx
+
+    try:
+        ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
+    except Exception:
+        url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
+        ss_contratos = client.open_by_url(url)
+
+    ws_contratos = None
+    for ws in ss_contratos.worksheets():
+        if ws.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower():
+            ws_contratos = ws
+            break
+    if not ws_contratos:
+        print(f"Error: Hoja '{NOMBRE_HOJA_CONTRATOS}' no encontrada.", flush=True)
+        return
+
+    datos_existentes = ws_contratos.get_all_values()
+    print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
+
+    ids_historicos = set()
+    limite_historico = min(FILA_INICIO_OBJETIVO - 1, len(datos_existentes))
+    for row in datos_existentes[:limite_historico]:
+        if len(row) > 7 and row[7].strip():
+            ids_historicos.add(row[7].strip().upper())
+        if len(row) > 1 and row[1].strip():
+            ids_historicos.add(row[1].strip().upper())
+
+    set_forzadas = {x.strip().upper() for x in ADJUDICACIONES_FORZADAS_REDSALUD}
+    filas_nuevas = []
+    ids_nuevos = set()
+
+    if len(valores_maestra) > 1:
+        for r in valores_maestra[1:]:
+            fila = list(r) + [""] * (25 - len(r))
+            codigo = extraer_id_licitacion(fila, idx_codigo)
+            if not codigo:
+                continue
+            cod_u = codigo.upper()
+
+            if cod_u in LICITACIONES_DESCARTADAS_EXPLICITAS:
+                continue
+            if cod_u in ids_historicos or cod_u in ids_nuevos:
+                continue
+
+            es_forzada = cod_u in set_forzadas
+
+            if not es_forzada:
+                tipo_proc = fila[idx_tipo].strip() if idx_tipo < len(fila) else ""
+                estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
+                if "AGIL" in tipo_proc.upper() or "COT" in cod_u:
+                    continue
+                es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
+                if not es_adj:
+                    continue
+                if not verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
+                    continue
+                if not cumple_filtro_periodo(fila, cod_u):
+                    continue
+
+            categoria = fila[idx_categoria].strip() if idx_categoria < len(fila) else ""
+            comprador = fila[idx_comprador].strip() if idx_comprador < len(fila) else ""
+            region = fila[idx_region].strip() if idx_region < len(fila) else ""
+            monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
+            adjudicatario_celda = fila[idx_adjudicatario].strip() if idx_adjudicatario < len(fila) else ""
+            prestacion = extraer_prestacion(fila, idx_nombre)
+
+            filas_nuevas.append(
+                construir_fila_consolidado(cod_u, comprador, "", region, categoria, prestacion, monto, adjudicatario_celda)
+            )
+            ids_nuevos.add(cod_u)
+
+    for cod_forzado in ADJUDICACIONES_FORZADAS_REDSALUD:
+        cod_u = cod_forzado.strip().upper()
+        if cod_u in ids_historicos or cod_u in ids_nuevos:
+            continue
+
+        print(f"Rescatando adjudicación faltante vía API: {cod_u}...", flush=True)
+        detalle = consultar_detalle_licitalab(cod_u) or consultar_detalle_mercado_publico(cod_u)
+        time.sleep(0.4)
+
+        if detalle:
+            filas_nuevas.append(
+                construir_fila_consolidado(
+                    cod_u,
+                    detalle.get("comprador", ""),
+                    detalle.get("rut_comprador", ""),
+                    detalle.get("region", ""),
+                    "Salud",
+                    detalle.get("nombre", ""),
+                    detalle.get("monto", ""),
+                    detalle.get("adjudicatario", "")
+                )
+            )
+        else:
+            filas_nuevas.append(
+                construir_fila_consolidado(
+                    cod_u,
+                    "Institución Pública (Verificar en MP)",
+                    "",
+                    "",
+                    "Salud",
+                    f"Licitación Adjudicada {cod_u}",
+                    "",
+                    "RedSalud"
+                )
+            )
+        ids_nuevos.add(cod_u)
+
+    tot_nuevas = len(filas_nuevas)
+    print(f"Total adjudicaciones RedSalud listas para insertar: {tot_nuevas}", flush=True)
+
+    fila_inicio = FILA_INICIO_OBJETIVO
+    filas_totales_actuales = max(len(datos_existentes), fila_inicio)
+
+    if filas_totales_actuales >= fila_inicio:
+        print(f"Limpiando rango desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
+        ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
+
+    if tot_nuevas > 0:
+        fila_fin = fila_inicio + tot_nuevas - 1
+        filas_necesarias = max(fila_fin + 50, 500)
+        ws_contratos.resize(rows=filas_necesarias, cols=25)
+
+        for s in range(0, tot_nuevas, 1000):
+            e = min(s + 1000, tot_nuevas)
+            r_ini = fila_inicio + s
+            r_fin = fila_inicio + e - 1
+            ws_contratos.update(
+                range_name=f"A{r_ini}:S{r_fin}",
+                values=filas_nuevas[s:e]
+            )
+        print(f"Éxito: Se escribieron {tot_nuevas} licitaciones adjudicadas de RedSalud desde la fila {fila_inicio}.", flush=True)
+    else:
+        print("RESULTADO: No hubo nuevas licitaciones para insertar.", flush=True)
+
+if __name__ == "__main__":
+    sincronizar_todo()
