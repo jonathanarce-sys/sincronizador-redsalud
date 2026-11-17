@@ -37,15 +37,29 @@ LICITALAB_API_URL = os.environ.get(
 ).strip()
 
 # ==========================================
-# 2. LISTA BLANCA OFICIAL RUTS Y ADJUDICACIONES CONFIRMADAS
+# 2. CATALOGO OFICIAL DE RUTS Y FILIALES REDSALUD
 # ==========================================
-RUTS_REDSALUD_WHITELIST = {
-    "96856000", "76458120", "96536000", "96543000", "99568700",
-    "96542000", "96537000", "96541000", "96524000", "96527000",
-    "96559000", "76326330", "96942400", "96567920", "96598850",
+# Mapeo directo: RUT base (sin DV ni puntos) -> (Nombre Oficial Filial, RUT Formateado)
+MAPA_RUT_FILIAL_REDSALUD = {
+    "99533790": ("Clínica RedSalud Elqui", "99.533.790-8"),
+    "96543000": ("Clínica RedSalud Valparaíso", "96.543.000-6"),
+    "99568700": ("Centro de Especialidades Médicas Valparaíso", "99.568.700-3"),
+    "96542000": ("Clínica RedSalud Rancagua", "96.542.000-0"),
+    "96537000": ("Clínica RedSalud Mayor Temuco", "96.537.000-3"),
+    "96541000": ("Clínica RedSalud Magallanes", "96.541.000-5"),
+    "96536000": ("Clínica RedSalud Providencia", "96.536.000-8"),
+    "78053560": ("Clínica RedSalud Vitacura", "78.053.560-1"),
+    "96524000": ("Clínica RedSalud Santiago", "96.524.000-2"),
+    "96598850": ("Centros Médicos RedSalud Iquique", "96.598.850-0"),
+    "76458120": ("RedSalud Dental SpA", "76.458.120-3"),
+    "96856000": ("Centros Médicos RedSalud", "96.856.000-2"),
+}
+
+RUTS_REDSALUD_WHITELIST = set(MAPA_RUT_FILIAL_REDSALUD.keys()) | {
+    "96527000", "96559000", "76326330", "96942400", "96567920",
     "76906480", "96774580", "76181326", "76207967", "78918290",
     "88611600", "76124062", "99568720", "96680980", "76110809",
-    "76046416", "78040520", "78053560"
+    "76046416", "78040520"
 }
 
 ADJUDICACIONES_FORZADAS_REDSALUD = [
@@ -131,7 +145,7 @@ def normalizar_tipo_proceso(tipo_raw, codigo):
     return "Licitación Pública"
 
 # ==========================================
-# 4. CONSULTA PUNTUAL A MERCADO PUBLICO / LICITALAB PARA IDs FALTANTES
+# 4. CONSULTA PUNTUAL A MERCADO PUBLICO / LICITALAB
 # ==========================================
 def consultar_detalle_mercado_publico(codigo_lic):
     if not MERCADOPUBLICO_TICKET:
@@ -139,7 +153,7 @@ def consultar_detalle_mercado_publico(codigo_lic):
     url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
     params = {"codigo": codigo_lic, "ticket": MERCADOPUBLICO_TICKET}
     try:
-        resp = requests.get(url, params=params, timeout=20)
+        resp = requests.get(url, params=params, timeout=25)
         if resp.status_code == 200:
             data = resp.json()
             listado = data.get("Listado") or []
@@ -152,8 +166,7 @@ def consultar_detalle_mercado_publico(codigo_lic):
                 nombre_lic = str(lic.get("Nombre") or "").strip()
                 estado_lic = str(lic.get("Estado") or "Adjudicada").strip()
                 
-                adj_nombre = ""
-                monto_total = ""
+                adj_info = []
                 items_obj = lic.get("Items") or {}
                 listado_items = items_obj.get("Listado") or []
                 suma_monto = 0
@@ -162,16 +175,16 @@ def consultar_detalle_mercado_publico(codigo_lic):
                     if adj:
                         prov = str(adj.get("NombreProveedor") or "").strip()
                         rut_p = str(adj.get("RutProveedor") or "").strip()
-                        if prov and prov not in adj_nombre:
-                            adj_nombre = f"{adj_nombre} | {prov} ({rut_p})".strip(" |")
+                        etiqueta = f"{prov} ({rut_p})".strip()
+                        if etiqueta and etiqueta not in adj_info:
+                            adj_info.append(etiqueta)
                         m_unit = adj.get("MontoUnitario") or 0
                         cant = adj.get("Cantidad") or 1
                         try:
                             suma_monto += float(m_unit) * float(cant)
                         except Exception:
                             pass
-                if suma_monto > 0:
-                    monto_total = str(int(round(suma_monto)))
+                monto_total = str(int(round(suma_monto))) if suma_monto > 0 else ""
 
                 return {
                     "codigo": codigo_lic.upper(),
@@ -180,7 +193,7 @@ def consultar_detalle_mercado_publico(codigo_lic):
                     "rut_comprador": rut_org,
                     "region": region_org,
                     "estado": estado_lic,
-                    "adjudicatario": adj_nombre,
+                    "adjudicatario": " | ".join(adj_info),
                     "monto": monto_total
                 }
     except Exception as e:
@@ -300,451 +313,4 @@ def actualizar_base_madre_licitalab(sheet_maestra):
         item_id = str(item.get("OPPORTUNITY_ID") or item.get("id") or "")
         nombre = str(item.get("OPPORTUNITY_NAME") or item.get("name") or "").strip()
         categoria = str(item.get("B_LINE_TITLE") or item.get("B_LINE") or item.get("category") or "Salud").strip()
-        fecha_pub = str(item.get("PUBLISH_DATE") or item.get("published_at") or "")[:10]
-        fecha_cie = str(item.get("CLOSING_DATE") or item.get("closing_at") or "")[:10]
-        fecha_2do = "-"
-
-        tipo_raw = item.get("OPPORTUNITY_TYPE") or item.get("type") or ""
-        tipo_proc = normalizar_tipo_proceso(tipo_raw, cod)
-
-        estado = str(item.get("OPPORTUNITY_STATUS") or item.get("status") or "Publicada").strip()
-        adj = str(item.get("AWARDED_PROVIDERS") or item.get("award") or "").strip()
-        
-        monto_raw = item.get("AVAILABLE_AMOUNT") if item.get("AVAILABLE_AMOUNT") is not None else item.get("TOTAL_AWARDED_AMOUNT")
-        monto = str(int(monto_raw)) if isinstance(monto_raw, (int, float)) else str(monto_raw or "").strip()
-
-        fila_20 = [""] * total_cols
-        fila_20[0] = item_id
-        fila_20[1] = cod
-        fila_20[2] = nombre
-        fila_20[3] = categoria
-        fila_20[4] = fecha_pub
-        fila_20[5] = fecha_cie
-        fila_20[6] = fecha_2do
-        fila_20[7] = tipo_proc
-        fila_20[8] = comprador
-        fila_20[9] = region
-        fila_20[10] = estado
-        fila_20[11] = adj
-        fila_20[12] = monto
-
-        filas_nuevas.append(fila_20)
-        codigos_existentes.add(cod)
-
-    print(f"Resumen análisis: {len(filas_nuevas)} nuevas completas para insertar | {rechazados_existentes} ya existian | {rechazados_incompletos} descartadas.", flush=True)
-
-    if filas_nuevas:
-        filas_nuevas.sort(key=lambda r: str(r[4]), reverse=True)
-        print(f"Insertando {len(filas_nuevas)} licitaciones 100% completas en Fila 2 de la Base Madre...", flush=True)
-        sheet_maestra.insert_rows(filas_nuevas, row=2)
-        print(f"Exito Fase 1: Se insertaron {len(filas_nuevas)} licitaciones completas y alineadas en Base Madre.", flush=True)
-
-# ==========================================
-# 6. FASE 2: FILTRADO + RESCATE DE ADJUDICACIONES HACIA 'CONSOLIDADO'
-# ==========================================
-def calcular_dv_chileno(num):
-    mults = [2, 3, 4, 5, 6, 7]
-    s = sum(int(d) * mults[i % 6] for i, d in enumerate(str(num)[::-1]))
-    tabla = ("0", "K", "9", "8", "7", "6", "5", "4", "3", "2", "1")
-    return tabla[s % 11]
-
-def formatear_rut(num):
-    dv = calcular_dv_chileno(num)
-    m = num // 1000000
-    k = (num % 1000000) // 1000
-    u = num % 1000
-    return f"{m}.{k:03d}.{u:03d}-{dv}"
-
-def resolver_rut_cliente(nombre, cod=""):
-    org = str(nombre).strip().upper()
-    seed = org if org else str(cod).strip().upper()
-    h = sum((i + 1) * ord(c) for i, c in enumerate(seed))
-    if any(m in org for m in ["MUNICIPALIDAD", "MUNI", "ALCALDÍA", "ALCALDIA"]):
-        base = 69000000 + (h * 179) % 990000
-    elif any(s in org for s in ["SALUD", "HOSPITAL", "CLINIC", "CESFAM", "POSTA"]):
-        base = 61600000 + (h * 149) % 390000
-    else:
-        base = 61100000 + (h * 131) % 890000
-    return formatear_rut(base)
-
-def clasificar_categoria_cliente(comprador):
-    c = str(comprador).upper()
-    if any(k in c for k in ["FFAA", "ARMADA", "EJERCITO", "EJÉRCITO", "FACH", "AEREA", "AÉREA", "CARABINERO", "DIPRECA", "CAPREDENA", "MILITAR", "NAVAL"]):
-        return "FFAA"
-    if "ISL" in c or "SEGURIDAD LABORAL" in c:
-        return "ISL"
-    if "FONASA" in c or "FONDO NACIONAL DE SALUD" in c:
-        return "Fonasa"
-    if any(k in c for k in ["MUNICIPAL", "MUNI", "ALCALD", "CORP. MUNICIPAL", "CORMU"]):
-        return "Municipalidades"
-    if any(k in c for k in ["SERVICIO DE SALUD", "SS ", "S.S."]):
-        return "Servicio de Salud"
-    if any(k in c for k in ["HOSPITAL", "INSTITUTO", "COMPLEJO ASISTENCIAL", "POSTA", "CESFAM"]):
-        return "Hospitales"
-    return "Otros"
-
-def determinar_filial(cat, reg, comp, adj="", codigo=""):
-    adj_u = str(adj).upper()
-    comp_u = str(comp).upper()
-    reg_u = str(reg).upper()
-    cat_u = str(cat).upper()
-    cod_u = str(codigo).upper()
-
-    if "899-33-LE26" in cod_u or "99.568.700" in adj_u or "99568700" in adj_u or "VALPARAISO" in adj_u or "VALPARAÍSO" in adj_u or "INVERSALUD" in adj_u:
-        return "Centro de Especialidades Médicas Valparaíso", "99.568.700-3"
-
-    if "DENTAL" in cat_u:
-        return "RedSalud Dental SpA", "76.458.120-3"
-
-    if "VALPARAÍSO" in reg_u or "VALPARAISO" in reg_u or "VIÑA" in comp_u:
-        return "Clínica RedSalud Valparaíso", "96.543.000-6"
-    if "RANCAGUA" in comp_u or "HIGGIN" in reg_u or "COLCHAGUA" in comp_u:
-        return "Clínica RedSalud Rancagua", "96.542.000-0"
-    if "ARAUCANÍA" in reg_u or "TEMUCO" in comp_u or "KALLVU" in comp_u:
-        return "Clínica RedSalud Mayor Temuco", "96.537.000-3"
-    if "MAGALLANES" in reg_u or "PUNTA ARENAS" in comp_u:
-        return "Clínica RedSalud Magallanes", "96.541.000-5"
-    if "BIOBÍO" in reg_u or "BIOBIO" in reg_u or "CONCEPCIÓN" in comp_u:
-        return "Centros Médicos RedSalud Biobío", "96.856.000-2"
-    if "MAULE" in reg_u or "CURICÓ" in comp_u or "TALCA" in comp_u:
-        return "Centros Médicos RedSalud Maule", "96.856.000-2"
-    if "IQUIQUE" in reg_u or "TARAPACÁ" in reg_u or "1017312-" in cod_u or "2145-" in cod_u:
-        return "Centros Médicos RedSalud Iquique", "96.856.000-2"
-    if "ANTOFAGASTA" in reg_u or "CALAMA" in comp_u:
-        return "Centros Médicos RedSalud Antofagasta", "96.856.000-2"
-
-    if "METROPOLITANA" in reg_u or "SANTIAGO" in reg_u:
-        if any(x in comp_u for x in ["PROVIDENCIA", "ORIENTE"]) or "PROVIDENCIA" in adj_u:
-            return "Clínica RedSalud Providencia", "96.536.000-8"
-        if any(x in comp_u for x in ["VITACURA", "LO BARNECHEA"]) or "VITACURA" in adj_u:
-            return "Clínica RedSalud Vitacura", "96.536.000-8"
-        return "Clínica RedSalud Santiago", "96.856.000-2"
-
-    return "RedSalud S.A.", "96.856.000-2"
-
-def parsear_fechas_fila(fila):
-    fechas = []
-    for c in fila:
-        c_str = str(c).strip()
-        matches = re.findall(r"\b(\d{1,4})[-/.](\d{1,2})[-/.](\d{2,4})\b", c_str)
-        for m in matches:
-            p1, p2, p3 = int(m[0]), int(m[1]), int(m[2])
-            if p1 > 1000:
-                year, month, day = p1, p2, p3
-            elif p3 > 1000:
-                year, month, day = p3, p2, p1
-            elif 20 <= p3 <= 35:
-                year, month, day = 2000 + p3, p2, p1
-            else:
-                continue
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                fechas.append((year, month, day))
-    return fechas
-
-def cumple_filtro_periodo(fila_raw, codigo):
-    if re.search(r"-[A-Za-z0-9]+26\b", str(codigo)):
-        return True
-    fechas = parsear_fechas_fila(fila_raw)
-    for y, m, d in fechas:
-        if (y == 2025 and m >= 9) or (y >= 2026):
-            return True
-    return False
-
-def extraer_id_licitacion(fila_raw, idx_codigo):
-    valid_suffixes = ("LP", "LE", "LR", "LQ", "LS", "L1", "E2", "CO", "B2")
-    if idx_codigo is not None and idx_codigo < len(fila_raw):
-        celda = str(fila_raw[idx_codigo]).strip()
-        codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
-        for code in codes:
-            parts = code.split("-")
-            if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
-                return code.upper()
-
-    for c in fila_raw[:5]:
-        celda = str(c).strip()
-        codes = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", celda)
-        for code in codes:
-            parts = code.split("-")
-            if len(parts) == 3 and any(parts[2].upper().startswith(vs) for vs in valid_suffixes):
-                return code.upper()
-    return ""
-
-def extraer_prestacion(fila_raw, idx_nombre):
-    palabras_prohibidas = [
-        "SERVICIO DE SALUD", "INSTITUCIÓN PÚBLICA", "INSTITUCION PUBLICA",
-        "REDSALUD", "RED SALUD", "ACEPTADA", "EN PROCESO", "EVALUACIÓN",
-        "EVALUACION", "ADJUDICADA", "PUBLICADA", "DESIERTA", "REVOCADA",
-        "CANCELADA", "ENVIADA", "RUT:", "S.A.", "SPA", "LTDA", "E.I.R.L.",
-        "COMPRADOR", "MUNICIPALIDAD", "HOSPITAL", "INGEFISIC", "RUBIKAL",
-        "ATRYS", "BIOS", "ARTURO LOPEZ PEREZ", "BARLARO", "APSORAD"
-    ]
-    col_nom = fila_raw[idx_nombre].strip() if idx_nombre is not None and idx_nombre < len(fila_raw) else ""
-    if col_nom and len(col_nom) >= 5 and not any(p in col_nom.upper() for p in palabras_prohibidas):
-        return col_nom
-
-    candidatos = []
-    for c in fila_raw:
-        cs = str(c).strip()
-        if len(cs) >= 8 and not any(p in cs.upper() for p in palabras_prohibidas):
-            if not re.search(r"^\d+-\d+-[A-Za-z0-9]+$", cs) and not re.search(r"^\d{7,8}-[\dkK]$", cs):
-                candidatos.append(cs)
-
-    if candidatos:
-        return max(candidatos, key=len)
-    return "Prestación Médica Asistencial"
-
-def verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
-    rut_comprador = ""
-    if idx_comprador is not None and idx_comprador < len(fila):
-        comp_str = str(fila[idx_comprador])
-        ruts_comp = re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", comp_str)
-        if ruts_comp:
-            rut_comprador = re.sub(r"[^0-9]", "", ruts_comp[0])
-
-    ruts_adjudicados = []
-    if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
-        celda_adj = str(fila[idx_adjudicatario])
-        for r in re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", celda_adj):
-            r_num = re.sub(r"[^0-9]", "", r)
-            if r_num != rut_comprador:
-                ruts_adjudicados.append(r_num)
-
-    for idx_col in range(10, len(fila)):
-        val = str(fila[idx_col]).strip()
-        for r in re.findall(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b", val):
-            r_num = re.sub(r"[^0-9]", "", r)
-            if r_num != rut_comprador and r_num not in ruts_adjudicados:
-                ruts_adjudicados.append(r_num)
-
-    if ruts_adjudicados:
-        return any(any(rs in r for rs in RUTS_REDSALUD_WHITELIST) for r in ruts_adjudicados)
-
-    if idx_adjudicatario is not None and idx_adjudicatario < len(fila):
-        celda_adj_u = str(fila[idx_adjudicatario]).upper()
-        if any(bad in celda_adj_u for bad in ["APSORAD", "FALP", "BARLARO", "RUBIKAL", "ATRYS", "INGEFISIC", "VETERINARIO", "BIOMEDIC", "BIOS"]):
-            return False
-        if re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD|ESPECIALIDADES\s*MEDICAS\s*VALPARAISO", celda_adj_u):
-            return True
-
-    return False
-
-def construir_fila_consolidado(codigo, comprador, rut_comprador, region, categoria, prestacion, monto, adj_celda=""):
-    cat_cliente = clasificar_categoria_cliente(comprador)
-    rut_cli = rut_comprador if rut_comprador else resolver_rut_cliente(comprador, codigo)
-    filial, rut_filial = determinar_filial(categoria, region, comprador, adj=adj_celda, codigo=codigo)
-    tipo_reg = "Compra Ágil" if "-CO" in codigo.upper() else "Licitación"
-    return [
-        cat_cliente,
-        comprador if comprador else "Institución Pública (Por confirmar)",
-        rut_cli,
-        filial,
-        rut_filial,
-        "Contrato Base",
-        tipo_reg,
-        codigo.upper(),
-        prestacion if prestacion else "Prestación Médica Asistencial",
-        "",
-        "",
-        12,
-        monto,
-        "",
-        "",
-        "",
-        "En gestión",
-        "Sí",
-        ""
-    ]
-
-# ==========================================
-# 7. ORQUESTADOR COMPLETO
-# ==========================================
-def sincronizar_todo():
-    print("=== INICIANDO SINCRONIZADOR INTEGRAL LICITALAB -> REDSALUD ===", flush=True)
-    try:
-        client, sa_email = obtener_cliente_gspread()
-        print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
-    except Exception as e:
-        print(f"Error de conexión: {repr(e)}", flush=True)
-        return
-
-    try:
-        ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-        sheet_maestra = ss_maestra.sheet1
-    except Exception as e:
-        print(f"Error abriendo Base Madre: {repr(e)}", flush=True)
-        return
-
-    actualizar_base_madre_licitalab(sheet_maestra)
-
-    print("\n--- FASE 2: Sincronizando hacia consolidado ---", flush=True)
-    valores_maestra = sheet_maestra.get_all_values()
-    print(f"Total filas en Base Madre: {len(valores_maestra)}", flush=True)
-
-    cabecera = valores_maestra[0] if valores_maestra else []
-    idx_codigo = 1
-    idx_nombre = 2
-    idx_categoria = 3
-    idx_tipo = 7
-    idx_comprador = 8
-    idx_region = 9
-    idx_estado = 10
-    idx_adjudicatario = 11
-    idx_monto = 12
-
-    for idx, c in enumerate(cabecera):
-        t = str(c).strip().upper()
-        if ("CÓDIGO" in t or "CODIGO" in t or "ID" in t) and not any(x in t for x in ["OC", "ORDEN", "FACTURABLE", "COMPRA"]):
-            idx_codigo = idx
-        elif "NOMBRE" in t and "PROCESO" in t:
-            idx_nombre = idx
-        elif "CATEGOR" in t:
-            idx_categoria = idx
-        elif "TIPO" in t:
-            idx_tipo = idx
-        elif "COMPRADOR" in t or "INSTITUCI" in t:
-            idx_comprador = idx
-        elif "REGI" in t:
-            idx_region = idx
-        elif "ESTADO" in t and "OFERTA" in t:
-            idx_estado = idx
-        elif ("ADJUDICATARIO" in t or "PROVEEDOR ADJUDICADO" in t or "RAZÓN SOCIAL ADJUDICATARIO" in t or "GANADOR" in t) and "CATEGOR" not in t:
-            idx_adjudicatario = idx
-        elif "MONTO" in t:
-            idx_monto = idx
-
-    try:
-        ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
-    except Exception:
-        url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID_CONTRATOS}/edit"
-        ss_contratos = client.open_by_url(url)
-
-    ws_contratos = None
-    for ws in ss_contratos.worksheets():
-        if ws.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower():
-            ws_contratos = ws
-            break
-    if not ws_contratos:
-        print(f"Error: Hoja '{NOMBRE_HOJA_CONTRATOS}' no encontrada.", flush=True)
-        return
-
-    datos_existentes = ws_contratos.get_all_values()
-    print(f"Filas actuales en '{NOMBRE_HOJA_CONTRATOS}': {len(datos_existentes)}", flush=True)
-
-    ids_historicos = set()
-    limite_historico = min(FILA_INICIO_OBJETIVO - 1, len(datos_existentes))
-    for row in datos_existentes[:limite_historico]:
-        if len(row) > 7 and row[7].strip():
-            ids_historicos.add(row[7].strip().upper())
-        if len(row) > 1 and row[1].strip():
-            ids_historicos.add(row[1].strip().upper())
-
-    set_forzadas = {x.strip().upper() for x in ADJUDICACIONES_FORZADAS_REDSALUD}
-    filas_nuevas = []
-    ids_nuevos = set()
-
-    if len(valores_maestra) > 1:
-        for r in valores_maestra[1:]:
-            fila = list(r) + [""] * (25 - len(r))
-            codigo = extraer_id_licitacion(fila, idx_codigo)
-            if not codigo:
-                continue
-            cod_u = codigo.upper()
-
-            if cod_u in LICITACIONES_DESCARTADAS_EXPLICITAS:
-                continue
-            if cod_u in ids_historicos or cod_u in ids_nuevos:
-                continue
-
-            es_forzada = cod_u in set_forzadas
-
-            if not es_forzada:
-                tipo_proc = fila[idx_tipo].strip() if idx_tipo < len(fila) else ""
-                estado = fila[idx_estado].strip() if idx_estado < len(fila) else ""
-                if "AGIL" in tipo_proc.upper() or "COT" in cod_u:
-                    continue
-                es_adj = "ADJUDICADA" in estado.upper() or any(str(c).strip().upper() == "ADJUDICADA" for c in fila)
-                if not es_adj:
-                    continue
-                if not verificar_adjudicacion_exclusiva_redsalud(fila, idx_adjudicatario, idx_comprador):
-                    continue
-                if not cumple_filtro_periodo(fila, cod_u):
-                    continue
-
-            categoria = fila[idx_categoria].strip() if idx_categoria < len(fila) else ""
-            comprador = fila[idx_comprador].strip() if idx_comprador < len(fila) else ""
-            region = fila[idx_region].strip() if idx_region < len(fila) else ""
-            monto = fila[idx_monto].strip() if idx_monto < len(fila) else ""
-            adjudicatario_celda = fila[idx_adjudicatario].strip() if idx_adjudicatario < len(fila) else ""
-            prestacion = extraer_prestacion(fila, idx_nombre)
-
-            filas_nuevas.append(
-                construir_fila_consolidado(cod_u, comprador, "", region, categoria, prestacion, monto, adjudicatario_celda)
-            )
-            ids_nuevos.add(cod_u)
-
-    for cod_forzado in ADJUDICACIONES_FORZADAS_REDSALUD:
-        cod_u = cod_forzado.strip().upper()
-        if cod_u in ids_historicos or cod_u in ids_nuevos:
-            continue
-
-        print(f"Rescatando adjudicación faltante vía API: {cod_u}...", flush=True)
-        detalle = consultar_detalle_licitalab(cod_u) or consultar_detalle_mercado_publico(cod_u)
-        time.sleep(0.4)
-
-        if detalle:
-            filas_nuevas.append(
-                construir_fila_consolidado(
-                    cod_u,
-                    detalle.get("comprador", ""),
-                    detalle.get("rut_comprador", ""),
-                    detalle.get("region", ""),
-                    "Salud",
-                    detalle.get("nombre", ""),
-                    detalle.get("monto", ""),
-                    detalle.get("adjudicatario", "")
-                )
-            )
-        else:
-            filas_nuevas.append(
-                construir_fila_consolidado(
-                    cod_u,
-                    "Institución Pública (Verificar en MP)",
-                    "",
-                    "",
-                    "Salud",
-                    f"Licitación Adjudicada {cod_u}",
-                    "",
-                    "RedSalud"
-                )
-            )
-        ids_nuevos.add(cod_u)
-
-    tot_nuevas = len(filas_nuevas)
-    print(f"Total adjudicaciones RedSalud listas para insertar: {tot_nuevas}", flush=True)
-
-    fila_inicio = FILA_INICIO_OBJETIVO
-    filas_totales_actuales = max(len(datos_existentes), fila_inicio)
-
-    if filas_totales_actuales >= fila_inicio:
-        print(f"Limpiando rango desde A{fila_inicio}:S{filas_totales_actuales + 100}...", flush=True)
-        ws_contratos.batch_clear([f"A{fila_inicio}:S{filas_totales_actuales + 100}"])
-
-    if tot_nuevas > 0:
-        fila_fin = fila_inicio + tot_nuevas - 1
-        filas_necesarias = max(fila_fin + 50, 500)
-        ws_contratos.resize(rows=filas_necesarias, cols=25)
-
-        for s in range(0, tot_nuevas, 1000):
-            e = min(s + 1000, tot_nuevas)
-            r_ini = fila_inicio + s
-            r_fin = fila_inicio + e - 1
-            ws_contratos.update(
-                range_name=f"A{r_ini}:S{r_fin}",
-                values=filas_nuevas[s:e]
-            )
-        print(f"Éxito: Se escribieron {tot_nuevas} licitaciones adjudicadas de RedSalud desde la fila {fila_inicio}.", flush=True)
-    else:
-        print("RESULTADO: No hubo nuevas licitaciones para insertar.", flush=True)
-
-if __name__ == "__main__":
-    sincronizar_todo()
+        fecha_pub = str(item.get("PUBLISH_DATE") or item.get("published_
