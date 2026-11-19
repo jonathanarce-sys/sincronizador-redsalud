@@ -70,6 +70,15 @@ COLUMNAS_CALIBRADAS = [
 
 HOJAS_DIPRECA = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
 
+COMPONENTES_HMQ_ORDEN = [
+    ("1º CIR", r"^1\s*[°ºo]?\s*cir"),
+    ("2º CIR", r"^2\s*[°ºo]?\s*cir"),
+    ("3º CIR", r"^3\s*[°ºo]?\s*cir"),
+    ("4º CIR", r"^4\s*[°ºo]?\s*cir"),
+    ("ANEST", r"^anest"),
+    ("ARSENALERA", r"^arsenal"),
+]
+
 def normalizar_texto(texto):
     s = str(texto).strip().lower()
     s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
@@ -114,6 +123,19 @@ def limpiar_celda(v):
     if m:
         return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
     return txt
+
+def parsear_monto_entero(val):
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return 0
+    if isinstance(val, (int, float)):
+        return int(round(val))
+    limpio = re.sub(r"[^\d\-]", "", str(val).strip())
+    if not limpio or limpio == "-":
+        return 0
+    try:
+        return int(limpio)
+    except ValueError:
+        return 0
 
 def extraer_filial_isl(nombre_archivo):
     base = os.path.splitext(nombre_archivo)[0]
@@ -298,6 +320,60 @@ def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="",
 
     return df_out
 
+def expandir_filas_hmq(df_raw, df_base_mapeado):
+    """
+    Despivota las columnas 1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST y ARSENALERA
+    de 2026_HMQ hacia filas individuales manteniendo intactas las 39 columnas calibradas.
+    """
+    cols_encontradas = []
+    col_suma_hmq = None
+
+    for col_orig in df_raw.columns:
+        c_norm = normalizar_texto(col_orig)
+        if "suma" in c_norm and "hmq" in c_norm:
+            col_suma_hmq = col_orig
+            continue
+        for etiqueta_std, patron in COMPONENTES_HMQ_ORDEN:
+            if re.search(patron, c_norm):
+                cols_encontradas.append((etiqueta_std, col_orig))
+                break
+
+    # Si el archivo no tiene columnas de desglose quirúrgico, devolver mapeo estándar
+    if not cols_encontradas:
+        return df_base_mapeado
+
+    filas_expandidas = []
+    for idx in range(len(df_raw)):
+        fila_base = df_base_mapeado.iloc[idx].to_dict()
+        suma_hmq_val = parsear_monto_entero(df_raw.iloc[idx][col_suma_hmq]) if col_suma_hmq else 0
+
+        componentes_fila = []
+        for etiqueta_std, col_orig in cols_encontradas:
+            monto_comp = parsear_monto_entero(df_raw.iloc[idx][col_orig])
+            if monto_comp > 0:
+                componentes_fila.append((etiqueta_std, monto_comp))
+
+        if componentes_fila:
+            for etiqueta_std, monto_comp in componentes_fila:
+                nueva_fila = dict(fila_base)
+                nueva_fila["ámbito"] = nueva_fila["ámbito"] or "Hospitalizado"
+                nueva_fila["precio_total"] = monto_comp
+                nueva_fila["Valor Hospitalizado Hábil 2026"] = monto_comp
+                nueva_fila["Tipo de arancel hospitalizado Hábil"] = etiqueta_std
+                nueva_fila["Tipo de arancel ambulatorio Hábil"] = etiqueta_std
+                if suma_hmq_val > 0:
+                    nueva_fila["Valor Ambulatorio Hábil 2026"] = suma_hmq_val
+                filas_expandidas.append(nueva_fila)
+        else:
+            # Si todos los componentes vienen en 0 pero existe SUMA HMQ, conservar 1 fila con el total
+            if suma_hmq_val > 0:
+                fila_base["precio_total"] = suma_hmq_val
+                fila_base["Valor Hospitalizado Hábil 2026"] = suma_hmq_val
+                fila_base["Tipo de arancel hospitalizado Hábil"] = "SUMA HMQ"
+            filas_expandidas.append(fila_base)
+
+    return pd.DataFrame(filas_expandidas, columns=COLUMNAS_CALIBRADAS)
+
 def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_header=None):
     if df_datos.empty:
         print(f"Sin datos para escribir en '{nombre_hoja}'.")
@@ -392,6 +468,8 @@ def sincronizar_aranceles():
                     df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
                     tipo = "HMQ" if "hmq" in h_real.lower() else ("Paquetes" if "paquetes" in h_real.lower() else "Prestaciones")
                     df_cal = mapear_a_esquema(df, "DIPRECA", f"DIPRECA_{h_real}", nombre_base, tipo)
+                    if tipo == "HMQ":
+                        df_cal = expandir_filas_hmq(df, df_cal)
                     lista_dfs_convenios.append(df_cal)
                     print(f"  -> {h_real}: {len(df_cal)} filas mapeadas.")
         else:
