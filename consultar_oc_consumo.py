@@ -29,8 +29,8 @@ TICKET_MERCADOPUBLICO = (
     "F8537A18-6766-4DEF-9E59-426B4FEE5844"
 ).strip()
 
-# Ventana de días hacia atrás para escanear OC emitidas a RUTs RedSalud en Mercado Público
-DIAS_ESCANE0_OC = int(os.environ.get("DIAS_ESCANEO_OC", "120"))
+# Ventana de días hacia atrás para escanear OC en Mercado Público (por defecto 180 días)
+DIAS_ESCANEO_OC = int(os.environ.get("DIAS_ESCANEO_OC", "180"))
 
 # Catálogo oficial de RUTs de Clínicas y Centros Médicos RedSalud
 MAPA_RUT_FILIAL_REDSALUD = {
@@ -53,9 +53,6 @@ MAPA_RUT_FILIAL_REDSALUD = {
 }
 
 RUTS_REDSALUD_WHITELIST = set(MAPA_RUT_FILIAL_REDSALUD.keys())
-
-# Estados válidos de OC en Mercado Público (se excluye estado 5 = Cancelada)
-ESTADOS_OC_VALIDOS = {"4", "6", "9", "12", "ENVIADA A PROVEEDOR", "ACEPTADA", "EN PROCESO", "RECEPCION CONFORME", "RECEPCIÓN CONFORME"}
 
 CODIGOS_OBJETIVO = [
     "1057402-55-LE26", "1057402-41-LE26", "1057402-90-LE26", "874750-17-L126",
@@ -104,7 +101,7 @@ TECHOS_CONTRATOS_AUDITADOS = {
 }
 
 # ==========================================
-# 2. UTILIDADES DE AUTENTICACIÓN Y PARSEO
+# 2. UTILIDADES
 # ==========================================
 def obtener_cliente_gspread():
     posibles = [
@@ -154,13 +151,11 @@ def parsear_monto_clp(val):
     return int(limpio) if limpio else 0
 
 # ==========================================
-# 3. INDEXACIÓN DE DATOS LOCALES (BASE MADRE + CONSOLIDADO)
+# 3. UNIVERSO LOCAL (CONSOLIDADO + BASE MADRE)
 # ==========================================
 def cargar_universo_local(client):
-    """Combina licitaciones de Base Madre, hoja Consolidado de Contratos y CODIGOS_OBJETIVO."""
     universo = {}
 
-    # A. Leer hoja 'consolidado' de Contratos RedSalud (tiene filial, presupuesto y códigos adjudicados)
     try:
         ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
         ws_c = next((w for w in ss_contratos.worksheets() if w.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower()), None)
@@ -184,7 +179,6 @@ def cargar_universo_local(client):
     except Exception as e:
         print(f"Aviso leyendo '{NOMBRE_HOJA_CONTRATOS}': {repr(e)}", flush=True)
 
-    # B. Enriquecer desde Base Madre LicitaLAB
     ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
     for ws in ss_maestra.worksheets():
         if ws.title.strip().lower() == HOJA_REPORTE.lower():
@@ -218,7 +212,6 @@ def cargar_universo_local(client):
                     if r_base in MAPA_RUT_FILIAL_REDSALUD:
                         entry["filial"] = MAPA_RUT_FILIAL_REDSALUD[r_base][0]
 
-    # C. Asegurar que todos los CODIGOS_OBJETIVO estén presentes
     for cod_obj in CODIGOS_OBJETIVO:
         cu = normalizar_codigo(cod_obj)
         universo.setdefault(cu, {"organismo": "", "filial": "", "nombre": "", "monto": 0, "estado": "Adjudicada"})
@@ -226,118 +219,172 @@ def cargar_universo_local(client):
     return ss_maestra, universo
 
 # ==========================================
-# 4. EXTRACCIÓN DE ÓRDENES DE COMPRA (MERCADO PÚBLICO + LICITALAB)
+# 4. EXTRACCIÓN DE ÓRDENES DE COMPRA (LICITALAB + MERCADO PÚBLICO)
 # ==========================================
-def obtener_ocs_por_licitacion_licitalab():
-    """Consulta Órdenes de Compra registradas en LicitaLAB API BI y las agrupa por código de licitación."""
+def obtener_ocs_licitalab(codigos_interes):
+    """Consulta OCs en LicitaLAB BI (endpoint purchase_orders y detalle por oportunidad)."""
     ocs_por_lic = {}
     if not LICITALAB_TOKEN:
+        print("[LicitaLAB OC] Sin LICITALAB_TOKEN configurado.", flush=True)
         return ocs_por_lic
 
-    headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json", "User-Agent": "RedSalud-Consumo/2.0"}
-    endpoints = [
-        "https://biapi.licitalab.cl/bi/v2/purchase-orders",
-        "https://biapi.licitalab.cl/bi/v2/orders"
-    ]
-    for url in endpoints:
+    headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json", "User-Agent": "RedSalud-Consumo/3.0"}
+
+    # 1. Endpoint masivo de Órdenes de Compra de LicitaLAB
+    for endpoint in ("purchase_orders", "purchase-orders", "orders"):
+        url = f"https://biapi.licitalab.cl/bi/v2/{endpoint}"
         try:
-            resp = requests.get(url, headers=headers, params={"limit": 1000}, timeout=25)
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            items = data if isinstance(data, list) else (data.get("data") or data.get("orders") or data.get("items") or [])
-            for oc in items:
-                cod_oc = normalizar_codigo(oc.get("ORDER_CODE") or oc.get("code") or oc.get("Codigo"))
-                cod_lic = normalizar_codigo(oc.get("OPPORTUNITY_CODE") or oc.get("tender_code") or oc.get("CodigoLicitacion"))
-                estado = str(oc.get("ORDER_STATUS") or oc.get("status") or oc.get("Estado") or "").strip().upper()
-                monto = parsear_monto_clp(oc.get("TOTAL_AMOUNT") or oc.get("amount") or oc.get("TotalNeto") or oc.get("Total"))
-                if not cod_oc or not cod_lic or "CANCEL" in estado:
-                    continue
-                bucket = ocs_por_lic.setdefault(cod_lic, {})
-                bucket[cod_oc] = {
-                    "codigo_oc": cod_oc,
-                    "monto": monto,
-                    "estado": estado,
-                    "fecha": str(oc.get("SENT_DATE") or oc.get("created_at") or "")[:10]
-                }
-            if ocs_por_lic:
-                print(f"[LicitaLAB OC] Licitaciones con OC detectadas: {len(ocs_por_lic)}", flush=True)
-                break
+            resp = requests.get(url, headers=headers, params={"limit": 2000}, timeout=25)
+            print(f"[LicitaLAB OC] GET /{endpoint} -> HTTP {resp.status_code}", flush=True)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data if isinstance(data, list) else (data.get("data") or data.get("purchase_orders") or data.get("orders") or data.get("items") or [])
+                for oc in items:
+                    cod_oc = normalizar_codigo(oc.get("ORDER_CODE") or oc.get("PURCHASE_ORDER_CODE") or oc.get("code") or oc.get("Codigo"))
+                    cod_lic = normalizar_codigo(oc.get("OPPORTUNITY_CODE") or oc.get("tender_code") or oc.get("CodigoLicitacion"))
+                    estado = str(oc.get("ORDER_STATUS") or oc.get("status") or oc.get("Estado") or "").strip().upper()
+                    monto = parsear_monto_clp(oc.get("TOTAL_AMOUNT") or oc.get("NET_AMOUNT") or oc.get("amount") or oc.get("TotalNeto") or oc.get("Total"))
+                    if not cod_oc or not cod_lic or "CANCEL" in estado:
+                        continue
+                    ocs_por_lic.setdefault(cod_lic, {})[cod_oc] = {
+                        "codigo_oc": cod_oc,
+                        "monto": monto,
+                        "estado": estado or "Aceptada",
+                        "fecha": str(oc.get("SENT_DATE") or oc.get("created_at") or "")[:10]
+                    }
+                if ocs_por_lic:
+                    print(f"[LicitaLAB OC] Licitaciones con OC cargadas desde /{endpoint}: {len(ocs_por_lic)}", flush=True)
+                    break
         except Exception as e:
-            print(f"[LicitaLAB OC] Aviso en {url}: {repr(e)}", flush=True)
+            print(f"[LicitaLAB OC] Error en /{endpoint}: {repr(e)}", flush=True)
+
+    # 2. Revisar detalle de cada oportunidad en LicitaLAB por si trae PURCHASE_ORDERS anidado
+    for cod in codigos_interes:
+        if cod in ocs_por_lic:
+            continue
+        try:
+            r = requests.get(f"https://biapi.licitalab.cl/bi/v2/opportunities/{cod}", headers=headers, timeout=8)
+            if r.status_code == 200:
+                d = r.json()
+                cand = d.get("data") if isinstance(d, dict) and "data" in d else d
+                if isinstance(cand, dict):
+                    lista_po = cand.get("PURCHASE_ORDERS") or cand.get("ORDERS") or cand.get("purchase_orders") or []
+                    for oc in lista_po:
+                        if not isinstance(oc, dict):
+                            continue
+                        cod_oc = normalizar_codigo(oc.get("ORDER_CODE") or oc.get("code") or oc.get("Codigo"))
+                        estado = str(oc.get("ORDER_STATUS") or oc.get("status") or "").upper()
+                        monto = parsear_monto_clp(oc.get("TOTAL_AMOUNT") or oc.get("amount") or oc.get("TotalNeto"))
+                        if cod_oc and "CANCEL" not in estado:
+                            ocs_por_lic.setdefault(cod, {})[cod_oc] = {
+                                "codigo_oc": cod_oc,
+                                "monto": monto,
+                                "estado": estado or "Aceptada",
+                                "fecha": str(oc.get("SENT_DATE") or "")[:10]
+                            }
+        except Exception:
+            pass
+
     return ocs_por_lic
 
-def obtener_ocs_mercado_publico_por_ruts(ocs_por_lic):
+def obtener_ocs_mercado_publico_optimizado(ocs_por_lic, codigos_interes):
     """
-    Consulta la API oficial de Órdenes de Compra de Mercado Público para todos los RUTs
-    de clínicas y centros médicos RedSalud dentro de la ventana configurada.
+    Escanea Mercado Público filtrando en memoria por los prefijos de unidad compradora
+    de las licitaciones adjudicadas para evitar miles de llamadas HTTP innecesarias.
     """
     if not TICKET_MERCADOPUBLICO:
+        print("[MP OC] Sin TICKET_MERCADOPUBLICO.", flush=True)
         return ocs_por_lic
 
     url_oc = "https://api.mercadopublico.cl/servicios/v1/publico/ordenesdecompra.json"
-    hoy = datetime.now()
-    # Muestreo cada 3 días o diario según ventana para cubrir histórico sin exceder límites de API
-    paso = 1 if DIAS_ESCANE0_OC <= 45 else 2
-    fechas = [(hoy - timedelta(days=d)).strftime("%d%m%Y") for d in range(0, DIAS_ESCANE0_OC + 1, paso)]
+    prefijos_compradores = {c.split("-")[0] for c in codigos_interes if "-" in c}
+    set_codigos_interes = set(codigos_interes)
 
-    print(f"[MP OC] Escaneando {len(fechas)} fechas en Mercado Público para los {len(MAPA_RUT_FILIAL_REDSALUD)} RUTs RedSalud...", flush=True)
-    ocs_nuevas_detectadas = 0
+    hoy = datetime.now()
+    fechas = [(hoy - timedelta(days=d)).strftime("%d%m%Y") for d in range(0, DIAS_ESCANEO_OC + 1)]
+
+    print(f"[MP OC] Escaneando {len(fechas)} días en Mercado Público (prefijos compradores objetivo: {len(prefijos_compradores)})...", flush=True)
+    candidatas_detalle = []
+    errores_consecutivos = 0
 
     for fecha_str in fechas:
         try:
             resp = requests.get(url_oc, params={"fecha": fecha_str, "ticket": TICKET_MERCADOPUBLICO}, timeout=20)
             if resp.status_code != 200:
+                errores_consecutivos += 1
+                if errores_consecutivos >= 5:
+                    print(f"[MP OC] Pausa preventiva por HTTP {resp.status_code} en API Mercado Público.", flush=True)
+                    time.sleep(3)
                 continue
+            errores_consecutivos = 0
             listado = resp.json().get("Listado") or []
             for item in listado:
                 cod_oc = normalizar_codigo(item.get("Codigo"))
-                estado_cod = str(item.get("CodigoEstado") or "").strip().upper()
-                if not cod_oc or estado_cod == "5":  # Excluir Canceladas
+                estado_cod = str(item.get("CodigoEstado") or "").strip()
+                if not cod_oc or estado_cod == "5":
                     continue
-
-                # Consultar detalle de OC que coincidan con organismos compradores de licitaciones objetivo
-                # o verificar proveedor en detalle
-                det_resp = requests.get(url_oc, params={"codigo": cod_oc, "ticket": TICKET_MERCADOPUBLICO}, timeout=15)
-                if det_resp.status_code != 200:
-                    continue
-                det_list = det_resp.json().get("Listado") or []
-                if not det_list:
-                    continue
-                oc_det = det_list[0]
-                prov = oc_det.get("Proveedor") or {}
-                rut_prov = str(prov.get("RutSucursal") or prov.get("RutProveedor") or "")
-                nom_prov = str(prov.get("Nombre") or "")
-
-                if not es_proveedor_redsalud(rut_prov, nom_prov):
-                    continue
-
-                cod_lic = normalizar_codigo(oc_det.get("CodigoLicitacion"))
-                if not cod_lic or cod_lic in ("NONE", "NULL", "-"):
-                    continue
-
-                est_txt = str(oc_det.get("Estado") or estado_cod).strip()
-                monto_oc = parsear_monto_clp(oc_det.get("TotalNeto") or oc_det.get("Total"))
-                fecha_oc = str((oc_det.get("Fechas") or {}).get("FechaEnvio") or fecha_str)[:10]
-
-                bucket = ocs_por_lic.setdefault(cod_lic, {})
-                if cod_oc not in bucket:
-                    ocs_nuevas_detectadas += 1
-                bucket[cod_oc] = {
-                    "codigo_oc": cod_oc,
-                    "monto": monto_oc,
-                    "estado": est_txt,
-                    "fecha": fecha_oc
-                }
+                prefijo_oc = cod_oc.split("-")[0]
+                if prefijo_oc in prefijos_compradores:
+                    candidatas_detalle.append((cod_oc, fecha_str))
         except Exception:
             pass
-        time.sleep(0.15)
+        time.sleep(0.12)
 
-    print(f"[MP OC] Total OC vinculadas a RedSalud consolidadas: {ocs_nuevas_detectadas}", flush=True)
+    # Deduplicar candidatas preservando orden
+    vistas = set()
+    candidatas_unicas = []
+    for cod_oc, f_str in candidatas_detalle:
+        if cod_oc not in vistas:
+            vistas.add(cod_oc)
+            candidatas_unicas.append((cod_oc, f_str))
+
+    print(f"[MP OC] Órdenes pre-filtradas por organismo comprador a inspeccionar: {len(candidatas_unicas)}", flush=True)
+
+    vinculadas = 0
+    for cod_oc, f_str in candidatas_unicas:
+        try:
+            det_resp = requests.get(url_oc, params={"codigo": cod_oc, "ticket": TICKET_MERCADOPUBLICO}, timeout=15)
+            if det_resp.status_code != 200:
+                continue
+            det_list = det_resp.json().get("Listado") or []
+            if not det_list:
+                continue
+            oc_det = det_list[0]
+
+            cod_lic = normalizar_codigo(oc_det.get("CodigoLicitacion"))
+            if not cod_lic or cod_lic not in set_codigos_interes:
+                continue
+
+            prov = oc_det.get("Proveedor") or {}
+            rut_prov = str(prov.get("RutSucursal") or prov.get("RutProveedor") or "")
+            nom_prov = str(prov.get("Nombre") or "")
+            if not es_proveedor_redsalud(rut_prov, nom_prov):
+                continue
+
+            est_txt = str(oc_det.get("Estado") or "").strip()
+            if "CANCEL" in est_txt.upper():
+                continue
+
+            monto_oc = parsear_monto_clp(oc_det.get("TotalNeto") or oc_det.get("Total"))
+            fecha_oc = str((oc_det.get("Fechas") or {}).get("FechaEnvio") or f_str)[:10]
+
+            bucket = ocs_por_lic.setdefault(cod_lic, {})
+            if cod_oc not in bucket:
+                vinculadas += 1
+            bucket[cod_oc] = {
+                "codigo_oc": cod_oc,
+                "monto": monto_oc,
+                "estado": est_txt or "Aceptada",
+                "fecha": fecha_oc
+            }
+        except Exception:
+            pass
+        time.sleep(0.12)
+
+    print(f"[MP OC] Nuevas OC vinculadas directamente a licitaciones RedSalud: {vinculadas}", flush=True)
     return ocs_por_lic
 
 def consultar_licitacion_mp_detalle(codigo):
-    """Consulta ficha real de licitación en Mercado Público sumando solo ítems ganados por RedSalud."""
     url_mp = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
     try:
         r = requests.get(url_mp, params={"codigo": codigo, "ticket": TICKET_MERCADOPUBLICO}, timeout=12)
@@ -385,13 +432,14 @@ def generar_reporte_consumo():
     print(f"Autenticado como: {sa_email}", flush=True)
 
     ss_maestra, universo_licitaciones = cargar_universo_local(client)
-    print(f"Total licitaciones en universo a evaluar: {len(universo_licitaciones)}", flush=True)
+    codigos_interes = list(universo_licitaciones.keys())
+    print(f"Total licitaciones en universo a evaluar: {len(codigos_interes)}", flush=True)
 
     # 1. Recolectar Órdenes de Compra desde LicitaLAB + Mercado Público
-    ocs_por_lic = obtener_ocs_por_licitacion_licitalab()
-    ocs_por_lic = obtener_ocs_mercado_publico_por_ruts(ocs_por_lic)
+    ocs_por_lic = obtener_ocs_licitalab(codigos_interes)
+    ocs_por_lic = obtener_ocs_mercado_publico_optimizado(ocs_por_lic, codigos_interes)
 
-    # Asegurar la OC auditada conocida si no entró por ventana de fechas
+    # Respaldo auditado confirmado
     ocs_por_lic.setdefault("1057402-55-LE26", {}).setdefault(
         "1057402-1450-SE26",
         {"codigo_oc": "1057402-1450-SE26", "monto": 4092000, "estado": "Aceptada", "fecha": ""}
@@ -413,9 +461,8 @@ def generar_reporte_consumo():
         "Registro de OCs"
     ]
 
-    # Ordenar priorizando las que ya tienen OC emitidas y luego CODIGOS_OBJETIVO
     codigos_ordenados = sorted(
-        universo_licitaciones.keys(),
+        codigos_interes,
         key=lambda c: (0 if c in ocs_por_lic else 1, 0 if c in CODIGOS_OBJETIVO else 1, c)
     )
 
@@ -430,7 +477,6 @@ def generar_reporte_consumo():
         presupuesto = aud.get("monto") or loc.get("monto") or 0
         est = "Adjudicada"
 
-        # Completar datos faltantes desde Mercado Público si falta presupuesto, organismo o filial
         if presupuesto == 0 or not org or not filial:
             det_mp = consultar_licitacion_mp_detalle(cod)
             if det_mp:
@@ -440,7 +486,7 @@ def generar_reporte_consumo():
                 est = det_mp.get("estado") or est
                 if presupuesto == 0 and det_mp.get("monto", 0) > 0:
                     presupuesto = det_mp["monto"]
-            time.sleep(0.15)
+            time.sleep(0.12)
 
         if not org:
             org = f"Institución Pública ({cod.split('-')[0]})"
@@ -449,7 +495,6 @@ def generar_reporte_consumo():
         if not filial:
             filial = "RedSalud (Por asignar)"
 
-        # Consolidar OCs vinculadas a esta licitación
         dict_ocs = ocs_por_lic.get(cod, {})
         lista_ocs = sorted(dict_ocs.values(), key=lambda x: x["codigo_oc"])
         cant_ocs = len(lista_ocs)
