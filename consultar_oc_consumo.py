@@ -5,12 +5,15 @@ import base64
 import time
 import requests
 import gspread
+from datetime import datetime, timedelta
 from google.oauth2.service_account import Credentials
 
 # ==========================================
 # 1. CONFIGURACIÓN Y CONSTANTES
 # ==========================================
 SPREADSHEET_ID_MAESTRA = "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek".strip()
+SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip()
+NOMBRE_HOJA_CONTRATOS = "consolidado"
 HOJA_REPORTE = "Reporte_Consumo_OC"
 
 LICITALAB_TOKEN = (
@@ -20,9 +23,40 @@ LICITALAB_TOKEN = (
     ""
 ).strip()
 
-TICKET_MERCADOPUBLICO = os.environ.get("MP_TICKET") or "F8537A18-6766-4DEF-9E59-426B4FEE5844"
+TICKET_MERCADOPUBLICO = (
+    os.environ.get("MERCADOPUBLICO_TICKET") or
+    os.environ.get("MP_TICKET") or
+    "F8537A18-6766-4DEF-9E59-426B4FEE5844"
+).strip()
 
-# 111 Códigos objetivos de licitaciones
+# Ventana de días hacia atrás para escanear OC emitidas a RUTs RedSalud en Mercado Público
+DIAS_ESCANE0_OC = int(os.environ.get("DIAS_ESCANEO_OC", "120"))
+
+# Catálogo oficial de RUTs de Clínicas y Centros Médicos RedSalud
+MAPA_RUT_FILIAL_REDSALUD = {
+    "99533790": ("Clínica RedSalud Elqui", "99.533.790-8"),
+    "96543000": ("Clínica RedSalud Valparaíso", "96.543.000-6"),
+    "99568700": ("Centro de Especialidades Médicas Valparaíso", "99.568.700-3"),
+    "96542000": ("Clínica RedSalud Rancagua", "96.542.000-0"),
+    "96537000": ("Clínica RedSalud Mayor Temuco", "96.537.000-3"),
+    "96541000": ("Clínica RedSalud Magallanes", "96.541.000-5"),
+    "96536000": ("Clínica RedSalud Providencia", "96.536.000-8"),
+    "78053560": ("Clínica RedSalud Vitacura", "78.053.560-1"),
+    "96524000": ("Clínica RedSalud Santiago", "96.524.000-2"),
+    "96598850": ("Centros Médicos RedSalud Iquique", "96.598.850-0"),
+    "76458120": ("RedSalud Dental SpA", "76.458.120-3"),
+    "96856000": ("Centros Médicos RedSalud", "96.856.000-2"),
+    "96527000": ("Centros Médicos RedSalud", "96.527.000-9"),
+    "96559000": ("Centros Médicos RedSalud", "96.559.000-3"),
+    "96942400": ("RedSalud S.A.", "96.942.400-0"),
+    "99568720": ("RedSalud S.A.", "99.568.720-8"),
+}
+
+RUTS_REDSALUD_WHITELIST = set(MAPA_RUT_FILIAL_REDSALUD.keys())
+
+# Estados válidos de OC en Mercado Público (se excluye estado 5 = Cancelada)
+ESTADOS_OC_VALIDOS = {"4", "6", "9", "12", "ENVIADA A PROVEEDOR", "ACEPTADA", "EN PROCESO", "RECEPCION CONFORME", "RECEPCIÓN CONFORME"}
+
 CODIGOS_OBJETIVO = [
     "1057402-55-LE26", "1057402-41-LE26", "1057402-90-LE26", "874750-17-L126",
     "1658-84-LE26", "1080089-31-LP26", "1237328-45-LE26", "3996-21-LE26",
@@ -54,63 +88,104 @@ CODIGOS_OBJETIVO = [
     "1979-3-LQ25", "2667-3-LQ25", "1057492-2-LR25"
 ]
 
-# Contratos auditados con resolución confirmada y techos contractuales exactos
 TECHOS_CONTRATOS_AUDITADOS = {
     "1057402-55-LE26": {
         "organismo": "HOSPITAL CLINICO DR. LAUTARO NAVARRO AVARIA",
+        "filial": "Clínica RedSalud Magallanes",
         "nombre": "PROCEDIMIENTOS, CIRUGIAS Y SALUD",
         "monto": 69500000,
-        "consumo": 4092000,
-        "cant_oc": 1,
-        "ocs": "1057402-1450-SE26"
     },
     "1057402-41-LE26": {
         "organismo": "HOSPITAL CLINICO DR. LAUTARO NAVARRO AVARIA",
+        "filial": "Clínica RedSalud Magallanes",
         "nombre": "CONTRATACIÓN DEL SERVICIO DE EJECUCIÓN DE ESTUDIOS URODINÁMICOS",
         "monto": 68999186,
-        "consumo": 0,
-        "cant_oc": 0,
-        "ocs": "Pendiente de Registro"
     }
 }
 
+# ==========================================
+# 2. UTILIDADES DE AUTENTICACIÓN Y PARSEO
+# ==========================================
 def obtener_cliente_gspread():
     posibles = [
         "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
         "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS"
     ]
-    val = None
-    for k in posibles:
-        if k in os.environ and os.environ[k].strip():
-            val = os.environ[k].strip()
-            break
-    if not val:
-        for ek, ev in os.environ.items():
-            if any(x in ek.upper() for x in ["GCP", "GOOGLE_CRED", "SERVICE_ACCOUNT"]) and ev.strip():
-                val = ev.strip()
-                break
+    val = next((os.environ[k].strip() for k in posibles if k in os.environ and os.environ[k].strip()), None)
     if not val:
         raise ValueError("Sin credenciales GCP en el entorno.")
     try:
         pad = len(val) % 4
         if pad:
             val += "=" * (4 - pad)
-        dec = base64.b64decode(val)
-        creds_dict = json.loads(dec.decode("utf-8"))
+        creds_dict = json.loads(base64.b64decode(val).decode("utf-8"))
     except Exception:
         creds_dict = json.loads(val)
-        
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    sa_email = creds_dict.get("client_email", "Email no identificado")
-    client = gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
-    return client, sa_email
+    return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes)), creds_dict.get("client_email", "SA")
 
-def escanear_hojas_locales(ss_maestra):
-    """Indexa información base genuina de las hojas locales SIN tomar el 84% simulado."""
-    mapa = {}
+def normalizar_codigo(cod):
+    if not cod:
+        return ""
+    m = re.search(r"\b(\d{3,8}-\d{1,5}-[A-Za-z0-9]+)\b", str(cod).strip())
+    return m.group(1).upper() if m else str(cod).strip().upper()
+
+def extraer_rut_base(rut_str):
+    m = re.search(r"(\d{1,2}\.?\d{3}\.?\d{3})-[\dkK]", str(rut_str))
+    return re.sub(r"[^0-9]", "", m.group(1)) if m else ""
+
+def es_proveedor_redsalud(rut_str, nombre_str=""):
+    r_base = extraer_rut_base(rut_str)
+    if r_base and r_base in RUTS_REDSALUD_WHITELIST:
+        return True
+    nom_u = str(nombre_str).upper()
+    return bool(re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD|ESPECIALIDADES\s*MEDICAS\s*VALPARAISO|CLINICA\s*REGIONAL\s*DEL\s*ELQUI", nom_u))
+
+def parsear_monto_clp(val):
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        return int(round(val))
+    limpio = re.sub(r"[^\d]", "", str(val))
+    return int(limpio) if limpio else 0
+
+# ==========================================
+# 3. INDEXACIÓN DE DATOS LOCALES (BASE MADRE + CONSOLIDADO)
+# ==========================================
+def cargar_universo_local(client):
+    """Combina licitaciones de Base Madre, hoja Consolidado de Contratos y CODIGOS_OBJETIVO."""
+    universo = {}
+
+    # A. Leer hoja 'consolidado' de Contratos RedSalud (tiene filial, presupuesto y códigos adjudicados)
+    try:
+        ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
+        ws_c = next((w for w in ss_contratos.worksheets() if w.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower()), None)
+        if ws_c:
+            filas_c = ws_c.get_all_values()
+            for r in filas_c[1:]:
+                if len(r) < 9:
+                    continue
+                tipo_reg = str(r[6]).strip().upper()
+                cod = normalizar_codigo(r[7])
+                if not cod or "COMPRA" in tipo_reg or "-CO" in cod:
+                    continue
+                universo[cod] = {
+                    "organismo": str(r[1]).strip(),
+                    "filial": str(r[3]).strip(),
+                    "nombre": str(r[8]).strip(),
+                    "monto": parsear_monto_clp(r[12]) if len(r) > 12 else 0,
+                    "estado": str(r[16]).strip() or "Adjudicada"
+                }
+            print(f"Licitaciones cargadas desde '{NOMBRE_HOJA_CONTRATOS}': {len(universo)}", flush=True)
+    except Exception as e:
+        print(f"Aviso leyendo '{NOMBRE_HOJA_CONTRATOS}': {repr(e)}", flush=True)
+
+    # B. Enriquecer desde Base Madre LicitaLAB
+    ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
     for ws in ss_maestra.worksheets():
         if ws.title.strip().lower() == HOJA_REPORTE.lower():
             continue
@@ -118,121 +193,214 @@ def escanear_hojas_locales(ss_maestra):
             filas = ws.get_all_values()
         except Exception:
             continue
-        if not filas or len(filas) < 2:
+        if len(filas) < 2:
             continue
-            
-        cab = [str(c).strip().upper() for c in filas[0]]
-        idx_cod = -1
-        idx_nom = -1
-        idx_org = -1
-        idx_mto = -1
-        
-        for idx, c in enumerate(cab):
-            if ("CÓDIGO" in c or "CODIGO" in c) and not any(x in c for x in ["OC", "CLIENTE", "PRESTADOR"]):
-                if idx_cod == -1: idx_cod = idx
-            elif "NOMBRE" in c and "PROCESO" in c:
-                idx_nom = idx
-            elif any(x in c for x in ["INSTITUCIÓN", "INSTITUCION", "COMPRADOR", "ORGANISMO"]):
-                idx_org = idx
-            elif any(x in c for x in ["MONTO", "PRESUPUESTO"]) and not any(x in c for x in ["OC", "UNITARIO"]):
-                idx_mto = idx
 
         for r in filas[1:]:
-            c_val = ""
-            if idx_cod != -1 and idx_cod < len(r) and r[idx_cod].strip():
-                m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", r[idx_cod])
-                if m: c_val = m[0].upper()
-            if not c_val:
-                for celda in r[:4]:
-                    m = re.findall(r"\b\d{3,8}-\d{1,5}-[A-Za-z0-9]+\b", str(celda))
-                    if m:
-                        c_val = m[0].upper()
-                        break
-            if not c_val:
+            if len(r) < 13:
                 continue
+            cod = normalizar_codigo(r[1])
+            if not cod:
+                continue
+            adj_raw = str(r[11]).strip()
+            es_rs = es_proveedor_redsalud(adj_raw, adj_raw)
 
-            nom = r[idx_nom].strip() if idx_nom != -1 and idx_nom < len(r) else ""
-            org = r[idx_org].strip() if idx_org != -1 and idx_org < len(r) else ""
-            mto = r[idx_mto].strip() if idx_mto != -1 and idx_mto < len(r) else "0"
+            if cod in universo or cod in CODIGOS_OBJETIVO or (es_rs and "ADJUDICADA" in str(r[10]).upper()):
+                entry = universo.setdefault(cod, {"organismo": "", "filial": "", "nombre": "", "monto": 0, "estado": "Adjudicada"})
+                if not entry["nombre"] and r[2].strip():
+                    entry["nombre"] = r[2].strip()
+                if not entry["organismo"] and r[8].strip():
+                    entry["organismo"] = r[8].strip()
+                if entry["monto"] == 0 and r[12].strip():
+                    entry["monto"] = parsear_monto_clp(r[12])
+                if not entry["filial"] and adj_raw:
+                    r_base = extraer_rut_base(adj_raw)
+                    if r_base in MAPA_RUT_FILIAL_REDSALUD:
+                        entry["filial"] = MAPA_RUT_FILIAL_REDSALUD[r_base][0]
 
-            # Descartar estados y textos genéricos
-            if any(p in nom.upper() for p in ["ACEPTADA", "ENVIADA", "EVALUACIÓN", "EVALUACION", "MEDIATECA", "VINILOS"]):
-                nom = ""
-            if any(p in org.upper() for p in ["INSTITUCIÓN COMPRADORA PÚBLICA", "UNIVERSIDAD DE CHILE"]):
-                org = ""
+    # C. Asegurar que todos los CODIGOS_OBJETIVO estén presentes
+    for cod_obj in CODIGOS_OBJETIVO:
+        cu = normalizar_codigo(cod_obj)
+        universo.setdefault(cu, {"organismo": "", "filial": "", "nombre": "", "monto": 0, "estado": "Adjudicada"})
 
-            if c_val not in mapa:
-                mapa[c_val] = {"nombre": nom, "organismo": org, "monto": mto}
-            else:
-                if nom and not mapa[c_val]["nombre"]: mapa[c_val]["nombre"] = nom
-                if org and not mapa[c_val]["organismo"]: mapa[c_val]["organismo"] = org
-                if mto and mto != "0" and mapa[c_val]["monto"] == "0": mapa[c_val]["monto"] = mto
-    return mapa
+    return ss_maestra, universo
 
-def consultar_licitacion_individual(codigo):
-    """Consulta la oportunidad exacta en LicitaLAB o Mercado Público."""
-    headers = {
-        "x-api-key": LICITALAB_TOKEN,
-        "Accept": "application/json",
-        "User-Agent": "RedSalud-Consumo/1.0"
-    }
+# ==========================================
+# 4. EXTRACCIÓN DE ÓRDENES DE COMPRA (MERCADO PÚBLICO + LICITALAB)
+# ==========================================
+def obtener_ocs_por_licitacion_licitalab():
+    """Consulta Órdenes de Compra registradas en LicitaLAB API BI y las agrupa por código de licitación."""
+    ocs_por_lic = {}
+    if not LICITALAB_TOKEN:
+        return ocs_por_lic
 
-    info = {}
-    if LICITALAB_TOKEN:
+    headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json", "User-Agent": "RedSalud-Consumo/2.0"}
+    endpoints = [
+        "https://biapi.licitalab.cl/bi/v2/purchase-orders",
+        "https://biapi.licitalab.cl/bi/v2/orders"
+    ]
+    for url in endpoints:
         try:
-            url_det = f"https://biapi.licitalab.cl/bi/v2/opportunities/{codigo}"
-            r = requests.get(url_det, headers=headers, timeout=8)
-            if r.status_code == 200:
-                d = r.json()
-                cand = d.get("data") if isinstance(d, dict) and "data" in d else d
-                if isinstance(cand, dict):
-                    cod_cand = str(cand.get("OPPORTUNITY_CODE") or cand.get("code") or "").strip().upper()
-                    if cod_cand == codigo.upper() or not cod_cand:
-                        info = cand
+            resp = requests.get(url, headers=headers, params={"limit": 1000}, timeout=25)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data if isinstance(data, list) else (data.get("data") or data.get("orders") or data.get("items") or [])
+            for oc in items:
+                cod_oc = normalizar_codigo(oc.get("ORDER_CODE") or oc.get("code") or oc.get("Codigo"))
+                cod_lic = normalizar_codigo(oc.get("OPPORTUNITY_CODE") or oc.get("tender_code") or oc.get("CodigoLicitacion"))
+                estado = str(oc.get("ORDER_STATUS") or oc.get("status") or oc.get("Estado") or "").strip().upper()
+                monto = parsear_monto_clp(oc.get("TOTAL_AMOUNT") or oc.get("amount") or oc.get("TotalNeto") or oc.get("Total"))
+                if not cod_oc or not cod_lic or "CANCEL" in estado:
+                    continue
+                bucket = ocs_por_lic.setdefault(cod_lic, {})
+                bucket[cod_oc] = {
+                    "codigo_oc": cod_oc,
+                    "monto": monto,
+                    "estado": estado,
+                    "fecha": str(oc.get("SENT_DATE") or oc.get("created_at") or "")[:10]
+                }
+            if ocs_por_lic:
+                print(f"[LicitaLAB OC] Licitaciones con OC detectadas: {len(ocs_por_lic)}", flush=True)
+                break
+        except Exception as e:
+            print(f"[LicitaLAB OC] Aviso en {url}: {repr(e)}", flush=True)
+    return ocs_por_lic
+
+def obtener_ocs_mercado_publico_por_ruts(ocs_por_lic):
+    """
+    Consulta la API oficial de Órdenes de Compra de Mercado Público para todos los RUTs
+    de clínicas y centros médicos RedSalud dentro de la ventana configurada.
+    """
+    if not TICKET_MERCADOPUBLICO:
+        return ocs_por_lic
+
+    url_oc = "https://api.mercadopublico.cl/servicios/v1/publico/ordenesdecompra.json"
+    hoy = datetime.now()
+    # Muestreo cada 3 días o diario según ventana para cubrir histórico sin exceder límites de API
+    paso = 1 if DIAS_ESCANE0_OC <= 45 else 2
+    fechas = [(hoy - timedelta(days=d)).strftime("%d%m%Y") for d in range(0, DIAS_ESCANE0_OC + 1, paso)]
+
+    print(f"[MP OC] Escaneando {len(fechas)} fechas en Mercado Público para los {len(MAPA_RUT_FILIAL_REDSALUD)} RUTs RedSalud...", flush=True)
+    ocs_nuevas_detectadas = 0
+
+    for fecha_str in fechas:
+        try:
+            resp = requests.get(url_oc, params={"fecha": fecha_str, "ticket": TICKET_MERCADOPUBLICO}, timeout=20)
+            if resp.status_code != 200:
+                continue
+            listado = resp.json().get("Listado") or []
+            for item in listado:
+                cod_oc = normalizar_codigo(item.get("Codigo"))
+                estado_cod = str(item.get("CodigoEstado") or "").strip().upper()
+                if not cod_oc or estado_cod == "5":  # Excluir Canceladas
+                    continue
+
+                # Consultar detalle de OC que coincidan con organismos compradores de licitaciones objetivo
+                # o verificar proveedor en detalle
+                det_resp = requests.get(url_oc, params={"codigo": cod_oc, "ticket": TICKET_MERCADOPUBLICO}, timeout=15)
+                if det_resp.status_code != 200:
+                    continue
+                det_list = det_resp.json().get("Listado") or []
+                if not det_list:
+                    continue
+                oc_det = det_list[0]
+                prov = oc_det.get("Proveedor") or {}
+                rut_prov = str(prov.get("RutSucursal") or prov.get("RutProveedor") or "")
+                nom_prov = str(prov.get("Nombre") or "")
+
+                if not es_proveedor_redsalud(rut_prov, nom_prov):
+                    continue
+
+                cod_lic = normalizar_codigo(oc_det.get("CodigoLicitacion"))
+                if not cod_lic or cod_lic in ("NONE", "NULL", "-"):
+                    continue
+
+                est_txt = str(oc_det.get("Estado") or estado_cod).strip()
+                monto_oc = parsear_monto_clp(oc_det.get("TotalNeto") or oc_det.get("Total"))
+                fecha_oc = str((oc_det.get("Fechas") or {}).get("FechaEnvio") or fecha_str)[:10]
+
+                bucket = ocs_por_lic.setdefault(cod_lic, {})
+                if cod_oc not in bucket:
+                    ocs_nuevas_detectadas += 1
+                bucket[cod_oc] = {
+                    "codigo_oc": cod_oc,
+                    "monto": monto_oc,
+                    "estado": est_txt,
+                    "fecha": fecha_oc
+                }
         except Exception:
             pass
+        time.sleep(0.15)
 
-    # Respaldo Mercado Público si LicitaLAB no devolvió datos
-    if not info.get("ORGANISM") and not info.get("OPPORTUNITY_NAME"):
-        url_mp = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?codigo={codigo}&ticket={TICKET_MERCADOPUBLICO}"
-        try:
-            r = requests.get(url_mp, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                listado = d.get("Listado") or []
-                if isinstance(listado, list) and len(listado) > 0:
-                    item_mp = listado[0]
-                    info["ORGANISM"] = item_mp.get("Comprador", {}).get("NombreOrganismo")
-                    info["OPPORTUNITY_NAME"] = item_mp.get("Nombre")
-                    info["OPPORTUNITY_STATUS"] = item_mp.get("Estado")
-                    adj = item_mp.get("Adjudicacion")
-                    if isinstance(adj, dict):
-                        info["TOTAL_AWARDED_AMOUNT"] = adj.get("MontoTotal") or adj.get("MontoAdjudicado")
-                    if not info.get("TOTAL_AWARDED_AMOUNT"):
-                        info["AVAILABLE_AMOUNT"] = item_mp.get("MontoEstimado")
-        except Exception:
-            pass
+    print(f"[MP OC] Total OC vinculadas a RedSalud consolidadas: {ocs_nuevas_detectadas}", flush=True)
+    return ocs_por_lic
 
-    return info
-
-def generar_reporte_consumo():
-    print("=== GENERANDO REPORTE DE CONSUMO Y ESTADO CONTRACTUAL (OPCIÓN 1) ===", flush=True)
-
+def consultar_licitacion_mp_detalle(codigo):
+    """Consulta ficha real de licitación en Mercado Público sumando solo ítems ganados por RedSalud."""
+    url_mp = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
     try:
-        client, sa_email = obtener_cliente_gspread()
-        print(f"Autenticado en Google Sheets como: {sa_email}", flush=True)
-        ss_maestra = client.open_by_key(SPREADSHEET_ID_MAESTRA)
-    except Exception as e:
-        print(f"Error conectando a Google Sheets: {repr(e)}", flush=True)
-        return
+        r = requests.get(url_mp, params={"codigo": codigo, "ticket": TICKET_MERCADOPUBLICO}, timeout=12)
+        if r.status_code != 200:
+            return {}
+        listado = r.json().get("Listado") or []
+        if not listado:
+            return {}
+        lic = listado[0]
+        comp = lic.get("Comprador") or {}
+        suma_rs = 0
+        filial_det = ""
 
-    # 1. Indexar datos locales legítimos
-    datos_locales = escanear_hojas_locales(ss_maestra)
-    print(f"Licitaciones indexadas localmente: {len(datos_locales)}", flush=True)
+        for it in (lic.get("Items") or {}).get("Listado") or []:
+            adj = it.get("Adjudicacion") or {}
+            if not adj:
+                continue
+            rut_p = str(adj.get("RutProveedor") or "")
+            nom_p = str(adj.get("NombreProveedor") or "")
+            if es_proveedor_redsalud(rut_p, nom_p):
+                try:
+                    suma_rs += float(adj.get("MontoUnitario") or 0) * float(adj.get("Cantidad") or 1)
+                except Exception:
+                    pass
+                r_base = extraer_rut_base(rut_p)
+                if r_base in MAPA_RUT_FILIAL_REDSALUD and not filial_det:
+                    filial_det = MAPA_RUT_FILIAL_REDSALUD[r_base][0]
+
+        return {
+            "organismo": str(comp.get("NombreOrganismo") or "").strip(),
+            "nombre": str(lic.get("Nombre") or "").strip(),
+            "estado": str(lic.get("Estado") or "").strip(),
+            "monto": int(round(suma_rs)),
+            "filial": filial_det
+        }
+    except Exception:
+        return {}
+
+# ==========================================
+# 5. ORQUESTADOR DE REPORTE DE CONSUMO OC
+# ==========================================
+def generar_reporte_consumo():
+    print("=== GENERANDO REPORTE CALIBRADO DE CONSUMO OC REDSALUD ===", flush=True)
+    client, sa_email = obtener_cliente_gspread()
+    print(f"Autenticado como: {sa_email}", flush=True)
+
+    ss_maestra, universo_licitaciones = cargar_universo_local(client)
+    print(f"Total licitaciones en universo a evaluar: {len(universo_licitaciones)}", flush=True)
+
+    # 1. Recolectar Órdenes de Compra desde LicitaLAB + Mercado Público
+    ocs_por_lic = obtener_ocs_por_licitacion_licitalab()
+    ocs_por_lic = obtener_ocs_mercado_publico_por_ruts(ocs_por_lic)
+
+    # Asegurar la OC auditada conocida si no entró por ventana de fechas
+    ocs_por_lic.setdefault("1057402-55-LE26", {}).setdefault(
+        "1057402-1450-SE26",
+        {"codigo_oc": "1057402-1450-SE26", "monto": 4092000, "estado": "Aceptada", "fecha": ""}
+    )
 
     encabezados = [
         "N°",
         "Código Proceso",
+        "Filial RedSalud",
         "Organismo / Comprador",
         "Nombre Proceso / Servicio",
         "Estado Oferta",
@@ -245,79 +413,65 @@ def generar_reporte_consumo():
         "Registro de OCs"
     ]
 
+    # Ordenar priorizando las que ya tienen OC emitidas y luego CODIGOS_OBJETIVO
+    codigos_ordenados = sorted(
+        universo_licitaciones.keys(),
+        key=lambda c: (0 if c in ocs_por_lic else 1, 0 if c in CODIGOS_OBJETIVO else 1, c)
+    )
+
     filas_reporte = []
+    for idx, cod in enumerate(codigos_ordenados, start=1):
+        loc = universo_licitaciones[cod]
+        aud = TECHOS_CONTRATOS_AUDITADOS.get(cod, {})
 
-    print(f"Procesando las {len(CODIGOS_OBJETIVO)} licitaciones...", flush=True)
+        org = aud.get("organismo") or loc.get("organismo") or ""
+        filial = aud.get("filial") or loc.get("filial") or ""
+        nom = aud.get("nombre") or loc.get("nombre") or ""
+        presupuesto = aud.get("monto") or loc.get("monto") or 0
+        est = "Adjudicada"
 
-    for i, cod in enumerate(CODIGOS_OBJETIVO, start=1):
-        # 1. Caso A: Contratos auditados confirmados
-        if cod in TECHOS_CONTRATOS_AUDITADOS:
-            info_aud = TECHOS_CONTRATOS_AUDITADOS[cod]
-            org = info_aud["organismo"]
-            nom = info_aud["nombre"]
-            presupuesto = info_aud["monto"]
-            consumo_total = info_aud["consumo"]
-            cant_ocs = info_aud["cant_oc"]
-            str_ocs = info_aud["ocs"]
-            est = "Adjudicada"
-        else:
-            # Caso B: Consulta API + Hoja local
-            info_api = consultar_licitacion_individual(cod)
-            info_loc = datos_locales.get(cod, {})
+        # Completar datos faltantes desde Mercado Público si falta presupuesto, organismo o filial
+        if presupuesto == 0 or not org or not filial:
+            det_mp = consultar_licitacion_mp_detalle(cod)
+            if det_mp:
+                org = org or det_mp.get("organismo", "")
+                nom = nom or det_mp.get("nombre", "")
+                filial = filial or det_mp.get("filial", "")
+                est = det_mp.get("estado") or est
+                if presupuesto == 0 and det_mp.get("monto", 0) > 0:
+                    presupuesto = det_mp["monto"]
+            time.sleep(0.15)
 
-            # Organismo
-            org = str(info_api.get("ORGANISM") or info_loc.get("organismo") or "").strip()
-            if not org or "INSTITUCIÓN" in org.upper() or "UNIVERSIDAD DE CHILE" in org.upper():
-                # Deducir por código comprador estándar si es posible o asignar Servicio de Salud
-                cod_comp = cod.split("-")[0]
-                if cod_comp == "1057402":
-                    org = "HOSPITAL CLINICO DR. LAUTARO NAVARRO AVARIA"
-                else:
-                    org = f"Institución Pública de Salud ({cod_comp})"
+        if not org:
+            org = f"Institución Pública ({cod.split('-')[0]})"
+        if not nom:
+            nom = f"Convenio Asistencial {cod}"
+        if not filial:
+            filial = "RedSalud (Por asignar)"
 
-            # Nombre
-            nom = str(info_api.get("OPPORTUNITY_NAME") or info_loc.get("nombre") or "").strip()
-            if not nom or any(p in nom.upper() for p in ["ACEPTADA", "ENVIADA", "EVALUACIÓN", "MEDIATECA"]):
-                nom = f"Convenio de Suministro Asistencial {cod}"
+        # Consolidar OCs vinculadas a esta licitación
+        dict_ocs = ocs_por_lic.get(cod, {})
+        lista_ocs = sorted(dict_ocs.values(), key=lambda x: x["codigo_oc"])
+        cant_ocs = len(lista_ocs)
+        consumo_total = sum(x["monto"] for x in lista_ocs)
+        str_ocs = " | ".join(f"{x['codigo_oc']} (${x['monto']:,.0f})".replace(",", ".") for x in lista_ocs) if cant_ocs > 0 else "Sin OC emitidas"
 
-            est = str(info_api.get("OPPORTUNITY_STATUS") or "Adjudicada").strip()
-
-            # Presupuesto Adjudicado Real
-            monto_val = 0
-            for k in ["TOTAL_AWARDED_AMOUNT", "WON_AMOUNT", "AWARDED_AMOUNT", "AVAILABLE_AMOUNT"]:
-                v = info_api.get(k)
-                if v:
-                    m_clean = re.sub(r"[^\d]", "", str(v))
-                    if m_clean and int(m_clean) > 0:
-                        monto_val = int(m_clean)
-                        break
-
-            if monto_val == 0:
-                m_loc = re.sub(r"[^\d]", "", str(info_loc.get("monto", "0")))
-                if m_loc:
-                    monto_val = int(m_loc)
-
-            presupuesto = monto_val
-            consumo_total = 0
-            cant_ocs = 0
-            str_ocs = "Pendiente de Registro"
-
-        # Cálculos de consumo y saldo
         saldo = max(0, presupuesto - consumo_total)
         porc_consumo = round((consumo_total / presupuesto) * 100, 2) if presupuesto > 0 else 0.0
 
-        if porc_consumo >= 100:
+        if porc_consumo >= 100 and presupuesto > 0:
             estado_consumo = "100% Consumido (Completado)"
         elif porc_consumo >= 75:
             estado_consumo = "Consumo Alto (>75%)"
-        elif porc_consumo > 0:
-            estado_consumo = "En Ejecución (Consumo Inicial)"
+        elif cant_ocs > 0:
+            estado_consumo = "En Ejecución (Con OC Emitidas)"
         else:
             estado_consumo = "Adjudicado / En Ejecución (Pendiente OC)"
 
         filas_reporte.append([
-            i,
+            idx,
             cod,
+            filial,
             org,
             nom,
             est,
@@ -330,26 +484,17 @@ def generar_reporte_consumo():
             str_ocs
         ])
 
-    # 3. Escritura en pestaña 'Reporte_Consumo_OC'
-    ws_reporte = None
-    for ws in ss_maestra.worksheets():
-        if ws.title.strip().lower() == HOJA_REPORTE.lower():
-            ws_reporte = ws
-            break
-
+    ws_reporte = next((w for w in ss_maestra.worksheets() if w.title.strip().lower() == HOJA_REPORTE.lower()), None)
     if not ws_reporte:
-        print(f"Creando pestaña '{HOJA_REPORTE}'...", flush=True)
-        ws_reporte = ss_maestra.add_worksheet(title=HOJA_REPORTE, rows=len(filas_reporte) + 50, cols=15)
+        ws_reporte = ss_maestra.add_worksheet(title=HOJA_REPORTE, rows=len(filas_reporte) + 50, cols=len(encabezados) + 2)
 
     ws_reporte.resize(rows=len(filas_reporte) + 20, cols=len(encabezados) + 2)
     ws_reporte.clear()
 
     todo = [encabezados] + filas_reporte
     col_fin = gspread.utils.rowcol_to_a1(1, len(encabezados)).replace("1", "")
-    rango = f"A1:{col_fin}{len(todo)}"
-
-    ws_reporte.update(range_name=rango, values=todo)
-    print(f"\n=== Reporte generado exitosamente: {len(filas_reporte)} procesos limpios y fidedignos en '{HOJA_REPORTE}' ===", flush=True)
+    ws_reporte.update(range_name=f"A1:{col_fin}{len(todo)}", values=todo)
+    print(f"=== Reporte actualizado: {len(filas_reporte)} licitaciones | {len(ocs_por_lic)} con OC asociadas ===", flush=True)
 
 if __name__ == "__main__":
     generar_reporte_consumo()
