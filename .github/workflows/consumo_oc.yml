@@ -25,9 +25,13 @@ jobs:
 
       - name: Ejecutar Extractor de Consumo y OCs
         env:
+          GCP_JSON_BASE64: ${{ secrets.GCP_JSON_BASE64 }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
           MERCADOPUBLICO_TICKET: ${{ secrets.MERCADOPUBLICO_TICKET }}
-        run: |
-          python consultar_oc_licitalab_api.py
+          MP_TICKET: ${{ secrets.MP_TICKET }}
+          TICKET_MP: ${{ secrets.TICKET_MP }}
+        run: python consultar_oc_consumo.py
+       
         
