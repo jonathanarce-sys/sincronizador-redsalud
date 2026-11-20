@@ -27,4 +27,7 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           LICITALAB_TOKEN: ${{ secrets.LICITALAB_TOKEN }}
-        run: python consultar_oc_consumo.py
+          MERCADOPUBLICO_TICKET: ${{ secrets.MERCADOPUBLICO_TICKET }}
+        run: |
+          python consultar_oc_licitalab_api.py
+        
