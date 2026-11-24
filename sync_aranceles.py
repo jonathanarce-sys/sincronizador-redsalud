@@ -1,37 +1,21 @@
 import os
 import re
+import glob
 import json
 import base64
 import unicodedata
+import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
 # 1. CONFIGURACIÓN Y ESQUEMA DE 23 COLUMNAS
 # ==========================================
-SPREADSHEET_ID_DESTINO = os.environ.get(
-    "SPREADSHEET_ID_ARANCELES",
-    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-).strip()
-
+CARPETA_RAW = os.environ.get("CARPETA_RAW", "data/raw").strip()
 HOJA_DESTINO = "RAW_Data_Ingesta"
 
-FUENTES_ARANCELES = [
-    "ARMADA _ Arancel Consolidado [Clientes Sector Público] - PRESTACIONES 2026",
-    "ISL_Arancel Consolidado_Providencia - PROVIDENCIA",
-    "ISL_Arancel Consolidado_Valparaíso - VALPARAISO",
-    "ISL_Arancel Consolidado_Magallanes - MAGALLANES",
-    "Maestro Aranceles RedSalud. - Trazabilidad",
-    "ISL_Arancel Consolidado_CMD - CMD",
-    "ISL_Arancel Consolidado_Elqui - ELQUI",
-    "DIPRECA_2026_Prestaciones",
-    "DIPRECA_2026_Paquetes",
-    "DIPRECA_2026_HMQ",
-    "ISL_Arancel Consolidado_Iquique - IQUIQUE",
-    "ISL_Arancel Consolidado_Santiago - SANTIAGO",
-    "ISL_Arancel Consolidado_Rancagua - RANCAGUA",
-    "ISL_Arancel Consolidado_Temuco - TEMUCO",
-]
+# ID de respaldo si se necesita ubicar el Google Sheet de Aranceles
+SPREADSHEET_ID_ARANCELES = os.environ.get("SPREADSHEET_ID_ARANCELES", "").strip()
 
 ENCABEZADOS_RAW_INGESTA = [
     "filial",
@@ -145,6 +129,8 @@ def parsear_monto(val):
     if val is None or val == "":
         return 0
     if isinstance(val, (int, float)):
+        if pd.isna(val):
+            return 0
         return int(round(val))
     limpio = re.sub(r"[^\d]", "", str(val))
     return int(limpio) if limpio else 0
@@ -158,6 +144,8 @@ def inferir_metadatos_fuente(nombre_fuente):
         cliente_def = "DIPRECA"
     elif "ARMADA" in u:
         cliente_def = "Armada de Chile"
+    elif "JEAFOSALE" in u:
+        cliente_def = "JEAFOSALE"
 
     filial_def, soc_def = "", ""
     for claves, nom_f, rut_f in CATALOGO_FILIALES:
@@ -182,114 +170,135 @@ def inferir_metadatos_fuente(nombre_fuente):
         "tipo_prestación": tipo_prest_def
     }
 
-def mapear_indices_hoja(cabecera):
-    cab_norm = [norm_txt(c) for c in cabecera]
-    indices = {}
+def mapear_columnas_df(columnas):
+    col_norm = [norm_txt(c) for c in columnas]
+    mapa = {}
 
     for col_dest, aliases in ALIAS_COLUMNAS.items():
         aliases_norm = [norm_txt(a) for a in aliases]
-        idx_encontrado = None
+        encontrada = None
         for a in aliases_norm:
-            if a in cab_norm:
-                idx_encontrado = cab_norm.index(a)
+            if a in col_norm:
+                encontrada = columnas[col_norm.index(a)]
                 break
-        if idx_encontrado is None:
+        if encontrada is None:
             for a in aliases_norm:
                 if len(a) >= 5:
-                    for i, c in enumerate(cab_norm):
+                    for i, c in enumerate(col_norm):
                         if a in c:
-                            idx_encontrado = i
+                            encontrada = columnas[i]
                             break
-                if idx_encontrado is not None:
+                if encontrada is not None:
                     break
-        if idx_encontrado is not None:
-            indices[col_dest] = idx_encontrado
+        if encontrada is not None:
+            mapa[col_dest] = encontrada
 
-    indices_hmq = {}
+    cols_hmq = {}
     for rol_std, aliases_rol in ROLES_HMQ:
         aliases_r_norm = [norm_txt(a) for a in aliases_rol]
-        for i, c in enumerate(cab_norm):
+        for i, c in enumerate(col_norm):
             if any(ar == c or ar in c for ar in aliases_r_norm):
-                indices_hmq[rol_std] = i
+                cols_hmq[rol_std] = columnas[i]
                 break
 
-    return indices, indices_hmq
+    return mapa, cols_hmq
 
-def obtener_celda(fila, idx_map, clave, default=""):
-    idx = idx_map.get(clave)
-    if idx is not None and idx < len(fila):
-        val = str(fila[idx]).strip()
-        if val:
-            return val
-    return default
+def leer_csv_robusto(ruta_csv):
+    for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+        for sep in (None, ";", ",", "\t"):
+            try:
+                kwargs = {"dtype": str, "encoding": enc, "keep_default_na": False}
+                if sep is None:
+                    kwargs["sep"] = None
+                    kwargs["engine"] = "python"
+                else:
+                    kwargs["sep"] = sep
+                df = pd.read_csv(ruta_csv, **kwargs)
+                if len(df.columns) >= 3:
+                    return df
+            except Exception:
+                continue
+    return pd.read_csv(ruta_csv, dtype=str, encoding="latin-1", keep_default_na=False)
+
+def ajustar_fila_encabezado_df(df):
+    linea_cols = " ".join(norm_txt(c) for c in df.columns)
+    if any(k in linea_cols for k in ("FONASA", "GLOSA", "PRESTACION", "CODIGO", "PRECIO", "ARANCEL")):
+        return df
+
+    for idx in range(min(5, len(df))):
+        fila_vals = [str(v).strip() for v in df.iloc[idx].tolist()]
+        linea_u = " ".join(norm_txt(x) for x in fila_vals)
+        if any(k in linea_u for k in ("FONASA", "GLOSA", "PRESTACION", "CODIGO", "PRECIO", "ARANCEL")):
+            nuevo_df = df.iloc[idx + 1:].copy()
+            nuevo_df.columns = fila_vals
+            nuevo_df.reset_index(drop=True, inplace=True)
+            return nuevo_df
+    return df
 
 # ==========================================
-# 3. PROCESAMIENTO Y DESPIVOTADO HMQ
+# 3. PROCESAMIENTO DE DATAFRAME -> 23 COLUMNAS
 # ==========================================
-def procesar_worksheet(ws, etiqueta_origen):
-    filas = ws.get_all_values()
-    if len(filas) < 2:
+def procesar_dataframe(df_raw, etiqueta_origen):
+    df = ajustar_fila_encabezado_df(df_raw)
+    if df.empty:
         return []
 
-    fila_cab_idx = 0
-    for r_i in range(min(4, len(filas))):
-        linea_u = " ".join(norm_txt(x) for x in filas[r_i])
-        if any(k in linea_u for k in ("FONASA", "GLOSA", "PRESTACION", "CODIGO", "PRECIO", "ARANCEL")):
-            fila_cab_idx = r_i
-            break
-
-    cabecera = filas[fila_cab_idx]
-    idx_map, indices_hmq = mapear_indices_hoja(cabecera)
+    mapa_cols, cols_hmq = mapear_columnas_df(list(df.columns))
     meta = inferir_metadatos_fuente(etiqueta_origen)
+    es_hmq = ("HMQ" in norm_txt(etiqueta_origen)) or (len(cols_hmq) >= 2)
 
-    es_hoja_hmq = ("HMQ" in norm_txt(etiqueta_origen)) or (len(indices_hmq) >= 2)
-    registros_salida = []
+    registros = []
+    for _, row in df.iterrows():
+        def val(clave, default=""):
+            col = mapa_cols.get(clave)
+            if col is not None:
+                v = str(row.get(col, "")).strip()
+                if v and v.lower() != "nan":
+                    return v
+            return default
 
-    for r in filas[fila_cab_idx + 1:]:
-        if not any(str(c).strip() for c in r):
-            continue
-
-        glosa_base = obtener_celda(r, idx_map, "glosa_prestación")
-        cod_rs = limpiar_codigo_redsalud(obtener_celda(r, idx_map, "código_redsalud [no TC]"))
-        cod_cli = obtener_celda(r, idx_map, "código_cliente")
-        cod_fon = obtener_celda(r, idx_map, "código_fonasa")
+        glosa_base = val("glosa_prestación")
+        cod_rs = limpiar_codigo_redsalud(val("código_redsalud [no TC]"))
+        cod_cli = val("código_cliente")
+        cod_fon = val("código_fonasa")
 
         if not glosa_base and not cod_rs and not cod_fon and not cod_cli:
             continue
         if norm_txt(glosa_base) in ("TOTAL", "SUBTOTAL", "GLOSA", "GLOSA_PRESTACION"):
             continue
 
-        filial = obtener_celda(r, idx_map, "filial", meta["filial"])
-        sociedad = obtener_celda(r, idx_map, "sociedad", meta["sociedad"])
-        cliente = obtener_celda(r, idx_map, "cliente", meta["cliente"])
-        contrato = obtener_celda(r, idx_map, "contrato")
-        id_lic = obtener_celda(r, idx_map, "id_licitación")
-        centro = obtener_celda(r, idx_map, "centro")
-        anio = obtener_celda(r, idx_map, "año", meta["año"])
-        tipo_arancel_origen = etiqueta_origen
-        tipo_prest = obtener_celda(r, idx_map, "tipo_prestación", meta["tipo_prestación"])
-        indexador = obtener_celda(r, idx_map, "Indexador")
-        ambito = obtener_celda(r, idx_map, "ámbito")
-        recargo = obtener_celda(r, idx_map, "recargo")
-        porc_recargo = obtener_celda(r, idx_map, "%_recargo")
-        vig_desde = obtener_celda(r, idx_map, "vigencia_desde")
-        vig_hasta = obtener_celda(r, idx_map, "vigencia_hasta")
-        id_conv_cli = obtener_celda(r, idx_map, "id_convenio_cliente")
-        conv_rs = obtener_celda(r, idx_map, "Convenio_redsalud")
-        cod_lugar_his = obtener_celda(r, idx_map, "código_lugar_his")
+        filial = val("filial", meta["filial"])
+        sociedad = val("sociedad", meta["sociedad"])
+        cliente = val("cliente", meta["cliente"])
+        contrato = val("contrato")
+        id_lic = val("id_licitación")
+        centro = val("centro")
+        anio = val("año", meta["año"])
+        # Si la fila trae su propio tipo_arancel [origen] (ej. en Maestro Trazabilidad), se respeta; si no, usa el origen del archivo/hoja
+        tipo_arancel_origen = val("tipo_arancel [origen]", etiqueta_origen)
+        tipo_prest = val("tipo_prestación", meta["tipo_prestación"])
+        indexador = val("Indexador")
+        ambito = val("ámbito")
+        recargo = val("recargo")
+        porc_recargo = val("%_recargo")
+        vig_desde = val("vigencia_desde")
+        vig_hasta = val("vigencia_hasta")
+        id_conv_cli = val("id_convenio_cliente")
+        conv_rs = val("Convenio_redsalud")
+        cod_lugar_his = val("código_lugar_his")
 
-        if es_hoja_hmq and indices_hmq:
-            roles_con_valor = []
-            for rol_nombre, col_i in indices_hmq.items():
-                if col_i < len(r):
-                    monto_rol = parsear_monto(r[col_i])
-                    if monto_rol > 0:
-                        roles_con_valor.append((rol_nombre, monto_rol))
+        # Despivotado vertical HMQ (1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST, ARSENALERA)
+        if es_hmq and cols_hmq:
+            roles_con_monto = []
+            for rol_nombre, col_rol in cols_hmq.items():
+                monto_rol = parsear_monto(row.get(col_rol, 0))
+                if monto_rol > 0:
+                    roles_con_monto.append((rol_nombre, monto_rol))
 
-            if roles_con_valor:
-                for rol_nombre, monto_rol in roles_con_valor:
+            if roles_con_monto:
+                for rol_nombre, monto_rol in roles_con_monto:
                     glosa_rol = f"{glosa_base} - {rol_nombre}".strip(" -")
-                    registros_salida.append([
+                    registros.append([
                         filial, sociedad, cliente, contrato, id_lic, centro, anio,
                         tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_rol,
                         "HMQ", indexador, monto_rol, ambito, recargo, porc_recargo,
@@ -297,81 +306,70 @@ def procesar_worksheet(ws, etiqueta_origen):
                     ])
                 continue
 
-        precio = parsear_monto(obtener_celda(r, idx_map, "precio_total"))
-        registros_salida.append([
+        precio = parsear_monto(val("precio_total"))
+        registros.append([
             filial, sociedad, cliente, contrato, id_lic, centro, anio,
             tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_base,
             tipo_prest, indexador, precio, ambito, recargo, porc_recargo,
             vig_desde, vig_hasta, id_conv_cli, conv_rs, cod_lugar_his
         ])
 
-    return registros_salida
+    return registros
 
 # ==========================================
-# 4. ORQUESTADOR MULTI-ARCHIVO EN DRIVE
+# 4. ORQUESTADOR DESDE data/raw -> RAW_Data_Ingesta
 # ==========================================
 def consolidar_aranceles():
-    print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES -> RAW_Data_Ingesta (23 COLS) ===", flush=True)
+    print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES (data/raw -> RAW_Data_Ingesta | 23 COLS) ===", flush=True)
     client, sa_email = obtener_cliente_gspread()
     print(f"Autenticado como: {sa_email}", flush=True)
 
-    libros_drive = client.openall()
-    print(f"Archivos compartidos visibles en Drive para la Service Account: {len(libros_drive)}", flush=True)
-    for lb in libros_drive:
-        print(f"  * Libro disponible: '{lb.title}' (ID: {lb.id})", flush=True)
-
-    # Buscar destino donde está RAW_Data_Ingesta
+    # Ubicar el Google Sheet que contiene la pestaña RAW_Data_Ingesta
     ss_dest = None
     ws_dest = None
-    for lb in libros_drive:
-        w = next((x for x in lb.worksheets() if norm_txt(x.title) == norm_txt(HOJA_DESTINO)), None)
-        if w:
-            ss_dest = lb
-            ws_dest = w
-            break
-    if not ss_dest:
-        ss_dest = client.open_by_key(SPREADSHEET_ID_DESTINO)
-        ws_dest = ss_dest.add_worksheet(title=HOJA_DESTINO, rows=500, cols=len(ENCABEZADOS_RAW_INGESTA))
-
-    print(f"Destino seleccionado: '{ss_dest.title}' -> pestaña '{ws_dest.title}'", flush=True)
-
-    todas_las_filas = []
-    for fuente in FUENTES_ARANCELES:
-        f_norm = norm_txt(fuente)
-        # Separar posible nombre de archivo y pestaña ("Archivo - Pestaña")
-        partes = [p.strip() for p in fuente.split(" - ", 1)]
-        prefijo_archivo = norm_txt(partes[0])
-        sufijo_hoja = norm_txt(partes[1]) if len(partes) > 1 else ""
-
-        ws_encontrada = None
-        # 1. Buscar como pestaña exacta dentro de cualquier libro compartido
-        for lb in libros_drive:
-            for w in lb.worksheets():
-                w_norm = norm_txt(w.title)
-                if w_norm == f_norm or (sufijo_hoja and sufijo_hoja in w_norm and prefijo_archivo[:12] in norm_txt(lb.title)):
-                    ws_encontrada = w
-                    break
-            if ws_encontrada:
+    if SPREADSHEET_ID_ARANCELES:
+        ss_dest = client.open_by_key(SPREADSHEET_ID_ARANCELES)
+        ws_dest = next((w for w in ss_dest.worksheets() if norm_txt(w.title) == norm_txt(HOJA_DESTINO)), None)
+    else:
+        for lb in client.openall():
+            w = next((x for x in lb.worksheets() if norm_txt(x.title) == norm_txt(HOJA_DESTINO)), None)
+            if w:
+                ss_dest = lb
+                ws_dest = w
                 break
 
-        # 2. Si no apareció como pestaña, buscar como libro independiente cuyo título coincida con prefijo_archivo
-        if not ws_encontrada:
-            for lb in libros_drive:
-                lb_norm = norm_txt(lb.title)
-                if prefijo_archivo in lb_norm or lb_norm in f_norm:
-                    if sufijo_hoja:
-                        ws_encontrada = next((w for w in lb.worksheets() if sufijo_hoja in norm_txt(w.title)), lb.sheet1)
-                    else:
-                        ws_encontrada = lb.sheet1
-                    break
+    if not ss_dest:
+        raise ValueError("No se encontró el Google Sheet con la pestaña 'RAW_Data_Ingesta'. Verifica los permisos de la Service Account.")
+    if not ws_dest:
+        ws_dest = ss_dest.add_worksheet(title=HOJA_DESTINO, rows=500, cols=len(ENCABEZADOS_RAW_INGESTA))
 
-        if not ws_encontrada:
-            print(f"  [AVISO] Fuente no encontrada en Drive (¿falta compartir?): '{fuente}'", flush=True)
-            continue
+    print(f"Destino Google Sheet: '{ss_dest.title}' -> pestaña '{ws_dest.title}'", flush=True)
 
-        filas_f = procesar_worksheet(ws_encontrada, fuente)
-        print(f"  -> {fuente}: {len(filas_f)} registros procesados", flush=True)
-        todas_las_filas.extend(filas_f)
+    archivos = sorted(
+        glob.glob(os.path.join(CARPETA_RAW, "*.csv")) +
+        glob.glob(os.path.join(CARPETA_RAW, "*.xlsx")) +
+        glob.glob(os.path.join(CARPETA_RAW, "*.xls"))
+    )
+    print(f"Archivos encontrados en '{CARPETA_RAW}': {len(archivos)}", flush=True)
+
+    todas_las_filas = []
+    for ruta in archivos:
+        nombre_archivo = os.path.basename(ruta)
+        nombre_sin_ext = os.path.splitext(nombre_archivo)[0].strip()
+
+        if ruta.lower().endswith(".csv"):
+            df_csv = leer_csv_robusto(ruta)
+            filas_f = procesar_dataframe(df_csv, nombre_sin_ext)
+            print(f"  -> [CSV] {nombre_sin_ext}: {len(filas_f)} registros", flush=True)
+            todas_las_filas.extend(filas_f)
+        else:
+            # Excel multi-pestaña (ej. DIPRECA _ Arancel Consolidado [Clientes Sector Público].xlsx)
+            xls = pd.ExcelFile(ruta)
+            for hoja_xls in xls.sheet_names:
+                df_xls = pd.read_excel(xls, sheet_name=hoja_xls, dtype=str, keep_default_na=False)
+                filas_h = procesar_dataframe(df_xls, hoja_xls.strip())
+                print(f"  -> [XLSX] {nombre_archivo} [{hoja_xls}]: {len(filas_h)} registros", flush=True)
+                todas_las_filas.extend(filas_h)
 
     ws_dest.clear()
     ws_dest.resize(rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
@@ -384,4 +382,3 @@ def consolidar_aranceles():
 
 if __name__ == "__main__":
     consolidar_aranceles()
-
