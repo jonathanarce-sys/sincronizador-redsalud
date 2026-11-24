@@ -2,6 +2,7 @@ import os
 import re
 import glob
 import json
+import time
 import base64
 import unicodedata
 import pandas as pd
@@ -13,8 +14,8 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 CARPETA_RAW = os.environ.get("CARPETA_RAW", "data/raw").strip()
 HOJA_DESTINO = "RAW_Data_Ingesta"
+TAMANO_LOTE = 20000  # Filas por bloque para evitar error 500 de Google Sheets API
 
-# ID de respaldo si se necesita ubicar el Google Sheet de Aranceles
 SPREADSHEET_ID_ARANCELES = os.environ.get("SPREADSHEET_ID_ARANCELES", "").strip()
 
 ENCABEZADOS_RAW_INGESTA = [
@@ -235,6 +236,27 @@ def ajustar_fila_encabezado_df(df):
             return nuevo_df
     return df
 
+def escribir_en_lotes_con_reintento(ws, matriz, col_fin, tamano_lote=20000):
+    total_filas = len(matriz)
+    for inicio in range(0, total_filas, tamano_lote):
+        fin = min(inicio + tamano_lote, total_filas)
+        lote = matriz[inicio:fin]
+        rango = f"A{inicio + 1}:{col_fin}{fin}"
+
+        exito = False
+        for intento in range(1, 5):
+            try:
+                ws.update(range_name=rango, values=lote)
+                print(f"  [OK] Lote escrito {rango} ({len(lote)} filas)", flush=True)
+                exito = True
+                break
+            except Exception as e:
+                print(f"  [REINTENTO {intento}/4] Error en lote {rango}: {e}", flush=True)
+                time.sleep(3 * intento)
+        if not exito:
+            raise RuntimeError(f"No se pudo escribir el lote {rango} después de 4 intentos.")
+        time.sleep(1.0)
+
 # ==========================================
 # 3. PROCESAMIENTO DE DATAFRAME -> 23 COLUMNAS
 # ==========================================
@@ -274,7 +296,6 @@ def procesar_dataframe(df_raw, etiqueta_origen):
         id_lic = val("id_licitación")
         centro = val("centro")
         anio = val("año", meta["año"])
-        # Si la fila trae su propio tipo_arancel [origen] (ej. en Maestro Trazabilidad), se respeta; si no, usa el origen del archivo/hoja
         tipo_arancel_origen = val("tipo_arancel [origen]", etiqueta_origen)
         tipo_prest = val("tipo_prestación", meta["tipo_prestación"])
         indexador = val("Indexador")
@@ -287,7 +308,6 @@ def procesar_dataframe(df_raw, etiqueta_origen):
         conv_rs = val("Convenio_redsalud")
         cod_lugar_his = val("código_lugar_his")
 
-        # Despivotado vertical HMQ (1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST, ARSENALERA)
         if es_hmq and cols_hmq:
             roles_con_monto = []
             for rol_nombre, col_rol in cols_hmq.items():
@@ -324,7 +344,6 @@ def consolidar_aranceles():
     client, sa_email = obtener_cliente_gspread()
     print(f"Autenticado como: {sa_email}", flush=True)
 
-    # Ubicar el Google Sheet que contiene la pestaña RAW_Data_Ingesta
     ss_dest = None
     ws_dest = None
     if SPREADSHEET_ID_ARANCELES:
@@ -339,7 +358,7 @@ def consolidar_aranceles():
                 break
 
     if not ss_dest:
-        raise ValueError("No se encontró el Google Sheet con la pestaña 'RAW_Data_Ingesta'. Verifica los permisos de la Service Account.")
+        raise ValueError("No se encontró el Google Sheet con la pestaña 'RAW_Data_Ingesta'.")
     if not ws_dest:
         ws_dest = ss_dest.add_worksheet(title=HOJA_DESTINO, rows=500, cols=len(ENCABEZADOS_RAW_INGESTA))
 
@@ -363,7 +382,6 @@ def consolidar_aranceles():
             print(f"  -> [CSV] {nombre_sin_ext}: {len(filas_f)} registros", flush=True)
             todas_las_filas.extend(filas_f)
         else:
-            # Excel multi-pestaña (ej. DIPRECA _ Arancel Consolidado [Clientes Sector Público].xlsx)
             xls = pd.ExcelFile(ruta)
             for hoja_xls in xls.sheet_names:
                 df_xls = pd.read_excel(xls, sheet_name=hoja_xls, dtype=str, keep_default_na=False)
@@ -371,12 +389,15 @@ def consolidar_aranceles():
                 print(f"  -> [XLSX] {nombre_archivo} [{hoja_xls}]: {len(filas_h)} registros", flush=True)
                 todas_las_filas.extend(filas_h)
 
-    ws_dest.clear()
-    ws_dest.resize(rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
-
     matriz_final = [ENCABEZADOS_RAW_INGESTA] + todas_las_filas
+    total_filas = len(matriz_final)
+    print(f"Total acumulado a cargar: {len(todas_las_filas)} registros (+1 encabezado = {total_filas} filas)", flush=True)
+
+    ws_dest.clear()
+    ws_dest.resize(rows=total_filas + 20, cols=len(ENCABEZADOS_RAW_INGESTA))
+
     col_fin = gspread.utils.rowcol_to_a1(1, len(ENCABEZADOS_RAW_INGESTA)).replace("1", "")
-    ws_dest.update(range_name=f"A1:{col_fin}{len(matriz_final)}", values=matriz_final)
+    escribir_en_lotes_con_reintento(ws_dest, matriz_final, col_fin, tamano_lote=TAMANO_LOTE)
 
     print(f"=== CONSOLIDACIÓN COMPLETADA: {len(todas_las_filas)} registros en '{HOJA_DESTINO}' (23 columnas: A:{col_fin}) ===", flush=True)
 
