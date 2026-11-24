@@ -1,32 +1,39 @@
 import os
 import re
-import glob
 import json
 import base64
-import math
-import zipfile
 import unicodedata
-import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# 1. Configuración de destinos en Google Sheets
-SPREADSHEET_ID_PRESTACIONES = "1qxeY4CQN-g-bHqbfEpr2MjQXzObpNG5fSxThqexbXHo"
-HOJA_PRESTACIONES = "RAW_DATA_INGESTA"
-HOJA_MAESTRO_HIS = "MAESTRO_HOMOLOGACION_HIS"
+# ==========================================
+# 1. CONFIGURACIÓN Y ESQUEMA DE 23 COLUMNAS
+# ==========================================
+SPREADSHEET_ID_ARANCELES = os.environ.get(
+    "SPREADSHEET_ID_ARANCELES",
+    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+).strip()
 
-# Opcional: ID de un segundo Google Sheet para Materiales e Insumos (M&I)
-SPREADSHEET_ID_INSUMOS = "" 
-HOJA_INSUMOS = "RAW_DATA_MI"
+HOJA_DESTINO = "RAW_Data_Ingesta"
 
-CARPETA_RAW = "data/raw"
-BATCH_SIZE = 3000
+HOJAS_GESTION_ARANCELES = [
+    "ARMADA _ Arancel Consolidado [Clientes Sector Público] - PRESTACIONES 2026",
+    "ISL_Arancel Consolidado_Providencia - PROVIDENCIA",
+    "ISL_Arancel Consolidado_Valparaíso - VALPARAISO",
+    "ISL_Arancel Consolidado_Magallanes - MAGALLANES",
+    "Maestro Aranceles RedSalud. - Trazabilidad",
+    "ISL_Arancel Consolidado_CMD - CMD",
+    "ISL_Arancel Consolidado_Elqui - ELQUI",
+    "DIPRECA_2026_Prestaciones",
+    "DIPRECA_2026_Paquetes",
+    "DIPRECA_2026_HMQ",
+    "ISL_Arancel Consolidado_Iquique - IQUIQUE",
+    "ISL_Arancel Consolidado_Santiago - SANTIAGO",
+    "ISL_Arancel Consolidado_Rancagua - RANCAGUA",
+    "ISL_Arancel Consolidado_Temuco - TEMUCO",
+]
 
-# Filtrar solo año vigente (True = descarta vigencias vencidas 2023-2025 de ISL para ahorrar celdas)
-SOLO_VIGENCIA_2026 = True
-
-# 2. Esquema estándar calibrado de 39 columnas (incluye código_fonasa, código_dipreca y código_prestador separados)
-COLUMNAS_CALIBRADAS = [
+ENCABEZADOS_RAW_INGESTA = [
     "filial",
     "sociedad",
     "cliente",
@@ -36,65 +43,83 @@ COLUMNAS_CALIBRADAS = [
     "año",
     "tipo_arancel [origen]",
     "código_redsalud [no TC]",
-    "código",
-    "_cliente",
+    "código_cliente",
     "código_fonasa",
-    "código_dipreca",
-    "código_prestador",
-    "glosa prestación",
-    "tipo prestación",
+    "glosa_prestación",
+    "tipo_prestación",
     "Indexador",
     "precio_total",
     "ámbito",
     "recargo",
     "%_recargo",
-    "vigencia desde",
+    "vigencia_desde",
     "vigencia_hasta",
-    "id_convenio",
-    "cliente Convenio_redsalud",
-    "códig",
-    "lugar_his",
-    "Valor Ambulatorio Hábil 2026",
-    "Tipo de arancel ambulatorio Hábil",
-    "Valor Ambulatorio Inhábil 2026",
-    "Tipo de arancel ambulatorio Inhábil",
-    "Valor Hospitalizado Hábil 2026",
-    "Tipo de arancel hospitalizado Hábil",
-    "Valor Hospitalizado Inhábil 2026",
-    "Tipo de arancel hospitalizado Inhábil",
-    "Valor de Urgencia Hábil 2026",
-    "Tipo de arancel urgencia Hábil",
-    "Valor de Urgencia Inhábil 2026",
-    "Tipo de arancel urgencia Inhábil"
+    "id_convenio_cliente",
+    "Convenio_redsalud",
+    "código_lugar_his",
 ]
 
-HOJAS_DIPRECA = ["2026_Prestaciones", "2026_Paquetes", "2026_HMQ"]
-
-COMPONENTES_HMQ_ORDEN = [
-    ("1º CIR", r"^1\s*[°ºo]?\s*cir"),
-    ("2º CIR", r"^2\s*[°ºo]?\s*cir"),
-    ("3º CIR", r"^3\s*[°ºo]?\s*cir"),
-    ("4º CIR", r"^4\s*[°ºo]?\s*cir"),
-    ("ANEST", r"^anest"),
-    ("ARSENALERA", r"^arsenal"),
+# Roles quirúrgicos HMQ para despivotado vertical
+ROLES_HMQ = [
+    ("1º CIR", ["1º CIR", "1° CIR", "1ER CIR", "PRIMER CIRUJANO", "CIRUJANO 1"]),
+    ("2º CIR", ["2º CIR", "2° CIR", "2DO CIR", "SEGUNDO CIRUJANO", "CIRUJANO 2"]),
+    ("3º CIR", ["3º CIR", "3° CIR", "3ER CIR", "TERCER CIRUJANO", "CIRUJANO 3"]),
+    ("4º CIR", ["4º CIR", "4° CIR", "4TO CIR", "CUARTO CIRUJANO", "CIRUJANO 4"]),
+    ("ANEST", ["ANEST", "ANESTESIA", "ANESTESISTA", "ANESTESIOLOGO"]),
+    ("ARSENALERA", ["ARSENALERA", "ARSENALERIA", "ARSENALERO"]),
 ]
 
-def normalizar_texto(texto):
-    s = str(texto).strip().lower()
-    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-    return re.sub(r"\s+", " ", s)
+# Alias flexibles para mapear encabezados de distintas hojas de gestión
+ALIAS_COLUMNAS = {
+    "filial": ["FILIAL", "CLINICA", "CLÍNICA", "SEDE_FILIAL"],
+    "sociedad": ["SOCIEDAD", "RAZON SOCIAL", "RAZÓN SOCIAL", "RUT SOCIEDAD"],
+    "cliente": ["CLIENTE", "INSTITUCION", "INSTITUCIÓN", "ORGANISMO", "MANDANTE"],
+    "contrato": ["CONTRATO", "NOMBRE CONTRATO", "CONVENIO"],
+    "id_licitación": ["ID_LICITACION", "ID_LICITACIÓN", "ID LICITACION", "CODIGO LICITACION", "CÓDIGO LICITACIÓN", "LICITACION"],
+    "centro": ["CENTRO", "CENTRO MEDICO", "CENTRO MÉDICO", "SEDE", "SUCURSAL"],
+    "año": ["AÑO", "ANO", "PERIODO"],
+    "tipo_arancel [origen]": ["TIPO_ARANCEL [ORIGEN]", "TIPO_ARANCEL", "TIPO ARANCEL", "ORIGEN"],
+    "código_redsalud [no TC]": ["CODIGO_REDSALUD [NO TC]", "CÓDIGO_REDSALUD [NO TC]", "CODIGO_REDSALUD", "CÓDIGO_REDSALUD", "COD_REDSALUD", "CODIGO REDSALUD", "CODIGO INTERNO"],
+    "código_cliente": ["CODIGO_CLIENTE", "CÓDIGO_CLIENTE", "COD_CLIENTE", "CODIGO CLIENTE", "HOMOLOGO"],
+    "código_fonasa": ["CODIGO_FONASA", "CÓDIGO_FONASA", "COD_FONASA", "CODIGO FONASA", "FONASA"],
+    "glosa_prestación": ["GLOSA_PRESTACION", "GLOSA_PRESTACIÓN", "GLOSA", "PRESTACION", "PRESTACIÓN", "NOMBRE PRESTACION", "DESCRIPCION", "DESCRIPCIÓN"],
+    "tipo_prestación": ["TIPO_PRESTACION", "TIPO_PRESTACIÓN", "TIPO PRESTACION", "CATEGORIA", "RUBRO", "GRUPO"],
+    "Indexador": ["INDEXADOR", "REAJUSTE", "MONEDA", "FACTOR"],
+    "precio_total": ["PRECIO_TOTAL", "PRECIO TOTAL", "VALOR TOTAL", "VALOR", "PRECIO", "ARANCEL", "TARIFA", "MONTO"],
+    "ámbito": ["AMBITO", "ÁMBITO", "MODALIDAD", "TIPO ATENCION", "TIPO ATENCIÓN"],
+    "recargo": ["RECARGO", "APLICA RECARGO", "TIPO RECARGO"],
+    "%_recargo": ["%_RECARGO", "% RECARGO", "PORCENTAJE RECARGO", "PORC_RECARGO"],
+    "vigencia_desde": ["VIGENCIA_DESDE", "VIGENCIA DESDE", "FECHA INICIO", "DESDE"],
+    "vigencia_hasta": ["VIGENCIA_HASTA", "VIGENCIA HASTA", "FECHA TERMINO", "FECHA TÉRMINO", "HASTA"],
+    "id_convenio_cliente": ["ID_CONVENIO_CLIENTE", "ID CONVENIO CLIENTE", "COD CONVENIO CLIENTE"],
+    "Convenio_redsalud": ["CONVENIO_REDSALUD", "CONVENIO REDSALUD", "CONVENIO HIS"],
+    "código_lugar_his": ["CODIGO_LUGAR_HIS", "CÓDIGO_LUGAR_HIS", "CODIGO LUGAR HIS", "LUGAR HIS", "CENTRO COSTO"],
+}
 
+CATALOGO_FILIALES = [
+    (["PROVIDENCIA"], "RS Providencia", "96.536.000-8"),
+    (["VALPARAISO", "VALPARAÍSO"], "RS Valparaíso", "96.543.000-6"),
+    (["MAGALLANES"], "RS Magallanes", "96.541.000-5"),
+    (["ELQUI"], "RS Elqui", "99.533.790-8"),
+    (["IQUIQUE"], "RS Iquique", "96.598.850-0"),
+    (["SANTIAGO"], "RS Santiago", "96.524.000-2"),
+    (["RANCAGUA"], "RS Rancagua", "96.542.000-0"),
+    (["TEMUCO"], "RS Mayor Temuco", "96.537.000-3"),
+    (["VITACURA"], "RS Vitacura", "78.053.560-1"),
+    (["CMD"], "Centros Médicos RedSalud", "96.856.000-2"),
+]
+
+# ==========================================
+# 2. UTILIDADES
+# ==========================================
 def obtener_cliente_gspread():
-    posibles = ["GCP_SA_KEY", "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS", "GCP_JSON"]
-    val = None
-    for k in posibles:
-        if k in os.environ and os.environ[k].strip():
-            val = os.environ[k].strip()
-            break
-            
+    posibles = [
+        "GCP_JSON_BASE64", "GCP_SERVICE_ACCOUNT", "GOOGLE_CREDENTIALS",
+        "GCP_JSON", "GCP_SA_KEY", "GCP_CREDENTIALS"
+    ]
+    val = next((os.environ[k].strip() for k in posibles if k in os.environ and os.environ[k].strip()), None)
     if not val:
-        raise ValueError("No se encontraron credenciales de Google Cloud en GitHub Secrets.")
-
+        raise ValueError("Sin credenciales GCP en el entorno.")
     try:
         pad = len(val) % 4
         if pad:
@@ -107,410 +132,195 @@ def obtener_cliente_gspread():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes))
+    return gspread.authorize(Credentials.from_service_account_info(creds_dict, scopes=scopes)), creds_dict.get("client_email", "SA")
 
-def limpiar_celda(v):
-    if v is None:
-        return ""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return ""
-    if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
-        return v.strftime("%d-%m-%Y")
-    txt = str(v).strip()
-    if txt.lower() in ("nan", "nat", "none", "<na>", "inf", "-inf"):
-        return ""
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})\s+00:00:00", txt)
-    if m:
-        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
-    return txt
+def norm_txt(s):
+    s = unicodedata.normalize("NFD", str(s or "")).encode("ascii", "ignore").decode("utf-8")
+    return re.sub(r"\s+", " ", s).strip().upper()
 
-def parsear_monto_entero(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+def limpiar_codigo_redsalud(val):
+    s = str(val or "").strip()
+    # Elimina etiquetas o sufijos tipo TC / [TC] / (TC)
+    s = re.sub(r"[\[\(\-]?\s*\bTC\b\s*[\]\)]?", "", s, flags=re.IGNORECASE).strip()
+    return s
+
+def parsear_monto(val):
+    if val is None or val == "":
         return 0
     if isinstance(val, (int, float)):
         return int(round(val))
-    limpio = re.sub(r"[^\d\-]", "", str(val).strip())
-    if not limpio or limpio == "-":
-        return 0
-    try:
-        return int(limpio)
-    except ValueError:
-        return 0
+    limpio = re.sub(r"[^\d]", "", str(val))
+    return int(limpio) if limpio else 0
 
-def extraer_filial_isl(nombre_archivo):
-    base = os.path.splitext(nombre_archivo)[0]
-    if " - " in base:
-        return base.split(" - ")[-1].strip().upper()
-    if "_" in base:
-        return base.split("_")[-1].strip().upper()
-    return ""
+def inferir_metadatos_hoja(nombre_hoja):
+    u = norm_txt(nombre_hoja)
+    cliente_def = ""
+    if u.startswith("ISL"):
+        cliente_def = "ISL"
+    elif "DIPRECA" in u:
+        cliente_def = "DIPRECA"
+    elif "ARMADA" in u:
+        cliente_def = "Armada de Chile"
 
-def mapear_a_esquema(df_raw, cliente_nombre, origen_etiqueta, nombre_archivo="", tipo_prestacion_fijo=""):
-    df_out = pd.DataFrame("", index=range(len(df_raw)), columns=COLUMNAS_CALIBRADAS)
-    
-    df_out["cliente"] = cliente_nombre
-    df_out["año"] = "2026"
-    df_out["tipo_arancel [origen]"] = origen_etiqueta
-    if tipo_prestacion_fijo:
-        df_out["tipo prestación"] = tipo_prestacion_fijo
+    filial_def, soc_def = "", ""
+    for claves, nom_f, rut_f in CATALOGO_FILIALES:
+        if any(c in u for c in claves):
+            filial_def, soc_def = nom_f, rut_f
+            break
 
-    if cliente_nombre == "ISL" and nombre_archivo:
-        df_out["filial"] = extraer_filial_isl(nombre_archivo)
+    anio_match = re.search(r"\b(202[4-9])\b", u)
+    anio_def = anio_match.group(1) if anio_match else ""
 
-    dest_norm = {normalizar_texto(col): col for col in COLUMNAS_CALIBRADAS}
-    cols_raw_norm = {normalizar_texto(c): c for c in df_raw.columns}
+    tipo_prest_def = ""
+    if "PAQUETE" in u:
+        tipo_prest_def = "Paquete"
+    elif "HMQ" in u:
+        tipo_prest_def = "HMQ"
 
-    # Reglas específicas para los archivos de ISL
-    if cliente_nombre == "ISL":
-        if "razon_social" in cols_raw_norm:
-            df_out["sociedad"] = df_raw[cols_raw_norm["razon_social"]]
-        if "codigo_prestacion" in cols_raw_norm:
-            col_cod = cols_raw_norm["codigo_prestacion"]
-            df_out["código"] = df_raw[col_cod]
-            df_out["código_prestador"] = df_raw[col_cod]
-            if "tipo_arancel" in cols_raw_norm:
-                col_ta = cols_raw_norm["tipo_arancel"]
-                mask_fonasa = df_raw[col_ta].astype(str).str.upper().str.contains("FONASA")
-                df_out.loc[mask_fonasa, "código_fonasa"] = df_raw.loc[mask_fonasa, col_cod]
-        if "glosa" in cols_raw_norm:
-            df_out["glosa prestación"] = df_raw[cols_raw_norm["glosa"]]
-        if "tipo_arancel" in cols_raw_norm:
-            col_ta = cols_raw_norm["tipo_arancel"]
-            df_out["tipo prestación"] = df_raw[col_ta]
-            df_out["Tipo de arancel ambulatorio Hábil"] = df_raw[col_ta]
-            df_out["Tipo de arancel hospitalizado Hábil"] = df_raw[col_ta]
-        if "valor_nuevo" in cols_raw_norm:
-            df_out["precio_total"] = df_raw[cols_raw_norm["valor_nuevo"]]
-            df_out["Valor Ambulatorio Hábil 2026"] = df_raw[cols_raw_norm["valor_nuevo"]]
-        if "valor_hospitalizado" in cols_raw_norm:
-            df_out["Valor Hospitalizado Hábil 2026"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
-            if df_out["precio_total"].replace("", pd.NA).isna().all():
-                df_out["precio_total"] = df_raw[cols_raw_norm["valor_hospitalizado"]]
-        if "tipo_recargo" in cols_raw_norm and "recargo" in cols_raw_norm:
-            col_tr = cols_raw_norm["tipo_recargo"]
-            col_rec = cols_raw_norm["recargo"]
-            mask_pct = df_raw[col_tr].astype(str).str.strip() == "%"
-            df_out.loc[mask_pct, "%_recargo"] = df_raw.loc[mask_pct, col_rec]
-            df_out.loc[~mask_pct, "recargo"] = df_raw.loc[~mask_pct, col_rec]
-        if "desde" in cols_raw_norm:
-            df_out["vigencia desde"] = df_raw[cols_raw_norm["desde"]]
-        if "hasta" in cols_raw_norm:
-            col_hasta = cols_raw_norm["hasta"]
-            df_out["vigencia_hasta"] = df_raw[col_hasta]
-            years = df_raw[col_hasta].astype(str).str.extract(r"^(\d{4})")[0].fillna("")
-            df_out["año"] = years.replace("", "2026")
-        if "id_convenio" in cols_raw_norm:
-            df_out["id_convenio"] = df_raw[cols_raw_norm["id_convenio"]].astype(str).str.replace(r"\.0$", "", regex=True)
-        return df_out
+    return {
+        "cliente": cliente_def,
+        "filial": filial_def,
+        "sociedad": soc_def,
+        "año": anio_def,
+        "tipo_prestación": tipo_prest_def
+    }
 
-    # Reglas generales para DIPRECA, ARMADA y Maestro RedSalud
-    for col_orig_real in df_raw.columns:
-        c_norm = normalizar_texto(col_orig_real)
+def mapear_indices_hoja(cabecera):
+    cab_norm = [norm_txt(c) for c in cabecera]
+    indices = {}
 
-        # 1. Separación explícita en 3 encabezados independientes: código_fonasa, código_dipreca y código_prestador
-        if "fonasa" in c_norm and any(k in c_norm for k in ["cod", "código"]):
-            df_out["código_fonasa"] = df_raw[col_orig_real]
-            continue
-        elif "dipreca" in c_norm and any(k in c_norm for k in ["cod", "código"]):
-            df_out["código_dipreca"] = df_raw[col_orig_real]
-            if df_out["código"].replace("", pd.NA).isna().all():
-                df_out["código"] = df_raw[col_orig_real]
-            continue
-        elif "prestador" in c_norm and any(k in c_norm for k in ["cod", "código"]):
-            df_out["código_prestador"] = df_raw[col_orig_real]
-            if df_out["código"].replace("", pd.NA).isna().all():
-                df_out["código"] = df_raw[col_orig_real]
-            continue
+    for col_dest, aliases in ALIAS_COLUMNAS.items():
+        aliases_norm = [norm_txt(a) for a in aliases]
+        idx_encontrado = None
+        # 1. Coincidencia exacta
+        for a in aliases_norm:
+            if a in cab_norm:
+                idx_encontrado = cab_norm.index(a)
+                break
+        # 2. Coincidencia parcial controlada si no hubo exacta
+        if idx_encontrado is None:
+            for a in aliases_norm:
+                if len(a) >= 5:
+                    for i, c in enumerate(cab_norm):
+                        if a in c:
+                            idx_encontrado = i
+                            break
+                if idx_encontrado is not None:
+                    break
+        if idx_encontrado is not None:
+            indices[col_dest] = idx_encontrado
 
-        # 2. Coincidencia exacta tras normalizar
-        if c_norm in dest_norm:
-            df_out[dest_norm[c_norm]] = df_raw[col_orig_real]
-            continue
-
-        # 3. Coincidencia flexible para los 12 campos de Valor / Tipo de arancel por ámbito y horario
-        if "ambulatorio" in c_norm and "inhabil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel ambulatorio Inhábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor Ambulatorio Inhábil 2026"] = df_raw[col_orig_real]
-            continue
-        elif "ambulatorio" in c_norm and "habil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel ambulatorio Hábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor Ambulatorio Hábil 2026"] = df_raw[col_orig_real]
-            continue
-        elif "hospitalizado" in c_norm and "inhabil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel hospitalizado Inhábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor Hospitalizado Inhábil 2026"] = df_raw[col_orig_real]
-            continue
-        elif "hospitalizado" in c_norm and "habil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel hospitalizado Hábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor Hospitalizado Hábil 2026"] = df_raw[col_orig_real]
-            continue
-        elif "urgencia" in c_norm and "inhabil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel urgencia Inhábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor de Urgencia Inhábil 2026"] = df_raw[col_orig_real]
-            continue
-        elif "urgencia" in c_norm and "habil" in c_norm:
-            if "tipo" in c_norm:
-                df_out["Tipo de arancel urgencia Hábil"] = df_raw[col_orig_real]
-            else:
-                df_out["Valor de Urgencia Hábil 2026"] = df_raw[col_orig_real]
-            continue
-
-        # 4. Coincidencia para los campos base
-        if any(k in c_norm for k in ["filial", "sede"]):
-            df_out["filial"] = df_raw[col_orig_real]
-        elif "sociedad" in c_norm or "razon" in c_norm:
-            df_out["sociedad"] = df_raw[col_orig_real]
-        elif "contrato" in c_norm:
-            df_out["contrato"] = df_raw[col_orig_real]
-        elif "licitacion" in c_norm:
-            df_out["id_licitación"] = df_raw[col_orig_real]
-        elif "centro" in c_norm or "unidad_negocio" in c_norm:
-            df_out["centro"] = df_raw[col_orig_real]
-        elif "fonasa" in c_norm:
-            df_out["código_fonasa"] = df_raw[col_orig_real]
-        elif "redsalud" in c_norm and ("cod" in c_norm or "no tc" in c_norm or "item" in c_norm):
-            df_out["código_redsalud [no TC]"] = df_raw[col_orig_real]
-        elif "convenio" in c_norm and "id" in c_norm:
-            df_out["id_convenio"] = df_raw[col_orig_real]
-        elif "convenio" in c_norm and "redsalud" in c_norm:
-            df_out["cliente Convenio_redsalud"] = df_raw[col_orig_real]
-        elif "lugar" in c_norm or "his" in c_norm:
-            df_out["lugar_his"] = df_raw[col_orig_real]
-        elif "indexador" in c_norm:
-            df_out["Indexador"] = df_raw[col_orig_real]
-        elif ("tipo" in c_norm and ("prestacion" in c_norm or "arancel" in c_norm)) and not tipo_prestacion_fijo:
-            df_out["tipo prestación"] = df_raw[col_orig_real]
-        elif any(k in c_norm for k in ["codigo", "cod_"]):
-            if "cliente" in c_norm:
-                df_out["_cliente"] = df_raw[col_orig_real]
-            elif df_out["código"].replace("", pd.NA).isna().all():
-                df_out["código"] = df_raw[col_orig_real]
-        elif any(k in c_norm for k in ["glosa", "prestacion", "descripcion"]):
-            if df_out["glosa prestación"].replace("", pd.NA).isna().all():
-                df_out["glosa prestación"] = df_raw[col_orig_real]
-        elif any(k in c_norm for k in ["precio", "total", "arancel", "valor", "tarifa"]):
-            if df_out["precio_total"].replace("", pd.NA).isna().all():
-                df_out["precio_total"] = df_raw[col_orig_real]
-        elif "ambito" in c_norm:
-            df_out["ámbito"] = df_raw[col_orig_real]
-        elif "%" in c_norm and "recargo" in c_norm:
-            df_out["%_recargo"] = df_raw[col_orig_real]
-        elif "recargo" in c_norm:
-            df_out["recargo"] = df_raw[col_orig_real]
-        elif "desde" in c_norm or "inicio" in c_norm:
-            df_out["vigencia desde"] = df_raw[col_orig_real]
-        elif "hasta" in c_norm or "fin" in c_norm or "termino" in c_norm:
-            df_out["vigencia_hasta"] = df_raw[col_orig_real]
-
-    df_out["tipo_arancel [origen]"] = origen_etiqueta
-    if df_out["cliente"].replace("", pd.NA).isna().all():
-        df_out["cliente"] = cliente_nombre
-    if df_out["año"].replace("", pd.NA).isna().all():
-        df_out["año"] = "2026"
-
-    return df_out
-
-def expandir_filas_hmq(df_raw, df_base_mapeado):
-    """
-    Despivota las columnas 1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST y ARSENALERA
-    de 2026_HMQ hacia filas individuales manteniendo intactas las 39 columnas calibradas.
-    """
-    cols_encontradas = []
-    col_suma_hmq = None
-
-    for col_orig in df_raw.columns:
-        c_norm = normalizar_texto(col_orig)
-        if "suma" in c_norm and "hmq" in c_norm:
-            col_suma_hmq = col_orig
-            continue
-        for etiqueta_std, patron in COMPONENTES_HMQ_ORDEN:
-            if re.search(patron, c_norm):
-                cols_encontradas.append((etiqueta_std, col_orig))
+    # Detectar columnas HMQ si existen
+    indices_hmq = {}
+    for rol_std, aliases_rol in ROLES_HMQ:
+        aliases_r_norm = [norm_txt(a) for a in aliases_rol]
+        for i, c in enumerate(cab_norm):
+            if any(ar == c or ar in c for ar in aliases_r_norm):
+                indices_hmq[rol_std] = i
                 break
 
-    # Si el archivo no tiene columnas de desglose quirúrgico, devolver mapeo estándar
-    if not cols_encontradas:
-        return df_base_mapeado
+    return indices, indices_hmq
 
-    filas_expandidas = []
-    for idx in range(len(df_raw)):
-        fila_base = df_base_mapeado.iloc[idx].to_dict()
-        suma_hmq_val = parsear_monto_entero(df_raw.iloc[idx][col_suma_hmq]) if col_suma_hmq else 0
+def obtener_celda(fila, idx_map, clave, default=""):
+    idx = idx_map.get(clave)
+    if idx is not None and idx < len(fila):
+        val = str(fila[idx]).strip()
+        if val:
+            return val
+    return default
 
-        componentes_fila = []
-        for etiqueta_std, col_orig in cols_encontradas:
-            monto_comp = parsear_monto_entero(df_raw.iloc[idx][col_orig])
-            if monto_comp > 0:
-                componentes_fila.append((etiqueta_std, monto_comp))
+# ==========================================
+# 3. PROCESAMIENTO Y DESPIVOTADO HMQ
+# ==========================================
+def procesar_hoja_arancel(ws):
+    nombre_hoja = ws.title.strip()
+    filas = ws.get_all_values()
+    if len(filas) < 2:
+        return []
 
-        if componentes_fila:
-            for etiqueta_std, monto_comp in componentes_fila:
-                nueva_fila = dict(fila_base)
-                nueva_fila["ámbito"] = nueva_fila["ámbito"] or "Hospitalizado"
-                nueva_fila["precio_total"] = monto_comp
-                nueva_fila["Valor Hospitalizado Hábil 2026"] = monto_comp
-                nueva_fila["Tipo de arancel hospitalizado Hábil"] = etiqueta_std
-                nueva_fila["Tipo de arancel ambulatorio Hábil"] = etiqueta_std
-                if suma_hmq_val > 0:
-                    nueva_fila["Valor Ambulatorio Hábil 2026"] = suma_hmq_val
-                filas_expandidas.append(nueva_fila)
-        else:
-            # Si todos los componentes vienen en 0 pero existe SUMA HMQ, conservar 1 fila con el total
-            if suma_hmq_val > 0:
-                fila_base["precio_total"] = suma_hmq_val
-                fila_base["Valor Hospitalizado Hábil 2026"] = suma_hmq_val
-                fila_base["Tipo de arancel hospitalizado Hábil"] = "SUMA HMQ"
-            filas_expandidas.append(fila_base)
-
-    return pd.DataFrame(filas_expandidas, columns=COLUMNAS_CALIBRADAS)
-
-def escribir_en_sheet(client, spreadsheet_id, nombre_hoja, df_datos, columnas_header=None):
-    if df_datos.empty:
-        print(f"Sin datos para escribir en '{nombre_hoja}'.")
-        return
-
-    ss = client.open_by_key(spreadsheet_id)
-    celdas_otras = sum(w.row_count * w.col_count for w in ss.worksheets() if w.title.strip().lower() != nombre_hoja.strip().lower())
-    print(f"Celdas ocupadas por otras pestañas en el libro: {celdas_otras:,}")
-
-    ws = None
-    objetivo = nombre_hoja.strip().lower()
-    for w in ss.worksheets():
-        if w.title.strip().lower() == objetivo:
-            ws = w
+    # Detectar fila de encabezados (fila 1 o fila 2 si hay título superior)
+    fila_cab_idx = 0
+    for r_i in range(min(4, len(filas))):
+        linea_u = " ".join(norm_txt(x) for x in filas[r_i])
+        if any(k in linea_u for k in ("FONASA", "GLOSA", "PRESTACION", "CODIGO", "PRECIO", "ARANCEL")):
+            fila_cab_idx = r_i
             break
-            
-    cols = columnas_header if columnas_header else list(df_datos.columns)
-    num_cols = len(cols)
-    if not ws:
-        ws = ss.add_worksheet(title=nombre_hoja, rows=10, cols=num_cols)
 
-    df_datos = df_datos.fillna("")
-    filas_sanitizadas = [[limpiar_celda(c) for c in fila] for fila in df_datos.values.tolist()]
-    matriz_final = [cols] + filas_sanitizadas
+    cabecera = filas[fila_cab_idx]
+    idx_map, indices_hmq = mapear_indices_hoja(cabecera)
+    meta = inferir_metadatos_hoja(nombre_hoja)
 
-    total_filas = len(matriz_final)
-    col_fin = gspread.utils.rowcol_to_a1(1, num_cols).replace("1", "")
+    es_hoja_hmq = ("HMQ" in norm_txt(nombre_hoja)) or (len(indices_hmq) >= 2)
+    registros_salida = []
 
-    print(f"Limpiando '{nombre_hoja}' y ajustando dimensiones ({total_filas} filas x {num_cols} cols)...")
-    ws.clear()
-    ws.resize(rows=2, cols=1)
-    ws.resize(rows=total_filas + 5, cols=num_cols)
-
-    for i in range(0, total_filas, BATCH_SIZE):
-        bloque = matriz_final[i:i + BATCH_SIZE]
-        f_inicio = 1 + i
-        f_termino = f_inicio + len(bloque) - 1
-        rango_bloque = f"A{f_inicio}:{col_fin}{f_termino}"
-        print(f"  [{nombre_hoja}] Escribiendo bloque {rango_bloque}...")
-        ws.update(range_name=rango_bloque, values=bloque)
-
-def leer_archivo_generico(ruta):
-    nombre_lower = ruta.lower()
-    if nombre_lower.endswith(".csv"):
-        try:
-            return pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8", dtype=object)
-        except Exception:
-            return pd.read_csv(ruta, sep=None, engine="python", encoding="latin1", dtype=object)
-    elif nombre_lower.endswith(".parquet"):
-        return pd.read_parquet(ruta)
-    else:
-        return pd.read_excel(ruta, dtype=object)
-
-def sincronizar_aranceles():
-    print("Iniciando consolidación calibrada de aranceles (39 columnas)...")
-    client = obtener_cliente_gspread()
-
-    for z in glob.glob(os.path.join(CARPETA_RAW, "*.zip")):
-        print(f"Descomprimiendo: {os.path.basename(z)}")
-        with zipfile.ZipFile(z, "r") as zip_ref:
-            zip_ref.extractall(CARPETA_RAW)
-        os.remove(z)
-
-    patron = os.path.join(CARPETA_RAW, "*")
-    archivos = [f for f in glob.glob(patron) if not os.path.basename(f).startswith(".") and os.path.isfile(f)]
-    print(f"Total archivos a procesar ({len(archivos)}): {[os.path.basename(x) for x in archivos]}")
-
-    if not archivos:
-        print("No hay archivos en data/raw para procesar.")
-        return
-
-    lista_dfs_convenios = []
-    lista_dfs_maestro_his = []
-
-    for f in archivos:
-        nombre_base = os.path.basename(f)
-        nombre_lower = nombre_base.lower()
-
-        if "consolidado_master" in nombre_lower or "master_2026" in nombre_lower:
-            print(f"Procesando Maestro HIS-FONASA: {nombre_base}")
-            df_m = leer_archivo_generico(f).drop_duplicates().fillna("")
-            lista_dfs_maestro_his.append(df_m)
-            print(f"  -> {len(df_m)} registros únicos preparados para '{HOJA_MAESTRO_HIS}'.")
+    for r in filas[fila_cab_idx + 1:]:
+        if not any(str(c).strip() for c in r):
             continue
 
-        if "dipreca" in nombre_lower and nombre_lower.endswith((".xlsx", ".xls")):
-            print(f"Procesando Excel DIPRECA: {nombre_base}")
-            xl = pd.ExcelFile(f)
-            for h_req in HOJAS_DIPRECA:
-                h_real = next((s for s in xl.sheet_names if s.strip().lower() == h_req.strip().lower()), None)
-                if h_real:
-                    df = pd.read_excel(xl, sheet_name=h_real, dtype=object)
-                    tipo = "HMQ" if "hmq" in h_real.lower() else ("Paquetes" if "paquetes" in h_real.lower() else "Prestaciones")
-                    df_cal = mapear_a_esquema(df, "DIPRECA", f"DIPRECA_{h_real}", nombre_base, tipo)
-                    if tipo == "HMQ":
-                        df_cal = expandir_filas_hmq(df, df_cal)
-                    lista_dfs_convenios.append(df_cal)
-                    print(f"  -> {h_real}: {len(df_cal)} filas mapeadas.")
-        else:
-            print(f"Procesando insumo: {nombre_base}")
-            df = leer_archivo_generico(f)
-            cliente = "ISL" if "isl" in nombre_lower else ("ARMADA" if "armada" in nombre_lower else ("Maestro RedSalud" if "maestro" in nombre_lower else nombre_base))
-            etiqueta = os.path.splitext(nombre_base)[0]
-            df_cal = mapear_a_esquema(df, cliente, etiqueta, nombre_base)
-            lista_dfs_convenios.append(df_cal)
-            filial_det = df_cal["filial"].iloc[0] if len(df_cal) > 0 and df_cal["filial"].iloc[0] else "General"
-            print(f"  -> {cliente} ({filial_det}): {len(df_cal)} filas mapeadas.")
+        glosa_base = obtener_celda(r, idx_map, "glosa_prestación")
+        cod_rs = limpiar_codigo_redsalud(obtener_celda(r, idx_map, "código_redsalud [no TC]"))
+        cod_cli = obtener_celda(r, idx_map, "código_cliente")
+        cod_fon = obtener_celda(r, idx_map, "código_fonasa")
 
-    if lista_dfs_convenios:
-        df_total = pd.concat(lista_dfs_convenios, ignore_index=True)
-        
-        if SOLO_VIGENCIA_2026:
-            antes = len(df_total)
-            df_total = df_total[df_total["año"].astype(str).str.strip().isin(["2026", ""])].copy()
-            print(f"Filtro vigencia 2026 aplicado: {antes} -> {len(df_total)} filas activas.")
+        # Saltar filas vacías o subtotales sin prestación ni código
+        if not glosa_base and not cod_rs and not cod_fon and not cod_cli:
+            continue
+        if norm_txt(glosa_base) in ("TOTAL", "SUBTOTAL", "GLOSA", "GLOSA_PRESTACION"):
+            continue
 
-        mascara_insumos = df_total["tipo prestación"].astype(str).str.upper().str.contains("M&I|INSUMO|FARMACO", regex=True)
-        
-        df_prestaciones = df_total[~mascara_insumos].copy()
-        df_insumos = df_total[mascara_insumos].copy()
+        filial = obtener_celda(r, idx_map, "filial", meta["filial"])
+        sociedad = obtener_celda(r, idx_map, "sociedad", meta["sociedad"])
+        cliente = obtener_celda(r, idx_map, "cliente", meta["cliente"])
+        contrato = obtener_celda(r, idx_map, "contrato")
+        id_lic = obtener_celda(r, idx_map, "id_licitación")
+        centro = obtener_celda(r, idx_map, "centro")
+        anio = obtener_celda(r, idx_map, "año", meta["año"])
+        # Trazabilidad exacta de la hoja de gestión
+        tipo_arancel_origen = nombre_hoja
+        tipo_prest = obtener_celda(r, idx_map, "tipo_prestación", meta["tipo_prestación"])
+        indexador = obtener_celda(r, idx_map, "Indexador")
+        ambito = obtener_celda(r, idx_map, "ámbito")
+        recargo = obtener_celda(r, idx_map, "recargo")
+        porc_recargo = obtener_celda(r, idx_map, "%_recargo")
+        vig_desde = obtener_celda(r, idx_map, "vigencia_desde")
+        vig_hasta = obtener_celda(r, idx_map, "vigencia_hasta")
+        id_conv_cli = obtener_celda(r, idx_map, "id_convenio_cliente")
+        conv_rs = obtener_celda(r, idx_map, "Convenio_redsalud")
+        cod_lugar_his = obtener_celda(r, idx_map, "código_lugar_his")
 
-        print("=== RESUMEN CONSOLIDACIÓN ===")
-        print(f"Prestaciones Clínicas (destinado a {HOJA_PRESTACIONES}): {len(df_prestaciones)} filas")
-        print(f"Materiales e Insumos M&I (separados): {len(df_insumos)} filas")
+        # Caso A: Despivotado vertical HMQ (1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST, ARSENALERA)
+        if es_hoja_hmq and indices_hmq:
+            roles_con_valor = []
+            for rol_nombre, col_i in indices_hmq.items():
+                if col_i < len(r):
+                    monto_rol = parsear_monto(r[col_i])
+                    if monto_rol > 0:
+                        roles_con_valor.append((rol_nombre, monto_rol))
 
-        escribir_en_sheet(client, SPREADSHEET_ID_PRESTACIONES, HOJA_PRESTACIONES, df_prestaciones, COLUMNAS_CALIBRADAS)
+            if roles_con_valor:
+                for rol_nombre, monto_rol in roles_con_valor:
+                    glosa_rol = f"{glosa_base} - {rol_nombre}".strip(" -")
+                    registros_salida.append([
+                        filial, sociedad, cliente, contrato, id_lic, centro, anio,
+                        tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_rol,
+                        "HMQ", indexador, monto_rol, ambito, recargo, porc_recargo,
+                        vig_desde, vig_hasta, id_conv_cli, conv_rs, cod_lugar_his
+                    ])
+                continue
 
-        if SPREADSHEET_ID_INSUMOS.strip():
-            escribir_en_sheet(client, SPREADSHEET_ID_INSUMOS.strip(), HOJA_INSUMOS, df_insumos, COLUMNAS_CALIBRADAS)
-        else:
-            print("Nota: SPREADSHEET_ID_INSUMOS vacío; los ítems M&I se mantuvieron excluidos de la hoja principal.")
+        # Caso B: Prestación estándar (fila única)
+        precio = parsear_monto(obtener_celda(r, idx_map, "precio_total"))
+        registros_salida.append([
+            filial, sociedad, cliente, contrato, id_lic, centro, anio,
+            tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_base,
+            tipo_prest, indexador, precio, ambito, recargo, porc_recargo,
+            vig_desde, vig_hasta, id_conv_cli, conv_rs, cod_lugar_his
+        ])
 
-    if lista_dfs_maestro_his:
-        df_maestro_final = pd.concat(lista_dfs_maestro_his, ignore_index=True).drop_duplicates()
-        escribir_en_sheet(client, SPREADSHEET_ID_PRESTACIONES, HOJA_MAESTRO_HIS, df_maestro_final, list(df_maestro_final.columns))
+    return registros_salida
 
-    print("Consolidación finalizada con éxito.")
-
-if __name__ == "__main__":
-    sincronizar_aranceles()
+# ==========================================
+# 4. ORQUESTADOR PRINCIPAL
+# ==========================================
+def consolidar_aranceles():
+    print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES -> RAW_Data_Ingesta ===", flush=True)
