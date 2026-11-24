@@ -14,6 +14,9 @@ SPREADSHEET_ID_CONTRATOS = "1kiOFcktRWHeXAOzCwLqPMzu1py0mGlANmvNogFCDbRE".strip(
 NOMBRE_HOJA_CONTRATOS = "consolidado"
 FILA_INICIO_OBJETIVO = 435
 
+# Interruptor de control: True = detiene la actualización de 'consolidado' | False = activo
+PAUSAR_CONSOLIDADO_CONTRATOS = True
+
 LICITALAB_TOKEN = (
     os.environ.get("LICITALAB_TOKEN") or 
     os.environ.get("LICITALAB_API_KEY") or 
@@ -33,7 +36,6 @@ LICITALAB_API_URL = os.environ.get(
 ).strip()
 
 # 2. CATALOGO ESTRICTO DE RUTS Y FILIALES OFICIALES REDSALUD
-# Solo se aceptan licitaciones adjudicadas a estos RUTs del holding RedSalud
 MAPA_RUT_FILIAL_REDSALUD = {
     "99533790": ("Clínica RedSalud Elqui", "99.533.790-8"),
     "96543000": ("Clínica RedSalud Valparaíso", "96.543.000-6"),
@@ -55,7 +57,6 @@ MAPA_RUT_FILIAL_REDSALUD = {
 
 RUTS_REDSALUD_WHITELIST = set(MAPA_RUT_FILIAL_REDSALUD.keys())
 
-# Lista de códigos a auditar contra API (solo entran si Mercado Público confirma RUT RedSalud)
 CODIGOS_AUDITAR_REDSALUD = [
     "2145-65-LE26", "2704-72-LE26", "2548-81-LE26", "1057489-264-LE26",
     "2101-140-LE26", "5594-10-LR26", "1057404-77-LR26",
@@ -67,7 +68,7 @@ CODIGOS_AUDITAR_REDSALUD = [
 ]
 
 LICITACIONES_DESCARTADAS_EXPLICITAS = {
-    "3934-20-L126", "2704-58-L126", # Competidores: U. Mayor (76.046.416-3) y Sanatorio Alemán (88.611.600-4)
+    "3934-20-L126", "2704-58-L126",
     "1464-65-LE26", "3283-9-LE26", "359-115-LE26", "2770-153-LE26",
     "2378-118-LE26", "1063538-37-LR26", "899-58-LE25", "899-27-LE26",
     "1374899-22-LR26", "1017312-1-LP26", "1057540-23-LP26", "1057508-16-LE26",
@@ -98,26 +99,44 @@ def normalizar_tipo_proceso(tipo_raw, codigo):
     t, c = str(tipo_raw).strip().upper(), str(codigo).strip().upper()
     return "Compra Ágil" if ("AGIL" in t or "ÁGIL" in t or "COT" in c) else "Licitación Pública"
 
-# 4. CONSULTAS API MERCADO PUBLICO Y LICITALAB (FILTRANDO SOLO LINEAS ADJUDICADAS A REDSALUD)
+# 4. VALIDACION RAPIDA EN MEMORIA + CONSULTAS API PUNTUALES
 def extraer_rut_base(rut_str):
     m = re.search(r"(\d{1,2}\.?\d{3}\.?\d{3})-[\dkK]", str(rut_str))
     return re.sub(r"[^0-9]", "", m.group(1)) if m else ""
 
 def es_proveedor_redsalud(rut_str, nombre_str=""):
-    r_base = extraer_rut_base(rut_str)
-    if r_base and r_base in RUTS_REDSALUD_WHITELIST:
-        return True
+    for r_raw in re.findall(r"(\d{1,2}\.?\d{3}\.?\d{3})-[\dkK]", str(rut_str)):
+        r_base = re.sub(r"[^0-9]", "", r_raw)
+        if r_base in RUTS_REDSALUD_WHITELIST:
+            return True
     nom_u = str(nombre_str).upper()
     if any(bad in nom_u for bad in ["SANATORIO ALEMAN", "UNIVERSIDAD MAYOR", "FALP", "ATRYS", "RUBIKAL", "BARLARO", "APSORAD", "INGEFISIC"]):
         return False
     return bool(re.search(r"\bRED\s*SALUD\b|MEGASALUD|INVERSALUD|ESPECIALIDADES\s*MEDICAS\s*VALPARAISO|CLINICA\s*REGIONAL\s*DEL\s*ELQUI", nom_u))
+
+def es_candidato_a_consultar_api(fila, cod_u, set_auditar):
+    if cod_u in set_auditar:
+        return True
+
+    adj_raw = str(fila[11]).strip()
+    if adj_raw:
+        return es_proveedor_redsalud(adj_raw, adj_raw)
+
+    texto_fila = f"{fila[2]} {fila[3]} {fila[8]}".upper()
+    palabras_salud = (
+        "SALUD", "HOSPITAL", "CLINIC", "CLÍNIC", "MEDIC", "MÉDIC", "EXAMEN", "EXÁMEN",
+        "LABORATORIO", "IMAGEN", "SCANNER", "RESONANCIA", "ENDOSCOP", "CIRUG", "QUIRURG",
+        "QUIRÚRG", "DENTAL", "ODONTOL", "KINESIOL", "ONCOL", "QUIMIOTERAPIA", "BIOPSIA",
+        "CONSULTA", "ESPECIALIDAD", "MAMOGRAF", "ECOGRAF", "DIALISIS", "DIÁLISIS", "GES", "FONASA"
+    )
+    return any(p in texto_fila for p in palabras_salud)
 
 def consultar_detalle_mercado_publico(codigo_lic):
     if not MERCADOPUBLICO_TICKET:
         return None
     url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
     try:
-        resp = requests.get(url, params={"codigo": codigo_lic, "ticket": MERCADOPUBLICO_TICKET}, timeout=25)
+        resp = requests.get(url, params={"codigo": codigo_lic, "ticket": MERCADOPUBLICO_TICKET}, timeout=15)
         if resp.status_code == 200:
             listado = resp.json().get("Listado") or []
             if listado and isinstance(listado, list):
@@ -166,7 +185,7 @@ def consultar_detalle_licitalab(codigo_lic):
     headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json", "User-Agent": "RedSalud-Sync/1.0"}
     for pk in ("code", "search", "q"):
         try:
-            resp = requests.get(LICITALAB_API_URL, headers=headers, params={pk: codigo_lic}, timeout=20)
+            resp = requests.get(LICITALAB_API_URL, headers=headers, params={pk: codigo_lic}, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data if isinstance(data, list) else (data.get("data") or data.get("opportunities") or data.get("items") or [])
@@ -209,7 +228,7 @@ def actualizar_base_madre_licitalab(sheet_maestra):
     headers = {"x-api-key": LICITALAB_TOKEN, "Accept": "application/json", "User-Agent": "RedSalud-Sync/1.0"}
     fecha_delta = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00Z")
     try:
-        resp = requests.get(LICITALAB_API_URL, headers=headers, params={"since": fecha_delta}, timeout=40)
+        resp = requests.get(LICITALAB_API_URL, headers=headers, params={"since": fecha_delta}, timeout=30)
         if resp.status_code != 200:
             print(f"Error LicitaLAB HTTP {resp.status_code}", flush=True)
             return
@@ -290,12 +309,10 @@ def clasificar_categoria_cliente(comprador):
 def determinar_filial_por_rut_y_zona(cat, reg, comp, adj_redsalud=""):
     adj_u, comp_u, reg_u, cat_u = str(adj_redsalud).upper(), str(comp).upper(), str(reg).upper(), str(cat).upper()
 
-    # 1. PRIORIDAD ABSOLUTA: RUT exacto del proveedor RedSalud que ganó la línea
     for r_raw in re.findall(r"\b(\d{1,2}\.?\d{3}\.?\d{3})-[\dkK]\b", adj_u):
         r_base = re.sub(r"[^0-9]", "", r_raw)
         if r_base in MAPA_RUT_FILIAL_REDSALUD:
             filial_nombre, filial_rut = MAPA_RUT_FILIAL_REDSALUD[r_base]
-            # Si es el RUT transversal de Centros Médicos RedSalud (96.856.000-2), precisar ciudad/región
             if r_base == "96856000":
                 if "IQUIQUE" in reg_u or "TARAPAC" in reg_u or "IQUIQUE" in comp_u:
                     return "Centros Médicos RedSalud Iquique", "96.856.000-2"
@@ -316,7 +333,6 @@ def determinar_filial_por_rut_y_zona(cat, reg, comp, adj_redsalud=""):
                 return "Centros Médicos RedSalud Santiago", "96.856.000-2"
             return filial_nombre, filial_rut
 
-    # 2. Razón social del proveedor RedSalud adjudicado
     if "ELQUI" in adj_u:
         return "Clínica RedSalud Elqui", "99.533.790-8"
     if "INVERSALUD" in adj_u or "ESPECIALIDADES MEDICAS VALPARAISO" in adj_u:
@@ -336,7 +352,6 @@ def determinar_filial_por_rut_y_zona(cat, reg, comp, adj_redsalud=""):
     if "DENTAL" in adj_u or "DENTAL" in cat_u:
         return "RedSalud Dental SpA", "76.458.120-3"
 
-    # 3. Respaldo por Región del comprador si el texto solo dice "RedSalud"
     if "COQUIMBO" in reg_u or "SERENA" in comp_u or "ELQUI" in comp_u:
         return "Clínica RedSalud Elqui", "99.533.790-8"
     if "VALPARA" in reg_u or "VIÑA" in comp_u:
@@ -391,9 +406,9 @@ def construir_fila_consolidado(codigo, comprador, rut_comprador, region, categor
         "", "", 12, monto, "", "", "", "En gestión", "Sí", ""
     ]
 
-# 7. ORQUESTADOR CON VERIFICACION ESTRICTA DE GANADOR REDSALUD
+# 7. ORQUESTADOR RAPIDO CON PRE-FILTRO LOCAL
 def sincronizar_todo():
-    print("=== INICIANDO SINCRONIZADOR CALIBRADO LICITALAB -> REDSALUD ===", flush=True)
+    print("=== INICIANDO SINCRONIZADOR OPTIMIZADO LICITALAB -> REDSALUD ===", flush=True)
     client, sa_email = obtener_cliente_gspread()
     print(f"Autenticado como: {sa_email}", flush=True)
 
@@ -401,7 +416,11 @@ def sincronizar_todo():
     sheet_maestra = ss_maestra.sheet1
     actualizar_base_madre_licitalab(sheet_maestra)
 
-    print("--- FASE 2: Auditando y sincronizando adjudicaciones reales RedSalud ---", flush=True)
+    if PAUSAR_CONSOLIDADO_CONTRATOS:
+        print("AVISO: Actualización de pestaña 'consolidado' detenida por configuración (PAUSAR_CONSOLIDADO_CONTRATOS=True).", flush=True)
+        return
+
+    print("--- FASE 2: Pre-filtrando y verificando adjudicaciones reales RedSalud ---", flush=True)
     valores_maestra = sheet_maestra.get_all_values()
     ss_contratos = client.open_by_key(SPREADSHEET_ID_CONTRATOS)
     ws_contratos = next((w for w in ss_contratos.worksheets() if w.title.strip().lower() == NOMBRE_HOJA_CONTRATOS.lower()), None)
@@ -415,7 +434,9 @@ def sincronizar_todo():
         if len(row) > 7 and row[7].strip():
             ids_historicos.add(row[7].strip().upper())
 
+    set_auditar = {x.strip().upper() for x in CODIGOS_AUDITAR_REDSALUD}
     candidatos = {}
+
     for r in valores_maestra[1:]:
         fila = list(r) + [""] * (25 - len(r))
         cod_u = extraer_id_licitacion(fila, 1)
@@ -423,30 +444,34 @@ def sincronizar_todo():
             continue
         if "AGIL" in fila[7].upper() or "COT" in cod_u:
             continue
-        if "ADJUDICADA" in fila[10].upper() or cod_u in CODIGOS_AUDITAR_REDSALUD:
-            candidatos[cod_u] = {
-                "comprador": fila[8].strip(),
-                "region": fila[9].strip(),
-                "categoria": fila[3].strip(),
-                "prestacion": extraer_prestacion(fila, 2),
-                "monto": fila[12].strip(),
-                "adj_raw": fila[11].strip()
-            }
+        if "ADJUDICADA" not in fila[10].upper() and cod_u not in set_auditar:
+            continue
+        if not es_candidato_a_consultar_api(fila, cod_u, set_auditar):
+            continue
 
-    for c_audit in CODIGOS_AUDITAR_REDSALUD:
-        cu = c_audit.strip().upper()
+        candidatos[cod_u] = {
+            "comprador": fila[8].strip(),
+            "region": fila[9].strip(),
+            "categoria": fila[3].strip(),
+            "prestacion": extraer_prestacion(fila, 2),
+            "monto": fila[12].strip(),
+            "adj_raw": fila[11].strip()
+        }
+
+    for cu in set_auditar:
         if cu not in ids_historicos and cu not in LICITACIONES_DESCARTADAS_EXPLICITAS and cu not in candidatos:
             candidatos[cu] = {"comprador": "", "region": "", "categoria": "Salud", "prestacion": "", "monto": "", "adj_raw": ""}
 
+    print(f"Candidatos pre-filtrados a verificar en API: {len(candidatos)}", flush=True)
+
     filas_nuevas = []
     for cod_u, base_info in candidatos.items():
-        # Verificar siempre contra API de Mercado Público / LicitaLAB quién ganó realmente
         det = consultar_detalle_mercado_publico(cod_u) or consultar_detalle_licitalab(cod_u)
-        time.sleep(0.35)
+        time.sleep(0.25)
 
         if det:
             if not det.get("ganador_redsalud"):
-                print(f"DESCARTADA ({cod_u}): Adjudicada a competidor -> {det.get('adjudicatario_otros')}", flush=True)
+                print(f"DESCARTADA ({cod_u}): Adjudicada a tercero -> {det.get('adjudicatario_otros')}", flush=True)
                 continue
 
             comprador = det.get("comprador") or base_info["comprador"]
@@ -458,7 +483,6 @@ def sincronizar_todo():
             print(f"CONFIRMADA ({cod_u}): Ganador RedSalud -> {adj_rs} | Monto: {monto}", flush=True)
             filas_nuevas.append(construir_fila_consolidado(cod_u, comprador, rut_comp, region, base_info["categoria"], prestacion, monto, adj_rs))
         else:
-            # Respaldo solo si la Base Madre ya tiene explícitamente un RUT RedSalud verificado
             if es_proveedor_redsalud(base_info["adj_raw"], base_info["adj_raw"]):
                 filas_nuevas.append(construir_fila_consolidado(cod_u, base_info["comprador"], "", base_info["region"], base_info["categoria"], base_info["prestacion"], base_info["monto"], base_info["adj_raw"]))
 
