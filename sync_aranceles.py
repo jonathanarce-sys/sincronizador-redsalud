@@ -9,13 +9,14 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. CONFIGURACIÓN Y ESQUEMA DE 23 COLUMNAS
 # ==========================================
-# Si tienes el ID exacto del Google Sheet de Aranceles, puedes pegarlo aquí entre comillas.
-# Si lo dejas vacío (""), el script buscará automáticamente en Drive el libro que contiene las hojas de aranceles.
-SPREADSHEET_ID_ARANCELES = os.environ.get("SPREADSHEET_ID_ARANCELES", "").strip()
+SPREADSHEET_ID_DESTINO = os.environ.get(
+    "SPREADSHEET_ID_ARANCELES",
+    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
+).strip()
 
 HOJA_DESTINO = "RAW_Data_Ingesta"
 
-HOJAS_GESTION_ARANCELES = [
+FUENTES_ARANCELES = [
     "ARMADA _ Arancel Consolidado [Clientes Sector Público] - PRESTACIONES 2026",
     "ISL_Arancel Consolidado_Providencia - PROVIDENCIA",
     "ISL_Arancel Consolidado_Valparaíso - VALPARAISO",
@@ -135,28 +136,6 @@ def norm_txt(s):
     s = unicodedata.normalize("NFD", str(s or "")).encode("ascii", "ignore").decode("utf-8")
     return re.sub(r"\s+", " ", s).strip().upper()
 
-def abrir_planilla_aranceles(client):
-    if SPREADSHEET_ID_ARANCELES:
-        return client.open_by_key(SPREADSHEET_ID_ARANCELES)
-
-    print("Buscando automáticamente la planilla de Aranceles compartida con la Service Account...", flush=True)
-    hojas_objetivo_norm = {norm_txt(h) for h in HOJAS_GESTION_ARANCELES}
-    mejor_ss = None
-    max_coincidencias = 0
-
-    for ss_cand in client.openall():
-        titulos = {norm_txt(w.title) for w in ss_cand.worksheets()}
-        coincidencias = len(titulos.intersection(hojas_objetivo_norm))
-        if coincidencias > max_coincidencias:
-            max_coincidencias = coincidencias
-            mejor_ss = ss_cand
-
-    if mejor_ss and max_coincidencias > 0:
-        print(f"Planilla detectada: '{mejor_ss.title}' (ID: {mejor_ss.id}) con {max_coincidencias} hojas de gestión.", flush=True)
-        return mejor_ss
-
-    raise ValueError("No se encontró ninguna planilla con las hojas de gestión de aranceles. Configura SPREADSHEET_ID_ARANCELES.")
-
 def limpiar_codigo_redsalud(val):
     s = str(val or "").strip()
     s = re.sub(r"[\[\(\-]?\s*\bTC\b\s*[\]\)]?", "", s, flags=re.IGNORECASE).strip()
@@ -170,8 +149,8 @@ def parsear_monto(val):
     limpio = re.sub(r"[^\d]", "", str(val))
     return int(limpio) if limpio else 0
 
-def inferir_metadatos_hoja(nombre_hoja):
-    u = norm_txt(nombre_hoja)
+def inferir_metadatos_fuente(nombre_fuente):
+    u = norm_txt(nombre_fuente)
     cliente_def = ""
     if u.startswith("ISL"):
         cliente_def = "ISL"
@@ -247,8 +226,7 @@ def obtener_celda(fila, idx_map, clave, default=""):
 # ==========================================
 # 3. PROCESAMIENTO Y DESPIVOTADO HMQ
 # ==========================================
-def procesar_hoja_arancel(ws):
-    nombre_hoja = ws.title.strip()
+def procesar_worksheet(ws, etiqueta_origen):
     filas = ws.get_all_values()
     if len(filas) < 2:
         return []
@@ -262,9 +240,9 @@ def procesar_hoja_arancel(ws):
 
     cabecera = filas[fila_cab_idx]
     idx_map, indices_hmq = mapear_indices_hoja(cabecera)
-    meta = inferir_metadatos_hoja(nombre_hoja)
+    meta = inferir_metadatos_fuente(etiqueta_origen)
 
-    es_hoja_hmq = ("HMQ" in norm_txt(nombre_hoja)) or (len(indices_hmq) >= 2)
+    es_hoja_hmq = ("HMQ" in norm_txt(etiqueta_origen)) or (len(indices_hmq) >= 2)
     registros_salida = []
 
     for r in filas[fila_cab_idx + 1:]:
@@ -288,7 +266,7 @@ def procesar_hoja_arancel(ws):
         id_lic = obtener_celda(r, idx_map, "id_licitación")
         centro = obtener_celda(r, idx_map, "centro")
         anio = obtener_celda(r, idx_map, "año", meta["año"])
-        tipo_arancel_origen = nombre_hoja
+        tipo_arancel_origen = etiqueta_origen
         tipo_prest = obtener_celda(r, idx_map, "tipo_prestación", meta["tipo_prestación"])
         indexador = obtener_celda(r, idx_map, "Indexador")
         ambito = obtener_celda(r, idx_map, "ámbito")
@@ -330,32 +308,70 @@ def procesar_hoja_arancel(ws):
     return registros_salida
 
 # ==========================================
-# 4. ORQUESTADOR PRINCIPAL
+# 4. ORQUESTADOR MULTI-ARCHIVO EN DRIVE
 # ==========================================
 def consolidar_aranceles():
     print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES -> RAW_Data_Ingesta (23 COLS) ===", flush=True)
     client, sa_email = obtener_cliente_gspread()
     print(f"Autenticado como: {sa_email}", flush=True)
 
-    ss = abrir_planilla_aranceles(client)
-    mapa_hojas = {w.title.strip(): w for w in ss.worksheets()}
+    libros_drive = client.openall()
+    print(f"Archivos compartidos visibles en Drive para la Service Account: {len(libros_drive)}", flush=True)
+    for lb in libros_drive:
+        print(f"  * Libro disponible: '{lb.title}' (ID: {lb.id})", flush=True)
+
+    # Buscar destino donde está RAW_Data_Ingesta
+    ss_dest = None
+    ws_dest = None
+    for lb in libros_drive:
+        w = next((x for x in lb.worksheets() if norm_txt(x.title) == norm_txt(HOJA_DESTINO)), None)
+        if w:
+            ss_dest = lb
+            ws_dest = w
+            break
+    if not ss_dest:
+        ss_dest = client.open_by_key(SPREADSHEET_ID_DESTINO)
+        ws_dest = ss_dest.add_worksheet(title=HOJA_DESTINO, rows=500, cols=len(ENCABEZADOS_RAW_INGESTA))
+
+    print(f"Destino seleccionado: '{ss_dest.title}' -> pestaña '{ws_dest.title}'", flush=True)
 
     todas_las_filas = []
-    for nombre_hoja in HOJAS_GESTION_ARANCELES:
-        ws = mapa_hojas.get(nombre_hoja)
-        if not ws:
-            ws = next((w for w in ss.worksheets() if norm_txt(w.title) == norm_txt(nombre_hoja)), None)
-        if not ws:
-            print(f"  [AVISO] No se encontró la hoja: '{nombre_hoja}'", flush=True)
+    for fuente in FUENTES_ARANCELES:
+        f_norm = norm_txt(fuente)
+        # Separar posible nombre de archivo y pestaña ("Archivo - Pestaña")
+        partes = [p.strip() for p in fuente.split(" - ", 1)]
+        prefijo_archivo = norm_txt(partes[0])
+        sufijo_hoja = norm_txt(partes[1]) if len(partes) > 1 else ""
+
+        ws_encontrada = None
+        # 1. Buscar como pestaña exacta dentro de cualquier libro compartido
+        for lb in libros_drive:
+            for w in lb.worksheets():
+                w_norm = norm_txt(w.title)
+                if w_norm == f_norm or (sufijo_hoja and sufijo_hoja in w_norm and prefijo_archivo[:12] in norm_txt(lb.title)):
+                    ws_encontrada = w
+                    break
+            if ws_encontrada:
+                break
+
+        # 2. Si no apareció como pestaña, buscar como libro independiente cuyo título coincida con prefijo_archivo
+        if not ws_encontrada:
+            for lb in libros_drive:
+                lb_norm = norm_txt(lb.title)
+                if prefijo_archivo in lb_norm or lb_norm in f_norm:
+                    if sufijo_hoja:
+                        ws_encontrada = next((w for w in lb.worksheets() if sufijo_hoja in norm_txt(w.title)), lb.sheet1)
+                    else:
+                        ws_encontrada = lb.sheet1
+                    break
+
+        if not ws_encontrada:
+            print(f"  [AVISO] Fuente no encontrada en Drive (¿falta compartir?): '{fuente}'", flush=True)
             continue
 
-        filas_hoja = procesar_hoja_arancel(ws)
-        print(f"  -> {ws.title}: {len(filas_hoja)} registros procesados", flush=True)
-        todas_las_filas.extend(filas_hoja)
-
-    ws_dest = next((w for w in ss.worksheets() if norm_txt(w.title) == norm_txt(HOJA_DESTINO)), None)
-    if not ws_dest:
-        ws_dest = ss.add_worksheet(title=HOJA_DESTINO, rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
+        filas_f = procesar_worksheet(ws_encontrada, fuente)
+        print(f"  -> {fuente}: {len(filas_f)} registros procesados", flush=True)
+        todas_las_filas.extend(filas_f)
 
     ws_dest.clear()
     ws_dest.resize(rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
@@ -368,3 +384,4 @@ def consolidar_aranceles():
 
 if __name__ == "__main__":
     consolidar_aranceles()
+
