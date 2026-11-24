@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 CARPETA_RAW = os.environ.get("CARPETA_RAW", "data/raw").strip()
 HOJA_DESTINO = "RAW_Data_Ingesta"
-TAMANO_LOTE = 20000  # Filas por bloque para evitar error 500 de Google Sheets API
+TAMANO_LOTE = 20000
 
 SPREADSHEET_ID_ARANCELES = os.environ.get("SPREADSHEET_ID_ARANCELES", "").strip()
 
@@ -61,7 +61,7 @@ ALIAS_COLUMNAS = {
     "id_licitación": ["ID_LICITACION", "ID_LICITACIÓN", "ID LICITACION", "CODIGO LICITACION", "CÓDIGO LICITACIÓN", "LICITACION"],
     "centro": ["CENTRO", "CENTRO MEDICO", "CENTRO MÉDICO", "SEDE", "SUCURSAL"],
     "año": ["AÑO", "ANO", "PERIODO"],
-    "tipo_arancel [origen]": ["TIPO_ARANCEL [ORIGEN]", "TIPO_ARANCEL", "TIPO ARANCEL", "ORIGEN"],
+    "tipo_arancel [origen]": ["TIPO_ARANCEL [ORIGEN]", "TIPO_ARANCEL", "TIPO ARANCEL", "ORIGEN ARANCEL", "MODALIDAD ARANCEL"],
     "código_redsalud [no TC]": ["CODIGO_REDSALUD [NO TC]", "CÓDIGO_REDSALUD [NO TC]", "CODIGO_REDSALUD", "CÓDIGO_REDSALUD", "COD_REDSALUD", "CODIGO REDSALUD", "CODIGO INTERNO"],
     "código_cliente": ["CODIGO_CLIENTE", "CÓDIGO_CLIENTE", "COD_CLIENTE", "CODIGO CLIENTE", "HOMOLOGO"],
     "código_fonasa": ["CODIGO_FONASA", "CÓDIGO_FONASA", "COD_FONASA", "CODIGO FONASA", "FONASA"],
@@ -136,39 +136,61 @@ def parsear_monto(val):
     limpio = re.sub(r"[^\d]", "", str(val))
     return int(limpio) if limpio else 0
 
-def inferir_metadatos_fuente(nombre_fuente):
-    u = norm_txt(nombre_fuente)
+def inferir_metadatos_fuente(nombre_fuente, nombre_archivo_padre=""):
+    u = norm_txt(f"{nombre_archivo_padre} {nombre_fuente}")
+    u_fuente = norm_txt(nombre_fuente)
+
+    # 1. Cliente (incluye regla explícita DIPRECA para 2026_HMQ, 2026_Paquetes y 2026_Prestaciones)
     cliente_def = ""
-    if u.startswith("ISL"):
-        cliente_def = "ISL"
-    elif "DIPRECA" in u:
+    es_hoja_dipreca = any(k in u_fuente for k in ("2026_HMQ", "2026_PAQUETE", "2026_PRESTACION"))
+    if "DIPRECA" in u or es_hoja_dipreca:
         cliente_def = "DIPRECA"
+    elif u_fuente.startswith("ISL") or "ISL_" in u:
+        cliente_def = "ISL"
     elif "ARMADA" in u:
         cliente_def = "Armada de Chile"
     elif "JEAFOSALE" in u:
         cliente_def = "JEAFOSALE"
 
+    # 2. Filial y Sociedad
     filial_def, soc_def = "", ""
     for claves, nom_f, rut_f in CATALOGO_FILIALES:
         if any(c in u for c in claves):
             filial_def, soc_def = nom_f, rut_f
             break
 
+    # 3. Año
     anio_match = re.search(r"\b(202[4-9])\b", u)
     anio_def = anio_match.group(1) if anio_match else ""
 
+    # 4. Tipo de prestación
     tipo_prest_def = ""
-    if "PAQUETE" in u:
+    if "PAQUETE" in u_fuente:
         tipo_prest_def = "Paquete"
-    elif "HMQ" in u:
+    elif "HMQ" in u_fuente:
         tipo_prest_def = "HMQ"
+    elif "PRESTACION" in u_fuente:
+        tipo_prest_def = "Prestación"
+
+    # 5. Tipo de arancel [origen] (distinto al nombre del archivo de origen)
+    tipo_arancel_def = "Arancel Consolidado"
+    if "HMQ" in u_fuente:
+        tipo_arancel_def = "Arancel HMQ"
+    elif "PAQUETE" in u_fuente:
+        tipo_arancel_def = "Arancel Paquetes"
+    elif "PRESTACION" in u_fuente:
+        tipo_arancel_def = "Arancel Prestaciones"
+    elif "MAESTRO" in u_fuente or "TRAZABILIDAD" in u_fuente:
+        tipo_arancel_def = "Maestro Trazabilidad"
 
     return {
         "cliente": cliente_def,
         "filial": filial_def,
         "sociedad": soc_def,
         "año": anio_def,
-        "tipo_prestación": tipo_prest_def
+        "tipo_prestación": tipo_prest_def,
+        "tipo_arancel_def": tipo_arancel_def,
+        "forzar_cliente": es_hoja_dipreca
     }
 
 def mapear_columnas_df(columnas):
@@ -260,13 +282,13 @@ def escribir_en_lotes_con_reintento(ws, matriz, col_fin, tamano_lote=20000):
 # ==========================================
 # 3. PROCESAMIENTO DE DATAFRAME -> 23 COLUMNAS
 # ==========================================
-def procesar_dataframe(df_raw, etiqueta_origen):
+def procesar_dataframe(df_raw, etiqueta_origen, nombre_archivo_padre=""):
     df = ajustar_fila_encabezado_df(df_raw)
     if df.empty:
         return []
 
     mapa_cols, cols_hmq = mapear_columnas_df(list(df.columns))
-    meta = inferir_metadatos_fuente(etiqueta_origen)
+    meta = inferir_metadatos_fuente(etiqueta_origen, nombre_archivo_padre)
     es_hmq = ("HMQ" in norm_txt(etiqueta_origen)) or (len(cols_hmq) >= 2)
 
     registros = []
@@ -291,12 +313,24 @@ def procesar_dataframe(df_raw, etiqueta_origen):
 
         filial = val("filial", meta["filial"])
         sociedad = val("sociedad", meta["sociedad"])
-        cliente = val("cliente", meta["cliente"])
-        contrato = val("contrato")
+
+        # Cliente: si es 2026_HMQ, 2026_Paquetes o 2026_Prestaciones, siempre es DIPRECA
+        if meta["forzar_cliente"]:
+            cliente = "DIPRECA"
+        else:
+            cliente = val("cliente", meta["cliente"])
+
+        # Archivo/hoja de origen guardado en 'contrato' (si viene vacío) y respaldado en 'Convenio_redsalud'
+        contrato_raw = val("contrato")
+        contrato = contrato_raw if contrato_raw else etiqueta_origen
+
         id_lic = val("id_licitación")
         centro = val("centro")
         anio = val("año", meta["año"])
-        tipo_arancel_origen = val("tipo_arancel [origen]", etiqueta_origen)
+
+        # tipo_arancel [origen] distinto al nombre del archivo de origen
+        tipo_arancel_val = val("tipo_arancel [origen]", meta["tipo_arancel_def"])
+
         tipo_prest = val("tipo_prestación", meta["tipo_prestación"])
         indexador = val("Indexador")
         ambito = val("ámbito")
@@ -305,7 +339,8 @@ def procesar_dataframe(df_raw, etiqueta_origen):
         vig_desde = val("vigencia_desde")
         vig_hasta = val("vigencia_hasta")
         id_conv_cli = val("id_convenio_cliente")
-        conv_rs = val("Convenio_redsalud")
+        conv_rs_raw = val("Convenio_redsalud")
+        conv_rs = conv_rs_raw if conv_rs_raw else etiqueta_origen
         cod_lugar_his = val("código_lugar_his")
 
         if es_hmq and cols_hmq:
@@ -320,7 +355,7 @@ def procesar_dataframe(df_raw, etiqueta_origen):
                     glosa_rol = f"{glosa_base} - {rol_nombre}".strip(" -")
                     registros.append([
                         filial, sociedad, cliente, contrato, id_lic, centro, anio,
-                        tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_rol,
+                        tipo_arancel_val, cod_rs, cod_cli, cod_fon, glosa_rol,
                         "HMQ", indexador, monto_rol, ambito, recargo, porc_recargo,
                         vig_desde, vig_hasta, id_conv_cli, conv_rs, cod_lugar_his
                     ])
@@ -329,7 +364,7 @@ def procesar_dataframe(df_raw, etiqueta_origen):
         precio = parsear_monto(val("precio_total"))
         registros.append([
             filial, sociedad, cliente, contrato, id_lic, centro, anio,
-            tipo_arancel_origen, cod_rs, cod_cli, cod_fon, glosa_base,
+            tipo_arancel_val, cod_rs, cod_cli, cod_fon, glosa_base,
             tipo_prest, indexador, precio, ambito, recargo, porc_recargo,
             vig_desde, vig_hasta, id_conv_cli, conv_rs, cod_lugar_his
         ])
@@ -378,14 +413,14 @@ def consolidar_aranceles():
 
         if ruta.lower().endswith(".csv"):
             df_csv = leer_csv_robusto(ruta)
-            filas_f = procesar_dataframe(df_csv, nombre_sin_ext)
+            filas_f = procesar_dataframe(df_csv, nombre_sin_ext, nombre_sin_ext)
             print(f"  -> [CSV] {nombre_sin_ext}: {len(filas_f)} registros", flush=True)
             todas_las_filas.extend(filas_f)
         else:
             xls = pd.ExcelFile(ruta)
             for hoja_xls in xls.sheet_names:
                 df_xls = pd.read_excel(xls, sheet_name=hoja_xls, dtype=str, keep_default_na=False)
-                filas_h = procesar_dataframe(df_xls, hoja_xls.strip())
+                filas_h = procesar_dataframe(df_xls, hoja_xls.strip(), nombre_sin_ext)
                 print(f"  -> [XLSX] {nombre_archivo} [{hoja_xls}]: {len(filas_h)} registros", flush=True)
                 todas_las_filas.extend(filas_h)
 
