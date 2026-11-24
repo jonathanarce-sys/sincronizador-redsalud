@@ -9,10 +9,9 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. CONFIGURACIÓN Y ESQUEMA DE 23 COLUMNAS
 # ==========================================
-SPREADSHEET_ID_ARANCELES = os.environ.get(
-    "SPREADSHEET_ID_ARANCELES",
-    "1Lpuc3XXjss5QAhlmz7cuYUMmqlto7yLVpe_up8Yr6Ek"
-).strip()
+# Si tienes el ID exacto del Google Sheet de Aranceles, puedes pegarlo aquí entre comillas.
+# Si lo dejas vacío (""), el script buscará automáticamente en Drive el libro que contiene las hojas de aranceles.
+SPREADSHEET_ID_ARANCELES = os.environ.get("SPREADSHEET_ID_ARANCELES", "").strip()
 
 HOJA_DESTINO = "RAW_Data_Ingesta"
 
@@ -59,7 +58,6 @@ ENCABEZADOS_RAW_INGESTA = [
     "código_lugar_his",
 ]
 
-# Roles quirúrgicos HMQ para despivotado vertical
 ROLES_HMQ = [
     ("1º CIR", ["1º CIR", "1° CIR", "1ER CIR", "PRIMER CIRUJANO", "CIRUJANO 1"]),
     ("2º CIR", ["2º CIR", "2° CIR", "2DO CIR", "SEGUNDO CIRUJANO", "CIRUJANO 2"]),
@@ -69,7 +67,6 @@ ROLES_HMQ = [
     ("ARSENALERA", ["ARSENALERA", "ARSENALERIA", "ARSENALERO"]),
 ]
 
-# Alias flexibles para mapear encabezados de distintas hojas de gestión
 ALIAS_COLUMNAS = {
     "filial": ["FILIAL", "CLINICA", "CLÍNICA", "SEDE_FILIAL"],
     "sociedad": ["SOCIEDAD", "RAZON SOCIAL", "RAZÓN SOCIAL", "RUT SOCIEDAD"],
@@ -138,9 +135,30 @@ def norm_txt(s):
     s = unicodedata.normalize("NFD", str(s or "")).encode("ascii", "ignore").decode("utf-8")
     return re.sub(r"\s+", " ", s).strip().upper()
 
+def abrir_planilla_aranceles(client):
+    if SPREADSHEET_ID_ARANCELES:
+        return client.open_by_key(SPREADSHEET_ID_ARANCELES)
+
+    print("Buscando automáticamente la planilla de Aranceles compartida con la Service Account...", flush=True)
+    hojas_objetivo_norm = {norm_txt(h) for h in HOJAS_GESTION_ARANCELES}
+    mejor_ss = None
+    max_coincidencias = 0
+
+    for ss_cand in client.openall():
+        titulos = {norm_txt(w.title) for w in ss_cand.worksheets()}
+        coincidencias = len(titulos.intersection(hojas_objetivo_norm))
+        if coincidencias > max_coincidencias:
+            max_coincidencias = coincidencias
+            mejor_ss = ss_cand
+
+    if mejor_ss and max_coincidencias > 0:
+        print(f"Planilla detectada: '{mejor_ss.title}' (ID: {mejor_ss.id}) con {max_coincidencias} hojas de gestión.", flush=True)
+        return mejor_ss
+
+    raise ValueError("No se encontró ninguna planilla con las hojas de gestión de aranceles. Configura SPREADSHEET_ID_ARANCELES.")
+
 def limpiar_codigo_redsalud(val):
     s = str(val or "").strip()
-    # Elimina etiquetas o sufijos tipo TC / [TC] / (TC)
     s = re.sub(r"[\[\(\-]?\s*\bTC\b\s*[\]\)]?", "", s, flags=re.IGNORECASE).strip()
     return s
 
@@ -192,12 +210,10 @@ def mapear_indices_hoja(cabecera):
     for col_dest, aliases in ALIAS_COLUMNAS.items():
         aliases_norm = [norm_txt(a) for a in aliases]
         idx_encontrado = None
-        # 1. Coincidencia exacta
         for a in aliases_norm:
             if a in cab_norm:
                 idx_encontrado = cab_norm.index(a)
                 break
-        # 2. Coincidencia parcial controlada si no hubo exacta
         if idx_encontrado is None:
             for a in aliases_norm:
                 if len(a) >= 5:
@@ -210,7 +226,6 @@ def mapear_indices_hoja(cabecera):
         if idx_encontrado is not None:
             indices[col_dest] = idx_encontrado
 
-    # Detectar columnas HMQ si existen
     indices_hmq = {}
     for rol_std, aliases_rol in ROLES_HMQ:
         aliases_r_norm = [norm_txt(a) for a in aliases_rol]
@@ -238,7 +253,6 @@ def procesar_hoja_arancel(ws):
     if len(filas) < 2:
         return []
 
-    # Detectar fila de encabezados (fila 1 o fila 2 si hay título superior)
     fila_cab_idx = 0
     for r_i in range(min(4, len(filas))):
         linea_u = " ".join(norm_txt(x) for x in filas[r_i])
@@ -262,7 +276,6 @@ def procesar_hoja_arancel(ws):
         cod_cli = obtener_celda(r, idx_map, "código_cliente")
         cod_fon = obtener_celda(r, idx_map, "código_fonasa")
 
-        # Saltar filas vacías o subtotales sin prestación ni código
         if not glosa_base and not cod_rs and not cod_fon and not cod_cli:
             continue
         if norm_txt(glosa_base) in ("TOTAL", "SUBTOTAL", "GLOSA", "GLOSA_PRESTACION"):
@@ -275,7 +288,6 @@ def procesar_hoja_arancel(ws):
         id_lic = obtener_celda(r, idx_map, "id_licitación")
         centro = obtener_celda(r, idx_map, "centro")
         anio = obtener_celda(r, idx_map, "año", meta["año"])
-        # Trazabilidad exacta de la hoja de gestión
         tipo_arancel_origen = nombre_hoja
         tipo_prest = obtener_celda(r, idx_map, "tipo_prestación", meta["tipo_prestación"])
         indexador = obtener_celda(r, idx_map, "Indexador")
@@ -288,7 +300,6 @@ def procesar_hoja_arancel(ws):
         conv_rs = obtener_celda(r, idx_map, "Convenio_redsalud")
         cod_lugar_his = obtener_celda(r, idx_map, "código_lugar_his")
 
-        # Caso A: Despivotado vertical HMQ (1º CIR, 2º CIR, 3º CIR, 4º CIR, ANEST, ARSENALERA)
         if es_hoja_hmq and indices_hmq:
             roles_con_valor = []
             for rol_nombre, col_i in indices_hmq.items():
@@ -308,7 +319,6 @@ def procesar_hoja_arancel(ws):
                     ])
                 continue
 
-        # Caso B: Prestación estándar (fila única)
         precio = parsear_monto(obtener_celda(r, idx_map, "precio_total"))
         registros_salida.append([
             filial, sociedad, cliente, contrato, id_lic, centro, anio,
@@ -323,4 +333,38 @@ def procesar_hoja_arancel(ws):
 # 4. ORQUESTADOR PRINCIPAL
 # ==========================================
 def consolidar_aranceles():
-    print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES -> RAW_Data_Ingesta ===", flush=True)
+    print("=== INICIANDO CONSOLIDACIÓN DE ARANCELES -> RAW_Data_Ingesta (23 COLS) ===", flush=True)
+    client, sa_email = obtener_cliente_gspread()
+    print(f"Autenticado como: {sa_email}", flush=True)
+
+    ss = abrir_planilla_aranceles(client)
+    mapa_hojas = {w.title.strip(): w for w in ss.worksheets()}
+
+    todas_las_filas = []
+    for nombre_hoja in HOJAS_GESTION_ARANCELES:
+        ws = mapa_hojas.get(nombre_hoja)
+        if not ws:
+            ws = next((w for w in ss.worksheets() if norm_txt(w.title) == norm_txt(nombre_hoja)), None)
+        if not ws:
+            print(f"  [AVISO] No se encontró la hoja: '{nombre_hoja}'", flush=True)
+            continue
+
+        filas_hoja = procesar_hoja_arancel(ws)
+        print(f"  -> {ws.title}: {len(filas_hoja)} registros procesados", flush=True)
+        todas_las_filas.extend(filas_hoja)
+
+    ws_dest = next((w for w in ss.worksheets() if norm_txt(w.title) == norm_txt(HOJA_DESTINO)), None)
+    if not ws_dest:
+        ws_dest = ss.add_worksheet(title=HOJA_DESTINO, rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
+
+    ws_dest.clear()
+    ws_dest.resize(rows=max(len(todas_las_filas) + 50, 500), cols=len(ENCABEZADOS_RAW_INGESTA))
+
+    matriz_final = [ENCABEZADOS_RAW_INGESTA] + todas_las_filas
+    col_fin = gspread.utils.rowcol_to_a1(1, len(ENCABEZADOS_RAW_INGESTA)).replace("1", "")
+    ws_dest.update(range_name=f"A1:{col_fin}{len(matriz_final)}", values=matriz_final)
+
+    print(f"=== CONSOLIDACIÓN COMPLETADA: {len(todas_las_filas)} registros en '{HOJA_DESTINO}' (23 columnas: A:{col_fin}) ===", flush=True)
+
+if __name__ == "__main__":
+    consolidar_aranceles()
